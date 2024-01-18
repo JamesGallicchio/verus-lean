@@ -10,3 +10,5 @@ lean_lib «VerusLean» where
 @[default_target]
 lean_exe «verus-lean» where
   root := `Main
+
+require «lean-slides» from git "https://github.com/0art0/lean-slides"@"master"

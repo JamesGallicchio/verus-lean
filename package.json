@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "browser-sync": "^3.0.2",
+    "browsersync": "^0.0.1-security"
+  }
+}
