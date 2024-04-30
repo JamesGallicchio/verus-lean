@@ -1,0 +1,1264 @@
+[
+  {
+    "name": {
+      "path": {
+        "krate": "main",
+        "segments": [
+          "test"
+        ]
+      }
+    },
+    "proxy": null,
+    "kind": "Static",
+    "visibility": {
+      "restricted_to": null
+    },
+    "owning_module": {
+      "krate": "main",
+      "segments": []
+    },
+    "mode": "Exec",
+    "fuel": 1,
+    "typ_params": [],
+    "typ_bounds": [],
+    "params": [
+      {
+        "span": {
+          "id": 19,
+          "data": [
+            11908895228259955224,
+            188978561079
+          ],
+          "as_string": "src/main.rs:5:13: 5:24 (#0)"
+        },
+        "x": {
+          "name": [
+            "x",
+            {
+              "RustcId": 2
+            }
+          ],
+          "typ": {
+            "Int": {
+              "U": 32
+            }
+          },
+          "mode": "Exec",
+          "is_mut": true,
+          "unwrapped_info": null
+        }
+      }
+    ],
+    "ret": {
+      "span": {
+        "id": 20,
+        "data": [
+          11908895228259955224,
+          279172874308
+        ],
+        "as_string": "src/main.rs:5:34: 5:37 (#0)"
+      },
+      "x": {
+        "name": [
+          "y",
+          {
+            "RustcId": 10
+          }
+        ],
+        "typ": {
+          "Int": {
+            "U": 32
+          }
+        },
+        "mode": "Exec",
+        "is_mut": false,
+        "unwrapped_info": null
+      }
+    },
+    "require": [],
+    "ensure": [
+      {
+        "span": {
+          "id": 8,
+          "data": [
+            11908895228259955224,
+            335007449206
+          ],
+          "as_string": "src/main.rs:6:9: 9:3 (#0)"
+        },
+        "typ": "Bool",
+        "x": {
+          "Block": [
+            [
+              {
+                "span": {
+                  "id": 4,
+                  "data": [
+                    11908895228259955224,
+                    382252089434
+                  ],
+                  "as_string": "src/main.rs:7:9: 7:10 (#0)"
+                },
+                "x": {
+                  "Decl": {
+                    "pattern": {
+                      "span": {
+                        "id": 3,
+                        "data": [
+                          11908895228259955224,
+                          382252089434
+                        ],
+                        "as_string": "src/main.rs:7:9: 7:10 (#0)"
+                      },
+                      "typ": {
+                        "Int": {
+                          "U": 32
+                        }
+                      },
+                      "x": {
+                        "Var": {
+                          "name": [
+                            "v",
+                            {
+                              "RustcId": 23
+                            }
+                          ],
+                          "mutable": false
+                        }
+                      }
+                    },
+                    "mode": "Exec",
+                    "init": {
+                      "span": {
+                        "id": 2,
+                        "data": [
+                          11908895228259955224,
+                          425201762404
+                        ],
+                        "as_string": "src/main.rs:7:19: 7:20 (#0)"
+                      },
+                      "typ": {
+                        "Int": {
+                          "U": 32
+                        }
+                      },
+                      "x": {
+                        "Const": {
+                          "Int": [
+                            1,
+                            [
+                              5
+                            ]
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            {
+              "span": {
+                "id": 7,
+                "data": [
+                  11908895228259955224,
+                  455266533491
+                ],
+                "as_string": "src/main.rs:8:5: 8:14 (#0)"
+              },
+              "typ": "Bool",
+              "x": {
+                "Binary": [
+                  {
+                    "Eq": "Spec"
+                  },
+                  {
+                    "span": {
+                      "id": 5,
+                      "data": [
+                        11908895228259955224,
+                        463856468077
+                      ],
+                      "as_string": "src/main.rs:8:7: 8:8 (#0)"
+                    },
+                    "typ": {
+                      "Int": {
+                        "U": 32
+                      }
+                    },
+                    "x": {
+                      "Var": [
+                        "x",
+                        {
+                          "RustcId": 2
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "span": {
+                      "id": 6,
+                      "data": [
+                        11908895228259955224,
+                        489626271859
+                      ],
+                      "as_string": "src/main.rs:8:13: 8:14 (#0)"
+                    },
+                    "typ": {
+                      "Int": {
+                        "U": 32
+                      }
+                    },
+                    "x": {
+                      "Var": [
+                        "v",
+                        {
+                          "RustcId": 23
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "decrease": [],
+    "decrease_when": null,
+    "decrease_by": null,
+    "broadcast_forall": null,
+    "fndef_axioms": null,
+    "mask_spec": null,
+    "item_kind": "Function",
+    "publish": null,
+    "attrs": {
+      "uses_ghost_blocks": true,
+      "inline": false,
+      "hidden": [],
+      "broadcast_forall": false,
+      "no_auto_trigger": false,
+      "custom_req_err": null,
+      "autospec": null,
+      "bit_vector": false,
+      "atomic": false,
+      "integer_ring": false,
+      "is_decrease_by": false,
+      "check_recommends": false,
+      "nonlinear": false,
+      "spinoff_prover": false,
+      "memoize": false,
+      "rlimit": null,
+      "print_zero_args": false,
+      "print_as_method": false,
+      "prophecy_dependent": false,
+      "size_of_broadcast_proof": false
+    },
+    "body": {
+      "span": {
+        "id": 18,
+        "data": [
+          11908895228259955224,
+          511101108372
+        ],
+        "as_string": "src/main.rs:10:1: 13:2 (#0)"
+      },
+      "typ": {
+        "Decorate": [
+          "Never",
+          {
+            "Tuple": []
+          }
+        ]
+      },
+      "x": {
+        "Block": [
+          [
+            {
+              "span": {
+                "id": 14,
+                "data": [
+                  11908895228259955224,
+                  536870912131
+                ],
+                "as_string": "src/main.rs:11:5: 11:11 (#0)"
+              },
+              "x": {
+                "Expr": {
+                  "span": {
+                    "id": 13,
+                    "data": [
+                      11908895228259955224,
+                      536870912131
+                    ],
+                    "as_string": "src/main.rs:11:5: 11:11 (#0)"
+                  },
+                  "typ": {
+                    "Tuple": []
+                  },
+                  "x": {
+                    "Assign": {
+                      "init_not_mut": false,
+                      "lhs": {
+                        "span": {
+                          "id": 11,
+                          "data": [
+                            11908895228259955224,
+                            541165879423
+                          ],
+                          "as_string": "src/main.rs:11:6: 11:7 (#0)"
+                        },
+                        "typ": {
+                          "Int": {
+                            "U": 32
+                          }
+                        },
+                        "x": {
+                          "VarLoc": [
+                            "x",
+                            {
+                              "RustcId": 2
+                            }
+                          ]
+                        }
+                      },
+                      "rhs": {
+                        "span": {
+                          "id": 12,
+                          "data": [
+                            11908895228259955224,
+                            558345748611
+                          ],
+                          "as_string": "src/main.rs:11:10: 11:11 (#0)"
+                        },
+                        "typ": {
+                          "Int": {
+                            "U": 32
+                          }
+                        },
+                        "x": {
+                          "Const": {
+                            "Int": [
+                              1,
+                              [
+                                5
+                              ]
+                            ]
+                          }
+                        }
+                      },
+                      "op": null
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "span": {
+                "id": 17,
+                "data": [
+                  11908895228259955224,
+                  588410519697
+                ],
+                "as_string": "src/main.rs:12:5: 12:13 (#0)"
+              },
+              "x": {
+                "Expr": {
+                  "span": {
+                    "id": 16,
+                    "data": [
+                      11908895228259955224,
+                      588410519697
+                    ],
+                    "as_string": "src/main.rs:12:5: 12:13 (#0)"
+                  },
+                  "typ": {
+                    "Decorate": [
+                      "Never",
+                      {
+                        "Tuple": []
+                      }
+                    ]
+                  },
+                  "x": {
+                    "Return": {
+                      "span": {
+                        "id": 15,
+                        "data": [
+                          11908895228259955224,
+                          618475290769
+                        ],
+                        "as_string": "src/main.rs:12:12: 12:13 (#0)"
+                      },
+                      "typ": {
+                        "Int": {
+                          "U": 32
+                        }
+                      },
+                      "x": {
+                        "Const": {
+                          "Int": [
+                            0,
+                            []
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          null
+        ]
+      }
+    },
+    "extra_dependencies": []
+  },
+  {
+    "name": {
+      "path": {
+        "krate": "main",
+        "segments": [
+          "main"
+        ]
+      }
+    },
+    "proxy": null,
+    "kind": "Static",
+    "visibility": {
+      "restricted_to": null
+    },
+    "owning_module": {
+      "krate": "main",
+      "segments": []
+    },
+    "mode": "Exec",
+    "fuel": 1,
+    "typ_params": [],
+    "typ_bounds": [],
+    "params": [],
+    "ret": {
+      "span": {
+        "id": 50,
+        "data": [
+          11908895228259955224,
+          738734375098
+        ],
+        "as_string": "src/main.rs:15:23: 15:37 (#0)"
+      },
+      "x": {
+        "name": [
+          "x",
+          {
+            "RustcId": 8
+          }
+        ],
+        "typ": {
+          "Datatype": [
+            {
+              "krate": "core",
+              "segments": [
+                "result",
+                "Result"
+              ]
+            },
+            [
+              {
+                "Tuple": []
+              },
+              {
+                "Int": {
+                  "I": 32
+                }
+              }
+            ],
+            []
+          ]
+        },
+        "mode": "Exec",
+        "is_mut": false,
+        "unwrapped_info": null
+      }
+    },
+    "require": [],
+    "ensure": [
+      {
+        "span": {
+          "id": 22,
+          "data": [
+            11908895228259955224,
+            841813590216
+          ],
+          "as_string": "src/main.rs:16:9: 16:13 (#0)"
+        },
+        "typ": "Bool",
+        "x": {
+          "Const": {
+            "Bool": true
+          }
+        }
+      }
+    ],
+    "decrease": [],
+    "decrease_when": null,
+    "decrease_by": null,
+    "broadcast_forall": null,
+    "fndef_axioms": null,
+    "mask_spec": null,
+    "item_kind": "Function",
+    "publish": null,
+    "attrs": {
+      "uses_ghost_blocks": true,
+      "inline": false,
+      "hidden": [],
+      "broadcast_forall": false,
+      "no_auto_trigger": false,
+      "custom_req_err": null,
+      "autospec": null,
+      "bit_vector": false,
+      "atomic": false,
+      "integer_ring": false,
+      "is_decrease_by": false,
+      "check_recommends": false,
+      "nonlinear": false,
+      "spinoff_prover": false,
+      "memoize": false,
+      "rlimit": null,
+      "print_zero_args": true,
+      "print_as_method": false,
+      "prophecy_dependent": false,
+      "size_of_broadcast_proof": false
+    },
+    "body": {
+      "span": {
+        "id": 49,
+        "data": [
+          11908895228259955224,
+          863288426799
+        ],
+        "as_string": "src/main.rs:17:1: 23:2 (#0)"
+      },
+      "typ": {
+        "Datatype": [
+          {
+            "krate": "core",
+            "segments": [
+              "result",
+              "Result"
+            ]
+          },
+          [
+            {
+              "Tuple": []
+            },
+            {
+              "Int": {
+                "I": 32
+              }
+            }
+          ],
+          []
+        ]
+      },
+      "x": {
+        "Block": [
+          [],
+          {
+            "span": {
+              "id": 48,
+              "data": [
+                11908895228259955224,
+                889058230573
+              ],
+              "as_string": "src/main.rs:18:5: 22:6 (#0)"
+            },
+            "typ": {
+              "Datatype": [
+                {
+                  "krate": "core",
+                  "segments": [
+                    "result",
+                    "Result"
+                  ]
+                },
+                [
+                  {
+                    "Tuple": []
+                  },
+                  {
+                    "Int": {
+                      "I": 32
+                    }
+                  }
+                ],
+                []
+              ]
+            },
+            "x": {
+              "If": [
+                {
+                  "span": {
+                    "id": 37,
+                    "data": [
+                      11908895228259955224,
+                      901943132394
+                    ],
+                    "as_string": "src/main.rs:18:8: 18:32 (#0)"
+                  },
+                  "typ": "Bool",
+                  "x": {
+                    "Binary": [
+                      {
+                        "Eq": "Exec"
+                      },
+                      {
+                        "span": {
+                          "id": 30,
+                          "data": [
+                            11908895228259955224,
+                            901943132380
+                          ],
+                          "as_string": "src/main.rs:18:8: 18:18 (#0)"
+                        },
+                        "typ": {
+                          "Int": {
+                            "I": 32
+                          }
+                        },
+                        "x": {
+                          "Call": [
+                            {
+                              "Fun": [
+                                "Static",
+                                {
+                                  "path": {
+                                    "krate": "vstd",
+                                    "segments": [
+                                      "array",
+                                      "array_index_get"
+                                    ]
+                                  }
+                                },
+                                [
+                                  {
+                                    "Int": {
+                                      "I": 32
+                                    }
+                                  },
+                                  {
+                                    "ConstInt": [
+                                      1,
+                                      [
+                                        3
+                                      ]
+                                    ]
+                                  }
+                                ],
+                                [
+                                  {
+                                    "TraitImplPath": {
+                                      "krate": null,
+                                      "segments": [
+                                        "fun%0"
+                                      ]
+                                    }
+                                  }
+                                ],
+                                "Final"
+                              ]
+                            },
+                            [
+                              {
+                                "span": {
+                                  "id": 28,
+                                  "data": [
+                                    11908895228259955224,
+                                    901943132377
+                                  ],
+                                  "as_string": "src/main.rs:18:8: 18:15 (#0)"
+                                },
+                                "typ": {
+                                  "Primitive": [
+                                    "Array",
+                                    [
+                                      {
+                                        "Int": {
+                                          "I": 32
+                                        }
+                                      },
+                                      {
+                                        "ConstInt": [
+                                          1,
+                                          [
+                                            3
+                                          ]
+                                        ]
+                                      }
+                                    ]
+                                  ]
+                                },
+                                "x": {
+                                  "ArrayLiteral": [
+                                    {
+                                      "span": {
+                                        "id": 25,
+                                        "data": [
+                                          11908895228259955224,
+                                          906238099668
+                                        ],
+                                        "as_string": "src/main.rs:18:9: 18:10 (#0)"
+                                      },
+                                      "typ": {
+                                        "Int": {
+                                          "I": 32
+                                        }
+                                      },
+                                      "x": {
+                                        "Const": {
+                                          "Int": [
+                                            1,
+                                            [
+                                              1
+                                            ]
+                                          ]
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "span": {
+                                        "id": 26,
+                                        "data": [
+                                          11908895228259955224,
+                                          914828034262
+                                        ],
+                                        "as_string": "src/main.rs:18:11: 18:12 (#0)"
+                                      },
+                                      "typ": {
+                                        "Int": {
+                                          "I": 32
+                                        }
+                                      },
+                                      "x": {
+                                        "Const": {
+                                          "Int": [
+                                            1,
+                                            [
+                                              2
+                                            ]
+                                          ]
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "span": {
+                                        "id": 27,
+                                        "data": [
+                                          11908895228259955224,
+                                          923417968856
+                                        ],
+                                        "as_string": "src/main.rs:18:13: 18:14 (#0)"
+                                      },
+                                      "typ": {
+                                        "Int": {
+                                          "I": 32
+                                        }
+                                      },
+                                      "x": {
+                                        "Const": {
+                                          "Int": [
+                                            1,
+                                            [
+                                              3
+                                            ]
+                                          ]
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "span": {
+                                  "id": 29,
+                                  "data": [
+                                    11908895228259955224,
+                                    936302870747
+                                  ],
+                                  "as_string": "src/main.rs:18:16: 18:17 (#0)"
+                                },
+                                "typ": {
+                                  "Int": "USize"
+                                },
+                                "x": {
+                                  "Const": {
+                                    "Int": [
+                                      1,
+                                      [
+                                        2
+                                      ]
+                                    ]
+                                  }
+                                }
+                              }
+                            ]
+                          ]
+                        }
+                      },
+                      {
+                        "span": {
+                          "id": 36,
+                          "data": [
+                            11908895228259955224,
+                            962072674538
+                          ],
+                          "as_string": "src/main.rs:18:22: 18:32 (#0)"
+                        },
+                        "typ": {
+                          "Int": {
+                            "I": 32
+                          }
+                        },
+                        "x": {
+                          "Call": [
+                            {
+                              "Fun": [
+                                "Static",
+                                {
+                                  "path": {
+                                    "krate": "vstd",
+                                    "segments": [
+                                      "array",
+                                      "array_index_get"
+                                    ]
+                                  }
+                                },
+                                [
+                                  {
+                                    "Int": {
+                                      "I": 32
+                                    }
+                                  },
+                                  {
+                                    "ConstInt": [
+                                      1,
+                                      [
+                                        3
+                                      ]
+                                    ]
+                                  }
+                                ],
+                                [
+                                  {
+                                    "TraitImplPath": {
+                                      "krate": null,
+                                      "segments": [
+                                        "fun%0"
+                                      ]
+                                    }
+                                  }
+                                ],
+                                "Final"
+                              ]
+                            },
+                            [
+                              {
+                                "span": {
+                                  "id": 34,
+                                  "data": [
+                                    11908895228259955224,
+                                    962072674535
+                                  ],
+                                  "as_string": "src/main.rs:18:22: 18:29 (#0)"
+                                },
+                                "typ": {
+                                  "Primitive": [
+                                    "Array",
+                                    [
+                                      {
+                                        "Int": {
+                                          "I": 32
+                                        }
+                                      },
+                                      {
+                                        "ConstInt": [
+                                          1,
+                                          [
+                                            3
+                                          ]
+                                        ]
+                                      }
+                                    ]
+                                  ]
+                                },
+                                "x": {
+                                  "ArrayLiteral": [
+                                    {
+                                      "span": {
+                                        "id": 31,
+                                        "data": [
+                                          11908895228259955224,
+                                          966367641826
+                                        ],
+                                        "as_string": "src/main.rs:18:23: 18:24 (#0)"
+                                      },
+                                      "typ": {
+                                        "Int": {
+                                          "I": 32
+                                        }
+                                      },
+                                      "x": {
+                                        "Const": {
+                                          "Int": [
+                                            1,
+                                            [
+                                              3
+                                            ]
+                                          ]
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "span": {
+                                        "id": 32,
+                                        "data": [
+                                          11908895228259955224,
+                                          974957576420
+                                        ],
+                                        "as_string": "src/main.rs:18:25: 18:26 (#0)"
+                                      },
+                                      "typ": {
+                                        "Int": {
+                                          "I": 32
+                                        }
+                                      },
+                                      "x": {
+                                        "Const": {
+                                          "Int": [
+                                            1,
+                                            [
+                                              4
+                                            ]
+                                          ]
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "span": {
+                                        "id": 33,
+                                        "data": [
+                                          11908895228259955224,
+                                          983547511014
+                                        ],
+                                        "as_string": "src/main.rs:18:27: 18:28 (#0)"
+                                      },
+                                      "typ": {
+                                        "Int": {
+                                          "I": 32
+                                        }
+                                      },
+                                      "x": {
+                                        "Const": {
+                                          "Int": [
+                                            1,
+                                            [
+                                              5
+                                            ]
+                                          ]
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "span": {
+                                  "id": 35,
+                                  "data": [
+                                    11908895228259955224,
+                                    996432412905
+                                  ],
+                                  "as_string": "src/main.rs:18:30: 18:31 (#0)"
+                                },
+                                "typ": {
+                                  "Int": "USize"
+                                },
+                                "x": {
+                                  "Const": {
+                                    "Int": [
+                                      0,
+                                      []
+                                    ]
+                                  }
+                                }
+                              }
+                            ]
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "span": {
+                    "id": 42,
+                    "data": [
+                      11908895228259955224,
+                      1009317314825
+                    ],
+                    "as_string": "src/main.rs:18:33: 20:6 (#0)"
+                  },
+                  "typ": {
+                    "Decorate": [
+                      "Never",
+                      {
+                        "Tuple": []
+                      }
+                    ]
+                  },
+                  "x": {
+                    "Block": [
+                      [
+                        {
+                          "span": {
+                            "id": 41,
+                            "data": [
+                              11908895228259955224,
+                              1052266987778
+                            ],
+                            "as_string": "src/main.rs:19:9: 19:22 (#0)"
+                          },
+                          "x": {
+                            "Expr": {
+                              "span": {
+                                "id": 40,
+                                "data": [
+                                  11908895228259955224,
+                                  1052266987778
+                                ],
+                                "as_string": "src/main.rs:19:9: 19:22 (#0)"
+                              },
+                              "typ": {
+                                "Decorate": [
+                                  "Never",
+                                  {
+                                    "Tuple": []
+                                  }
+                                ]
+                              },
+                              "x": {
+                                "Return": {
+                                  "span": {
+                                    "id": 39,
+                                    "data": [
+                                      11908895228259955224,
+                                      1082331758850
+                                    ],
+                                    "as_string": "src/main.rs:19:16: 19:22 (#0)"
+                                  },
+                                  "typ": {
+                                    "Datatype": [
+                                      {
+                                        "krate": "core",
+                                        "segments": [
+                                          "result",
+                                          "Result"
+                                        ]
+                                      },
+                                      [
+                                        {
+                                          "Tuple": []
+                                        },
+                                        {
+                                          "Int": {
+                                            "I": 32
+                                          }
+                                        }
+                                      ],
+                                      []
+                                    ]
+                                  },
+                                  "x": {
+                                    "Ctor": [
+                                      {
+                                        "krate": "core",
+                                        "segments": [
+                                          "result",
+                                          "Result"
+                                        ]
+                                      },
+                                      "Ok",
+                                      [
+                                        {
+                                          "name": "0",
+                                          "a": {
+                                            "span": {
+                                              "id": 38,
+                                              "data": [
+                                                11908895228259955224,
+                                                1095216660737
+                                              ],
+                                              "as_string": "src/main.rs:19:19: 19:21 (#0)"
+                                            },
+                                            "typ": {
+                                              "Tuple": []
+                                            },
+                                            "x": {
+                                              "Tuple": []
+                                            }
+                                          }
+                                        }
+                                      ],
+                                      null
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      null
+                    ]
+                  }
+                },
+                {
+                  "span": {
+                    "id": 47,
+                    "data": [
+                      11908895228259955224,
+                      1163936137517
+                    ],
+                    "as_string": "src/main.rs:20:12: 22:6 (#0)"
+                  },
+                  "typ": {
+                    "Decorate": [
+                      "Never",
+                      {
+                        "Tuple": []
+                      }
+                    ]
+                  },
+                  "x": {
+                    "Block": [
+                      [
+                        {
+                          "span": {
+                            "id": 46,
+                            "data": [
+                              11908895228259955224,
+                              1206885810470
+                            ],
+                            "as_string": "src/main.rs:21:9: 21:22 (#0)"
+                          },
+                          "x": {
+                            "Expr": {
+                              "span": {
+                                "id": 45,
+                                "data": [
+                                  11908895228259955224,
+                                  1206885810470
+                                ],
+                                "as_string": "src/main.rs:21:9: 21:22 (#0)"
+                              },
+                              "typ": {
+                                "Decorate": [
+                                  "Never",
+                                  {
+                                    "Tuple": []
+                                  }
+                                ]
+                              },
+                              "x": {
+                                "Return": {
+                                  "span": {
+                                    "id": 44,
+                                    "data": [
+                                      11908895228259955224,
+                                      1236950581542
+                                    ],
+                                    "as_string": "src/main.rs:21:16: 21:22 (#0)"
+                                  },
+                                  "typ": {
+                                    "Datatype": [
+                                      {
+                                        "krate": "core",
+                                        "segments": [
+                                          "result",
+                                          "Result"
+                                        ]
+                                      },
+                                      [
+                                        {
+                                          "Tuple": []
+                                        },
+                                        {
+                                          "Int": {
+                                            "I": 32
+                                          }
+                                        }
+                                      ],
+                                      []
+                                    ]
+                                  },
+                                  "x": {
+                                    "Ctor": [
+                                      {
+                                        "krate": "core",
+                                        "segments": [
+                                          "result",
+                                          "Result"
+                                        ]
+                                      },
+                                      "Err",
+                                      [
+                                        {
+                                          "name": "0",
+                                          "a": {
+                                            "span": {
+                                              "id": 43,
+                                              "data": [
+                                                11908895228259955224,
+                                                1254130450725
+                                              ],
+                                              "as_string": "src/main.rs:21:20: 21:21 (#0)"
+                                            },
+                                            "typ": {
+                                              "Int": {
+                                                "I": 32
+                                              }
+                                            },
+                                            "x": {
+                                              "Const": {
+                                                "Int": [
+                                                  0,
+                                                  []
+                                                ]
+                                              }
+                                            }
+                                          }
+                                        }
+                                      ],
+                                      null
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      null
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "extra_dependencies": []
+  }
+]
