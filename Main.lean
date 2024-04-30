@@ -1,18 +1,26 @@
-import Lean.Data.Json
+import Lean
 import VerusLean
 
 open VerusLean
 
+opaque STOP_ON_ERROR : Bool := true
 
 unsafe def main (args : List String) : IO Unit := do
   let path := args[0]!
   let resPath := args[1]!
   IO.println s!"Reading file {path}"
   let json_str ← IO.FS.readFile path
-  let fns ← IO.ofExcept <| do
-    let json ← Lean.Json.parse json_str
-    let arr ← json.getArr?
-    arr.mapM Function.fromJson?
+  let fns ← do
+    let arr ← IO.ofExcept <| (do (← Lean.Json.parse json_str).getArr?)
+    arr.filterMapM fun j => do
+      match Function.fromJson? j with
+      | .ok j => return some j
+      | .error e =>
+        if STOP_ON_ERROR then
+          throw (.userError e)
+        else
+          IO.println e
+          return none
   IO.println s!"Converting functions to Lean syntax"
   let fns' ← Lean.withImportModules
     (imports := #[])
@@ -27,7 +35,15 @@ unsafe def main (args : List String) : IO Unit := do
       (s := {
         env
       })
-      (Lean.liftCommandElabM <| (fns.mapM (fun f => Function.toSyntax f)))
+      (fns.filterMapM (fun f => do
+        IO.println s!"processing {f.id.segments}"
+        Lean.liftCommandElabM <| do
+        try
+          let syn ← Function.toSyntax f
+          return some syn
+        catch _ =>
+          return none
+      ))
   match fns' with
   | .error exc =>
     IO.println (← exc.toMessageData.toString)
@@ -36,5 +52,5 @@ unsafe def main (args : List String) : IO Unit := do
   let formatted : Lean.Format :=
     fns'.foldr (fun x acc => x.prettyPrint ++ .line ++ .line ++ acc)
       ""
-  IO.FS.writeFile resPath (formatted.pretty (width := 30))
+  IO.FS.writeFile resPath (formatted.pretty)
   IO.println s!"Finished!"
