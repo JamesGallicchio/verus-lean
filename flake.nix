@@ -18,8 +18,9 @@
       in rec {      
         devShell = pkgs.mkShell {
           shellHook = ''
-            PATH=/home/james/Projects/verus-lean/verus/source/target-verus/release:$PATH
             VERUS_Z3_PATH=$(whereis z3 | awk '{print $2}')
+            ( cd verus; source tools/activate; cd source; rm -f z3; ln -s $VERUS_Z3_PATH z3; vargo build --release )
+            PATH=$(realpath ./verus/source/target-verus/release):$PATH
           '';
           nativeBuildInputs = with pkgs; [
             rustup
