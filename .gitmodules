@@ -1,0 +1,3 @@
+[submodule "verus"]
+	path = verus
+	url = git@github.com:JamesGallicchio/verus.git
