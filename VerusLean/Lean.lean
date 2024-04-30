@@ -9,10 +9,14 @@ partial def Id.toSyntax (i : Id) : Ident :=
 
 partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
   match t with
-  | .int width =>
-    return mkIdent ↑("Int" ++ toString width)
-  | .uint width =>
-    return mkIdent ↑("UInt" ++ toString width)
+  | .int ityp =>
+    match ityp with
+    | .signed width =>
+      return mkIdent ↑("Int" ++ toString width)
+    | .unsigned width =>
+      return mkIdent ↑("UInt" ++ toString width)
+    | .inf =>
+      return mkIdent "Int"
   | .datatype id params => do
     `($(id.toSyntax) $(← params.toArray.mapM Typ.toSyntax)*)
   | .tuple tys => do

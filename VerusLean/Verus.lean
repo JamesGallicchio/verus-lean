@@ -15,22 +15,27 @@ def Id.fromJson? (j : Lean.Json) : Except String Id := do
   let segments ← j.getObjValAs? (List String) "segments"
   return {krate, segments}
 
+inductive Typ.Int
+| signed (width : Nat)
+| unsigned (width : Nat)
+| inf
+
 inductive Typ
-| uint (width : Nat)
-| int (width : Nat)
+| int : Typ.Int → Typ
 | tuple (typs : List Typ)
 | datatype (id : Id) (typs : List Typ)
 
 partial def Typ.fromJson? (j : Lean.Json) : Except String Typ :=
   match j.getObjVal? "Int" with
-  | Except.ok i => do
-    if (do i.getObjVal? "U").isOk then
-      let width ← i.getObjValAs? Nat "U"
-      return Typ.uint width
-    if (do i.getObjVal? "I").isOk then
-      let width ← i.getObjValAs? Nat "I"
-      return Typ.int width
-    throw s!"Type \"Int\" found but neither U nor I children:\n{i}"
+  | Except.ok i =>
+    Except.mapError ("Int Type: " ++ ·) do
+    if i == .str "Int" then
+      return Typ.int .inf
+    if let .ok width := i.getObjValAs? Nat "U" then
+      return Typ.int (.unsigned width)
+    if let .ok width := i.getObjValAs? Nat "I" then
+      return Typ.int (.signed width)
+    throw s!"Unrecognized int type:\n{i}"
   | Except.error _ =>
   match j.getObjVal? "Tuple" with
   | Except.ok tys => do
