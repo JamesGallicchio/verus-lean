@@ -54,11 +54,33 @@ instance : Lean.FromJson Typ where
   fromJson? := Typ.fromJson?
 
 inductive Const
-| int (val : Array Int)
+| int (val : Int)
 | bool (b : Bool)
+
+def Const.fromJson? (j : Lean.Json) : Except String Const :=
+  Except.mapError ("Const: " ++ ·) do
+    match j.getObjVal? "Int" with
+    | Except.ok j => do
+      let val ← j.getArrVal? 1
+      let val : Array Int ← Lean.FromJson.fromJson? val
+      return .int (val.foldr (· + (2^32) * ·) 0)
+    | Except.error _ =>
+    match j.getObjVal? "Bool" with
+    | Except.ok j => do
+      let b ← j.getBool?
+      return .bool b
+    | Except.error _ =>
+    throw s!"Unrecognized Const: {j}"
 
 inductive BinaryOp
 | eq
+| ne
+| lt
+| gt
+| le
+| ge
+| and
+| or
 
 def BinaryOp.fromJson? (j : Lean.Json) : Except String BinaryOp :=
   Except.mapError ("BinOp: " ++ ·) do
@@ -69,6 +91,20 @@ def BinaryOp.fromJson? (j : Lean.Json) : Except String BinaryOp :=
     else
       throw "Eq not Spec"
   | Except.error _ =>
+  match j.getObjVal? "Inequality" with
+  | Except.ok j =>
+    match j.getStr? with
+    | .ok "Lt" => return .lt
+    | .ok "Le" => return .le
+    | .ok "Gt" => return .gt
+    | .ok "Ge" => return .ge
+    | _ =>
+      throw s!"Inequality value not recognized: {j}"
+  | Except.error _ =>
+  match j.getStr? with
+  | .ok "And" => return .and
+  | .ok "Or" => return .or
+  | _ =>
   throw s!"Unrecognized binary op: {j}"
 
 inductive Pattern
@@ -108,19 +144,7 @@ partial def PureExpr.fromJson? (j : Lean.Json) : Except String PureExpr :=
   | Except.error _ =>
   match j.getObjVal? "Const" with
   | Except.ok j =>
-    Except.mapError ("Const: " ++ ·) do
-    match j.getObjVal? "Int" with
-    | Except.ok j => do
-      let val ← j.getArrVal? 1
-      let val ← Lean.FromJson.fromJson? val
-      return .const (.int val)
-    | Except.error _ =>
-    match j.getObjVal? "Bool" with
-    | Except.ok j => do
-      let b ← j.getBool?
-      return .const (.bool b)
-    | Except.error _ =>
-    throw s!"Unrecognized Const: {j}"
+    return .const <| ← Const.fromJson? j
   | Except.error _ =>
   match j.getObjVal? "Block" with
   | Except.ok j =>
@@ -210,6 +234,7 @@ partial def Function.fromJson? (j : Lean.Json) : Except String Function :=
     let arr' ← arr.mapM (fun rj => do
       PureExpr.fromJson? (← unwrapSpan rj))
     return arr'.toList)
+  dbgTrace s!"Function {id.segments} has requires {require.length}" <| fun () =>
   return {
     id,
     params,

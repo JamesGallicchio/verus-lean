@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "example/example_verus"
+		}
+	],
+	"settings": {
+        "rust-analyzer.server.path": "/home/james/Projects/verus-lean/verus-analyzer/dist/verus-analyzer-x86_64-unknown-linux-gnu",
+        "rust-analyzer.checkOnSave": false,
+	}
+}

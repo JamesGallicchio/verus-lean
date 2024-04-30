@@ -34,6 +34,7 @@ unsafe def main (args : List String) : IO Unit := do
   | .ok fns' =>
   IO.println s!"Writing syntax to file {resPath}"
   let formatted : Lean.Format :=
-    fns'.foldl (fun acc x => acc ++ .line ++ .line ++ x.prettyPrint)
+    fns'.foldr (fun x acc => x.prettyPrint ++ .line ++ .line ++ acc)
       ""
-  IO.FS.writeFile resPath (formatted.pretty)
+  IO.FS.writeFile resPath (formatted.pretty (width := 30))
+  IO.println s!"Finished!"

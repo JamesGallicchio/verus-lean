@@ -20,6 +20,36 @@ partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
       `($(← Typ.toSyntax a) × $b))
       (← `( Unit ))
 
+def PureExpr.toSyntax (e : PureExpr) : TermElabM Term :=
+  match e with
+  | .var n => return mkIdent n
+  | .binary op lhs rhs => do
+    let lhs ← lhs.toSyntax
+    let rhs ← rhs.toSyntax
+    match op with
+    | .eq =>
+      `($lhs = $rhs)
+    | .ne =>
+      `($lhs ≠ $rhs)
+    | .lt =>
+      `($lhs < $rhs)
+    | .le =>
+      `($lhs ≤ $rhs)
+    | .gt =>
+      `($lhs > $rhs)
+    | .ge =>
+      `($lhs ≥ $rhs)
+    | .and =>
+      `($lhs ∧ $rhs)
+    | .or =>
+      `($lhs ∨ $rhs)
+  | .const (.int i) =>
+    return Syntax.mkNumLit (toString i)
+  | .const (.bool b) =>
+    return Syntax.mkCApp (toString b) #[]
+  | .block _ _ =>
+    throwError "blocks currently unsupported"
+
 def Function.toSyntax (f : Function) : CommandElabM Syntax :=
   match f with
   | { id
@@ -30,4 +60,18 @@ def Function.toSyntax (f : Function) : CommandElabM Syntax :=
     } => do
   let ident := id.toSyntax
   let ty ← liftTermElabM ret.typ.toSyntax
-  `(opaque $ident : $ty)
+  let args : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
+    params.toArray.mapM (fun p => do
+      return mkNode _ (#[
+        mkAtom "(", mkIdent p.name, mkAtom ":", ←liftTermElabM p.typ.toSyntax, mkAtom ")"
+      ]))
+  let hyps : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
+    require.toArray.mapIdxM (fun i req => do
+      return mkNode _ (#[
+        mkAtom "(",
+        mkIdent s!"_h{i}",
+        mkAtom ":",
+        ←liftTermElabM <| req.toSyntax,
+        mkAtom ")"
+      ]))
+  `(opaque $ident $(args ++ hyps):bracketedBinder* : $ty)
