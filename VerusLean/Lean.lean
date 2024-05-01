@@ -12,17 +12,23 @@ partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
   | .int ityp =>
     match ityp with
     | .signed width =>
-      return mkIdent ↑("Int" ++ toString width)
+      match width with
+      | _ =>
+        throwError "Signed int type: Unsupported width {width}"
     | .unsigned width =>
-      return mkIdent ↑("UInt" ++ toString width)
+      match width with
+      | 32 =>
+        return mkIdent `UInt32
+      | _ =>
+        throwError "Signed int type: Unsupported width {width}"
     | .inf =>
-      return mkIdent "Int"
+      return mkIdent `Int
   | .datatype id params => do
     `($(id.toSyntax) $(← params.toArray.mapM Typ.toSyntax)*)
   | .tuple tys => do
     tys.foldrM (fun a b => do
       `($(← Typ.toSyntax a) × $b))
-      (← `( Unit ))
+      (mkIdent ``Unit)
 
 def PureExpr.toSyntax (e : PureExpr) : TermElabM Term :=
   match e with
@@ -65,17 +71,15 @@ def Function.toSyntax (f : Function) : CommandElabM Syntax :=
   let ident := id.toSyntax
   let ty ← liftTermElabM ret.typ.toSyntax
   let args : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
+    liftTermElabM <|
     params.toArray.mapM (fun p => do
-      return mkNode _ (#[
-        mkAtom "(", mkIdent p.name, mkAtom ":", ←liftTermElabM p.typ.toSyntax, mkAtom ")"
-      ]))
+      let arg := mkIdent p.name
+      let type ← p.typ.toSyntax
+      `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
   let hyps : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
+    liftTermElabM <|
     require.toArray.mapIdxM (fun i req => do
-      return mkNode _ (#[
-        mkAtom "(",
-        mkIdent s!"_h{i}",
-        mkAtom ":",
-        ←liftTermElabM <| req.toSyntax,
-        mkAtom ")"
-      ]))
+      let arg := mkIdent s!"_h{i}"
+      let type ← req.toSyntax
+      `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
   `(opaque $ident $(args ++ hyps):bracketedBinder* : $ty)

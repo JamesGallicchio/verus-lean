@@ -2,14 +2,14 @@ use vstd::prelude::*;
 
 verus!{
 
-pub fn test(x: u32) -> (y : Option<u32>)
-requires (x < 20 && x > 1)
+pub fn test(x: int) -> ()
+requires (x == x)
 //ensures (y.is_some())
 {
-    return x.checked_add(1);
+    return ();
 }
 
-pub fn main() -> (x : Result<(),i32>)
+pub fn main() -> (x : Result<(),u32>)
 ensures true
 {
     if [1,2,3][2] == [3,4,5][0] {
