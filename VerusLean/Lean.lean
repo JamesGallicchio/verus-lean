@@ -4,6 +4,17 @@ namespace VerusLean
 
 open Lean Elab Command
 
+def datatypeMap : HashMap Id (List Term → TermElabM Term) :=
+  .ofList [
+    ( ⟨"core", ["result", "Result"]⟩
+    , fun
+      | [A,B] => do
+        let exc := mkIdent ``Except
+        `($exc $A $B)
+      | _ => throwError "Result arity should be 2?"
+    )
+  ]
+
 partial def Id.toSyntax (i : Id) : Ident :=
   Lean.mkIdent <| i.segments.foldl (· ++ .mkStr1 ·) (.mkStr1 i.krate)
 
@@ -24,7 +35,11 @@ partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
     | .inf =>
       return mkIdent `Int
   | .datatype id params => do
-    `($(id.toSyntax) $(← params.toArray.mapM Typ.toSyntax)*)
+    match datatypeMap.find? id with
+    | none =>
+      throwError "Couldn't find datatype in datatype map"
+    | some handler =>
+      handler (← params.mapM Typ.toSyntax)
   | .tuple tys => do
     tys.foldrM (fun a b => do
       `($(← Typ.toSyntax a) × $b))
