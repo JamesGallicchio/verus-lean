@@ -43,8 +43,8 @@ unsafe def main (args : List String) : IO Unit := do
           return none
   IO.println s!"Converting functions to Lean syntax"
   let fns' ← Lean.withImportModules
-    (imports := #[])
-    (opts := default)
+    (imports := #[`Init])
+    (opts := Options.empty)
     (trustLevel := 0)
     <| fun env => EIO.toIO' <|
     Lean.Core.CoreM.run'
@@ -79,3 +79,5 @@ unsafe def main (args : List String) : IO Unit := do
       ""
   IO.FS.writeFile resPath (formatted.pretty)
   IO.println s!"Finished!"
+
+#eval main ["example/example_verus/vir.json", "example/example_verus/Example.lean"]
