@@ -60,9 +60,14 @@ unsafe def main (args : List String) : IO Unit := do
         try
           let syn ← Lean.liftCommandElabM (Function.toSyntax f)
           IO.println s!"{f.id.segments}: typechecking"
-          Lean.liftCommandElabM <| Elab.Command.elabCommandTopLevel syn
+          for c in syn do
+            Lean.liftCommandElabM <| Elab.Command.elabCommandTopLevel c
           IO.println s!"{f.id.segments}: formatting"
-          let fmt ← _root_.format (Formatter.categoryFormatter `command) syn
+          let mut fmt : Format := ""
+          for c in syn do
+            fmt := fmt ++ .line ++ (
+              ← _root_.format (Formatter.categoryFormatter `command) c
+            )
           IO.println s!"{f.id.segments}: done"
           return some fmt
         catch exc =>

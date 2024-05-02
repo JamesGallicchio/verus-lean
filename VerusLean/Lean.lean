@@ -75,7 +75,7 @@ def PureExpr.toSyntax (e : PureExpr) : TermElabM Term :=
   | .block _ _ =>
     throwError "blocks currently unsupported"
 
-def Function.toSyntax (f : Function) : CommandElabM Syntax :=
+def Function.toSyntax (f : Function) : CommandElabM (TSyntaxArray `command) :=
   match f with
   | { id
       params
@@ -97,4 +97,16 @@ def Function.toSyntax (f : Function) : CommandElabM Syntax :=
       let arg := mkIdent s!"_h{i}"
       let type ← req.toSyntax
       `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
-  `(opaque $ident $(args ++ hyps):bracketedBinder* : $ty)
+  let func ← `(opaque $ident $(args ++ hyps):bracketedBinder* : $ty)
+  let ensures ←
+    liftTermElabM <|
+    ensure.toArray.mapIdxM (fun i ens => do
+      let thmIdent := mkIdent <| ident.getId.str s!"_{i}"
+      `(theorem $thmIdent $(args ++ hyps):bracketedBinder* :
+          let $(mkIdent f.ret.name) : $(←f.ret.typ.toSyntax) :=
+            $ident $(params.toArray.map (mkIdent ·.name)):term*
+          $(← ens.toSyntax)
+        := sorry
+      )
+    )
+  return #[func] ++ ensures
