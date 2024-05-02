@@ -1,19 +1,18 @@
 import Lean
 
+open Lean
+
 namespace VerusLean
 
-def unwrapSpan (j : Lean.Json) : Except String Lean.Json :=
-  Except.mapError (fun _ => s!"Unwrapping span: {j}") do
-  j.getObjVal? "x"
+def Span (A : Type) := A
+
+instance [FromJson A] : FromJson (Span A) where
+  fromJson? j := j.getObjValAs? A "x"
 
 structure Id where
   krate : String
   segments : List String
-
-def Id.fromJson? (j : Lean.Json) : Except String Id := do
-  let krate ← j.getObjValAs? String "krate"
-  let segments ← j.getObjValAs? (List String) "segments"
-  return {krate, segments}
+deriving DecidableEq, Hashable, Lean.FromJson, Repr
 
 inductive Typ.Int
 | signed (width : Nat)
@@ -46,7 +45,7 @@ partial def Typ.fromJson? (j : Lean.Json) : Except String Typ :=
     let a1 ← j.getArrVal? 0
     let a2 ← j.getArrVal? 1
     let a3 ← j.getArrVal? 2
-    let id ← Id.fromJson? a1
+    let id ← FromJson.fromJson? a1
     let typs ← (← a2.getArr?).mapM Typ.fromJson?
     if a3 == .arr #[] then
       return .datatype id typs.toList
@@ -78,14 +77,15 @@ def Const.fromJson? (j : Lean.Json) : Except String Const :=
     throw s!"Unrecognized Const: {j}"
 
 inductive BinaryOp
-| eq
-| ne
-| lt
-| gt
-| le
-| ge
-| and
-| or
+| Eq
+| Ne
+| Lt
+| Gt
+| Le
+| Ge
+| And
+| Or
+deriving ToJson, FromJson
 
 def BinaryOp.fromJson? (j : Lean.Json) : Except String BinaryOp :=
   Except.mapError ("BinOp: " ++ ·) do
