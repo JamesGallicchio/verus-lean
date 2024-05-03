@@ -1,3 +1,5 @@
+import Lean.Data.Json
+
 /-! A copy of the VIR AST from Verus. -/
 
 /-!
@@ -9,12 +11,19 @@
 //! for verification.
 -/
 
+open Lean (Json ToJson FromJson)
+
 def Ident := String
 def Idents := Array Ident
+
+def Span := Json
+deriving ToJson, FromJson
 
 structure Binder (A : Type) where
   name: Ident
   a: A
+
+def Binders (A) := Array (Binder A)
 
 structure Spanned (X : Type) where
   span: Span
@@ -40,7 +49,7 @@ inductive VarIdentDisambiguate
 | RustcId : USize → VarIdentDisambiguate
   -- We track whether the variable is SST/AIR statement-bound or expression-bound,
   -- to help drop unnecessary ids from expression-bound variables
-| VirRenumbered (is_stmt: Boolean) (does_shadow: Boolean) (id: UInt64)
+| VirRenumbered (is_stmt: Bool) (does_shadow: Bool) (id: UInt64)
   -- Some expression-bound variables don't need an id
 | VirExprNoNumber
   -- We rename parameters to VirParam if the parameters don't conflict with each other
@@ -140,8 +149,8 @@ def ImplPaths := Array ImplPath
 
 /-- Rust type, but without Box, Rc, Arc, etc. -/
 inductive Typ
-  /-- Boolean, Int, Datatype are translated directly into corresponding SMT types (they are not SMT-boxed) -/
-  | Boolean
+  /-- Bool, Int, Datatype are translated directly into corresponding SMT types (they are not SMT-boxed) -/
+  | Bool
   | Int : IntRange → Typ
   /-- UTF-8 character type -/
   | Char
@@ -228,7 +237,7 @@ pub enum NullaryOpr {
 /-- Primitive unary operations
  (not arbitrary user-defined functions -- these are represented by ExprX::Call) -/
 inductive UnaryOp where
-    /-- Booleanean not -/
+    /-- Boolean not -/
     | Not
     /-- bitwise not -/
     | BitNot
@@ -237,7 +246,7 @@ inductive UnaryOp where
     -- /// Each trigger group becomes one SMT trigger containing all the expressions in the trigger group.
     Trigger(TriggerAnnotation),
     -- /// Force integer value into range given by IntRange (e.g. by using mod)
-    Clip { range: IntRange, truncate: Boolean },
+    Clip { range: IntRange, truncate: Bool },
     -- /// Operations that coerce from/to builtin::Ghost or builtin::Tracked
     CoerceMode { op_mode: Mode, from_mode: Mode, to_mode: Mode, kind: ModeCoercion },
     -- /// Internal consistency check to make sure finalize_exp gets called
@@ -263,7 +272,7 @@ inductive UnaryOp where
     -- /// For an exec/proof expression e, the spec s should be chosen so that the value v
     -- /// that e evaluates to is immutable and v == s, where v may contain local variables.
     -- /// For example, if v == (n..m), then n and m must be immutable local variables.
-    InferSpecForLoopIter { print_hint: Boolean },
+    InferSpecForLoopIter { print_hint: Bool },
     -- /// May need coercion after casting a type argument
     CastToInteger,
     -/
@@ -281,7 +290,7 @@ structure FieldOpr {
     pub datatype: Path,
     pub variant: Ident,
     pub field: Ident,
-    pub get_variant: Boolean,
+    pub get_variant: Bool,
     pub check: VariantCheck,
 }
 
@@ -363,16 +372,16 @@ inductive ChainedOp
 -- /// Finite-width and nat operations are represented with a combination of IntRange::Int operations
 -- /// and UnaryOp::Clip.
 inductive BinaryOp
-    -- /// Booleanean and (short-circuiting: right side is evaluated only if left side is true)
+    -- /// Boolean and (short-circuiting: right side is evaluated only if left side is true)
   | And
-    -- /// Booleanean or (short-circuiting: right side is evaluated only if left side is false)
+    -- /// Boolean or (short-circuiting: right side is evaluated only if left side is false)
   | Or
-    -- /// Booleanean xor (no short-circuiting)
+    -- /// Boolean xor (no short-circuiting)
   | Xor
-    -- /// Booleanean implies (short-circuiting: right side is evaluated only if left side is true)
+    -- /// Boolean implies (short-circuiting: right side is evaluated only if left side is true)
   | Implies
     -- /// the is_smaller_than builtin, used for decreases (true for <, false for ==)
-  --| HeightCompare { strictly_lt: Boolean, recursive_function_field: Boolean }
+  --| HeightCompare { strictly_lt: Bool, recursive_function_field: Bool }
     -- /// SMT equality for any type -- two expressions are exactly the same value
     -- /// Some types support compilable equality (Mode == Exec); others only support spec equality (Mode == Spec)
   | Eq : Mode → BinaryOp
@@ -391,7 +400,7 @@ inductive BinaryOp
 -- /// More complex binary operations (requires Clone rather than Copy)
 inductive BinaryOpr
     -- /// extensional equality ext_equal (true ==> deep extensionality)
-  | ExtEq : Boolean → Typ → BinaryOpr
+  | ExtEq : Bool → Typ → BinaryOpr
 
 inductive MultiOp
   | Chained : Array ChainedOp → MultiOp
@@ -442,66 +451,54 @@ inductive HeaderExpr
 
 
 -- /// Primitive constant values
-#[derive(Clone, Debug, Serialize, Deserialize, ToDebugSNode, PartialEq, Eq, Hash)]
-pub enum Constant {
+inductive Constant
     -- /// true or false
-    Boolean(Boolean),
+  | Bool (_ : Bool)
     -- /// integer of arbitrary size
-    Int(BigInt),
+  | Int (_ : Int)
     -- /// Hold generated string slices in here
-    StrSlice(Arc<String>),
+  | StrSlice (_ : String)
     -- Hold unicode values here
-    Char(char),
-}
+  | Char (_ : Char)
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-structure SpannedTyped<X> {
-    pub span: Span,
-    pub typ: Typ,
-    pub x: X,
-}
+structure SpannedTyped (X : Type) where
+    span: Span
+    typ: Typ
+    x: X
 
-impl<X: Display> Display for SpannedTyped<X> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.x)
-    }
-}
-
--- /// Patterns for match expressions
-pub type Pattern = Arc<SpannedTyped<PatternX>>;
-pub type Patterns = Arc<Vec<Pattern>>;
-#[derive(Debug, Serialize, Deserialize, ToDebugSNode, Clone)]
-pub enum PatternX {
+mutual
+inductive PatternX
     -- /// _
     -- /// True if this is implicitly added from a ..
-    Wildcard(Boolean),
+  | Wildcard (_ : Bool)
     -- /// x or mut x
-    Var {
-        name: VarIdent,
-        mutable: Boolean,
-    },
-    Binding {
-        name: VarIdent,
-        mutable: Boolean,
-        sub_pat: Pattern,
-    },
+  | Var (name: VarIdent) (mutable: Bool)
+  | Binding
+      (name: VarIdent)
+      (mutable: Bool)
+      (sub_pat: Pattern)
     -- /// Note: ast_simplify replaces this with Constructor
-    Tuple(Patterns),
+  | Tuple (_ : Patterns)
     -- /// Match constructor of datatype Path, variant Ident
     -- /// For tuple-style variants, the fields are named "_0", "_1", etc.
     -- /// Fields can appear **in any order** even for tuple variants.
-    Constructor(Path, Ident, Binders<Pattern>),
-    Or(Pattern, Pattern),
+  | Constructor (_ : Path) (_1 : Ident) (_ : Binders Pattern)
+  | Or (_ : PatternX) (_: Pattern)
     -- /// Matches something equal to the value of this expr
     -- /// This only supports literals and consts, so we don't need to worry
     -- /// about side-effects, binding order, etc.
-    Expr(Expr),
+  | Expr (_ : Expr)
     -- /// `e1 <= x <= e2` or `e1 <= x < e2`
     -- /// The start of the range is always inclusive (<=)
     -- /// The end of the range may be inclusive (<=) or exclusive (<),
     -- /// as given by the InequalityOp argument.
-    Range(Option<Expr>, Option<(Expr, InequalityOp)>),
-}
+  | Range (_ : Option Expr) (_ : Option (Expr × InequalityOp))
+
+-- /// Patterns for match expressions
+def Pattern := SpannedTyped PatternX
+def Patterns := Array Pattern
+end
+
 
 -- /// Arms of match expressions
 pub type Arm = Arc<Spanned<ArmX>>;
@@ -668,9 +665,9 @@ pub enum ExprX {
     WithTriggers { triggers: Arc<Vec<Exprs>>, body: Expr },
     -- /// Assign to local variable
     -- /// init_not_mut = true ==> a delayed initialization of a non-mutable variable
-    Assign { init_not_mut: Boolean, lhs: Expr, rhs: Expr, op: Option<BinaryOp> },
+    Assign { init_not_mut: Bool, lhs: Expr, rhs: Expr, op: Option<BinaryOp> },
     -- /// Reveal definition of an opaque function with some integer fuel amount
-    Fuel(Fun, u32, Boolean),
+    Fuel(Fun, u32, Bool),
     -- /// Reveal a string
     RevealString(Arc<String>),
     -- /// Header, which must appear at the beginning of a function or while loop.
@@ -678,7 +675,7 @@ pub enum ExprX {
     -- /// appear in the final Expr produced by rust_to_vir (see vir::headers::read_header).
     Header(HeaderExpr),
     -- /// Assert or assume
-    AssertAssume { is_assume: Boolean, expr: Expr },
+    AssertAssume { is_assume: Bool, expr: Expr },
     -- /// Assert-forall or assert-by statement
     AssertBy { vars: VarBinders<Typ>, require: Expr, ensure: Expr, proof: Expr },
     -- /// `assert_by` with a dedicated prover option (nonlinear_arith, bit_vector)
@@ -691,8 +688,8 @@ pub enum ExprX {
     Match(Expr, Arms),
     -- /// Loop (either "while", cond = Some(...), or "loop", cond = None), with invariants
     Loop {
-        loop_isolation: Boolean,
-        is_for_loop: Boolean,
+        loop_isolation: Bool,
+        is_for_loop: Bool,
         label: Option<String>,
         cond: Option<Expr>,
         body: Expr,
@@ -704,13 +701,13 @@ pub enum ExprX {
     -- /// Return from function
     Return(Option<Expr>),
     -- /// break or continue
-    BreakOrContinue { label: Option<String>, is_break: Boolean },
+    BreakOrContinue { label: Option<String>, is_break: Bool },
     -- /// Enter a Rust ghost block, which will be erased during compilation.
     -- /// In principle, this is not needed, because we can infer which code to erase using modes.
     -- /// However, we can't easily communicate the inferred modes back to rustc for erasure
     -- /// and lifetime checking -- rustc needs syntactic annotations for these, and the mode checker
     -- /// needs to confirm that these annotations agree with what would have been inferred.
-    Ghost { alloc_wrapper: Boolean, tracked: Boolean, expr: Expr },
+    Ghost { alloc_wrapper: Bool, tracked: Bool, expr: Expr },
     -- /// Sequence of statements, optionally including an expression at the end
     Block(Stmts, Option<Expr>),
     -- /// Inline AIR statement
@@ -740,7 +737,7 @@ structure ParamX {
     pub typ: Typ,
     pub mode: Mode,
     -- /// An &mut parameter
-    pub is_mut: Boolean,
+    pub is_mut: Bool,
     -- /// If the parameter uses a Ghost(x) or Tracked(x) pattern to unwrap the value, this is
     -- /// the mode of the resulting unwrapped x variable (Spec for Ghost(x), Proof for Tracked(x)).
     -- /// We also save a copy of the original wrapped name for lifetime_generate
@@ -786,45 +783,45 @@ pub type FunctionAttrs = Arc<FunctionAttrsX>;
 #[derive(Debug, Serialize, Deserialize, ToDebugSNode, Default, Clone)]
 structure FunctionAttrsX {
     -- /// Erasure and lifetime checking based on ghost blocks
-    pub uses_ghost_blocks: Boolean,
+    pub uses_ghost_blocks: Bool,
     -- /// Inline spec function for SMT
-    pub inline: Boolean,
+    pub inline: Bool,
     -- /// List of functions that this function wants to view as opaque
     pub hidden: Arc<Vec<Fun>>,
     -- /// Create a global axiom saying forall params, require ==> ensure
-    pub broadcast_forall: Boolean,
+    pub broadcast_forall: Bool,
     -- /// In triggers_auto, don't use this function as a trigger
-    pub no_auto_trigger: Boolean,
+    pub no_auto_trigger: Bool,
     -- /// Custom error message to display when a pre-condition fails
     pub custom_req_err: Option<String>,
     -- /// When used in a ghost context, redirect to a specified spec function
     pub autospec: Option<Fun>,
     -- /// Verify using bitvector theory
-    pub bit_vector: Boolean,
+    pub bit_vector: Bool,
     -- /// Is atomic (i.e., can be inside an invariant block)
-    pub atomic: Boolean,
+    pub atomic: Bool,
     -- /// Verify non_linear arithmetic using Singular
-    pub integer_ring: Boolean,
+    pub integer_ring: Bool,
     -- /// This is a proof of termination for another spec function
-    pub is_decrease_by: Boolean,
+    pub is_decrease_by: Bool,
     -- /// In a spec function, check the body for violations of recommends
-    pub check_recommends: Boolean,
+    pub check_recommends: Bool,
     -- /// set option smt.arith.nl=true
-    pub nonlinear: Boolean,
+    pub nonlinear: Bool,
     -- /// Use a dedicated Z3 process for this single query
-    pub spinoff_prover: Boolean,
+    pub spinoff_prover: Bool,
     -- /// Memoize function call results during interpretation
-    pub memoize: Boolean,
+    pub memoize: Bool,
     -- /// override default rlimit
     pub rlimit: Option<f32>,
     -- /// does this function take zero args (this is useful to keep track
     -- /// of because we add a dummy arg to zero functions)
-    pub print_zero_args: Boolean,
+    pub print_zero_args: Bool,
     -- /// is this a method, i.e., written with x.f() syntax? useful for printing
-    pub print_as_method: Boolean,
-    pub prophecy_dependent: Boolean,
+    pub print_as_method: Bool,
+    pub prophecy_dependent: Bool,
     -- /// broadcast proof from size_of global
-    pub size_of_broadcast_proof: Boolean,
+    pub size_of_broadcast_proof: Bool,
 }
 
 -- /// Function specification of its invariant mask
@@ -921,9 +918,9 @@ structure FunctionX {
     -- /// Allows the item to be a const declaration or static
     pub item_kind: ItemKind,
     -- /// For public spec functions, publish == None means that the body is private
-    -- /// even though the function is public, the Boolean indicates false = opaque, true = visible
+    -- /// even though the function is public, the Bool indicates false = opaque, true = visible
     -- /// the body is public
-    pub publish: Option<Boolean>,
+    pub publish: Option<Bool>,
     -- /// Various attributes
     pub attrs: FunctionAttrs,
     -- /// Body of the function (may be None for foreign functions or for external_body functions)
@@ -969,7 +966,7 @@ structure RevealGroupX {
     -- /// If true, then prune away group unless either the module that contains the group is used.
     -- /// (Without this, importing vstd would recursively reach and encode all the
     -- /// broadcast_forall declarations in all of vstd, defeating much of the purpose of prune.rs.)
-    pub prune_unless_this_module_is_used: Boolean,
+    pub prune_unless_this_module_is_used: Bool,
     -- /// If Some(crate_name), this group is revealed by default for crates that import crate_name.
     -- /// No more than one such group is allowed in each crate.
     pub broadcast_use_by_default_when_this_crate_is_imported: Option<Ident>,
@@ -1026,7 +1023,7 @@ structure DatatypeX {
     pub variants: Variants,
     pub mode: Mode,
     -- /// Generate ext_equal lemmas for datatype
-    pub ext_equal: Boolean,
+    pub ext_equal: Bool,
 }
 pub type Datatype = Arc<Spanned<DatatypeX>>;
 pub type Datatypes = Vec<Datatype>;
