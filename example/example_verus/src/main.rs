@@ -2,11 +2,16 @@ use vstd::prelude::*;
 
 verus!{
 
-pub fn test(x: int) -> ()
-requires (x == x)
+spec fn test(x: int) -> bool
 //ensures (y.is_some())
 {
-    return ();
+    test2(x+1)
+}
+
+spec fn test2(x: int) -> bool
+//ensures (y.is_some())
+{
+    test(x+1)
 }
 
 pub fn main() -> (x : Result<(),u32>)
