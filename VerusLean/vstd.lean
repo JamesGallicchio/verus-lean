@@ -1,15 +1,16 @@
 import VerusLean.VerusBuiltins
 noncomputable section
 open Classical
+set_option linter.unusedVariables false
 
-@[verus_attr]
+@[verus_attr, simp]
 def arithmetic.internals.general_internals.is_le
       (x : Int) (y : Int)
   : Bool
   := (
 (x ≤ y))
 
-@[verus_attr]
+@[verus_attr, simp]
 def arithmetic.internals.mod_internals_nonlinear.modulus
       (x : Int) (y : Int)
   : Int
@@ -28,7 +29,7 @@ def arithmetic.internals.div_internals.div_pos
 termination_by Int.natAbs ((if (x < 0) then (
 (d - x)) else (
 x)))
-decreasing_by all_goals (decreasing_with verus_default_tac)
+decreasing_by all_goals (decreasing_with (verus_default_tac))
 
 @[verus_attr]
 def arithmetic.internals.div_internals.div_recursive
@@ -125,7 +126,7 @@ def arithmetic.internals.mul_internals.mul_recursive
 (arithmetic.internals.mul_internals.mul_pos x y)) else (
 ((0 - 1) * (arithmetic.internals.mul_internals.mul_pos ((0 - 1) * x) y)))))
 
-@[verus_attr]
+@[verus_attr, simp]
 def arithmetic.internals.mul_internals.mul_auto
       («no%param» : Int)
   : Bool
@@ -159,7 +160,12 @@ def arithmetic.power.pow
 1) else (
 (b * (arithmetic.power.pow b (clip Nat (e - 1)))))))
 termination_by Int.natAbs (e)
-decreasing_by all_goals (decreasing_with verus_default_tac)
+decreasing_by all_goals (decreasing_with
+  rename_i h
+  apply Nat.sub_lt
+  · apply Nat.pos_of_ne_zero
+    simp_all only [ne_eq, not_false_eq_true]
+  · simp_all only [zero_lt_one])
 
 @[verus_attr]
 def arithmetic.power2.pow2
@@ -167,8 +173,8 @@ def arithmetic.power2.pow2
   : Nat
   := (
 (clip Nat (arithmetic.power.pow 2 e)))
-termination_by Int.natAbs (e)
-decreasing_by all_goals (decreasing_with verus_default_tac)
+--termination_by Int.natAbs (e)
+--decreasing_by all_goals (decreasing_with verus_default_tac)
 
 @[verus_attr]
 theorem arithmetic.internals.div_internals_nonlinear.lemma_div_of0
@@ -195,21 +201,71 @@ theorem arithmetic.internals.general_internals.lemma_induction_helper_pos
       (n : Int) (f : (Int → Bool)) (x : Int)
       (_0 : (x ≥ 0) := by verus_default_tac) (_1 : (n > 0) := by verus_default_tac) (_2 : (∀ (i : Int), (((0 ≤ i) ∧ (i < n)) → (f i))) := by verus_default_tac) (_3 : (∀ (i : Int), (((i ≥ 0) ∧ (f i)) → (f (math.add i n)))) := by verus_default_tac) (_4 : (∀ (i : Int), (((i < n) ∧ (f i)) → (f (math.sub i n)))) := by verus_default_tac)
   : (f x)
-  := by verus_default_tac
+  := by
+  have : x = x.natAbs := Int.eq_natAbs_of_zero_le _0
+  generalize x.natAbs = x' at this
+  subst this; clear _0
+  have : n = n.natAbs := Int.eq_natAbs_of_zero_le (by omega)
+  generalize n.natAbs = n at *
+  subst this
+  induction x' using Nat.strongInductionOn with
+  | ind x ih =>
+  if x < n then
+    simp_all
+  else
+    have : x = (x - n) + n := by omega
+    rw [this, Int.ofNat_add]
+    apply _3
+    constructor
+    · omega
+    · apply ih
+      omega
 
 @[verus_attr]
 theorem arithmetic.internals.general_internals.lemma_induction_helper_neg
       (n : Int) (f : (Int → Bool)) (x : Int)
       (_0 : (x < 0) := by verus_default_tac) (_1 : (n > 0) := by verus_default_tac) (_2 : (∀ (i : Int), (((0 ≤ i) ∧ (i < n)) → (f i))) := by verus_default_tac) (_3 : (∀ (i : Int), (((i ≥ 0) ∧ (f i)) → (f (math.add i n)))) := by verus_default_tac) (_4 : (∀ (i : Int), (((i < n) ∧ (f i)) → (f (math.sub i n)))) := by verus_default_tac)
   : (f x)
-  := by verus_default_tac
+  := by
+  have : -x = (-x).natAbs := Int.eq_natAbs_of_zero_le (by omega)
+  generalize (-x).natAbs = x' at this
+  rw [Int.neg_eq_comm, eq_comm] at this
+  subst this; clear _0
+  have : n = n.natAbs := Int.eq_natAbs_of_zero_le (by omega)
+  generalize n.natAbs = n at *
+  subst this
+  induction x' using Nat.strongInductionOn with
+  | ind x ih =>
+  if x = 0 then
+    apply _2; simp [*]
+  else
+    if x ≤ n then
+      have : -(x : Int) = (n - x) - n := by omega
+      rw [this]
+      apply _4
+      constructor
+      · omega
+      apply _2; constructor <;> omega
+    else
+      have : -(x : Int) = -((x-n : Nat) : Int) - n := by omega
+      rw [this]
+      apply _4
+      constructor
+      · omega
+      · apply ih
+        omega
+
 
 @[verus_attr]
 theorem arithmetic.internals.general_internals.lemma_induction_helper
       (n : Int) (f : (Int → Bool)) (x : Int)
       (_0 : (n > 0) := by verus_default_tac) (_1 : (∀ (i : Int), (((0 ≤ i) ∧ (i < n)) → (f i))) := by verus_default_tac) (_2 : (∀ (i : Int), (((i ≥ 0) ∧ (f i)) → (f (math.add i n)))) := by verus_default_tac) (_3 : (∀ (i : Int), (((i < n) ∧ (f i)) → (f (math.sub i n)))) := by verus_default_tac)
   : (f x)
-  := by verus_default_tac
+  := by
+  if h : x < 0 then
+    exact lemma_induction_helper_neg n f x h _0 _1 _2 _3
+  else
+    exact lemma_induction_helper_pos n f x (by omega) _0 _1 _2 _3
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals_nonlinear.lemma_mod_of_zero_is_zero
@@ -276,7 +332,20 @@ theorem arithmetic.internals.mul_internals_nonlinear.lemma_mul_ordering
       (x : Int) (y : Int)
       (_0 : (!(x = 0)) := by verus_default_tac) (_1 : (!(y = 0)) := by verus_default_tac) (_2 : (0 ≤ (x * y)) := by verus_default_tac)
   : (((x * y) ≥ x) ∧ ((x * y) ≥ y))
-  := by verus_default_tac
+  := by
+  simp_all
+  by_cases 0 ≤ x
+  · have : 0 < x := by omega
+    have : 1 ≤ x := by omega
+    have : 0 ≤ y := by simp_all
+    have : 0 < y := by omega
+    have : 1 ≤ y := by omega
+    simp_all
+  · have : x ≤ 0 := by omega
+    have : y ≤ 0 := by
+      have : x < 0 := by omega
+      apply nonpos_of_mul_nonneg_right <;> assumption
+    constructor <;> (trans 0 <;> assumption)
 
 @[verus_attr]
 theorem arithmetic.internals.mul_internals_nonlinear.lemma_mul_strict_inequality
@@ -314,7 +383,12 @@ theorem arithmetic.internals.mul_internals.lemma_mul_induction
       (f : (Int → Bool))
       (_0 : (f 0) := by verus_default_tac) (_1 : (∀ (i : Int), (((i ≥ 0) ∧ (f i)) → (f (math.add i 1)))) := by verus_default_tac) (_2 : (∀ (i : Int), (((i ≤ 0) ∧ (f i)) → (f (math.sub i 1)))) := by verus_default_tac)
   : (∀ (i : Int), (f i))
-  := by verus_default_tac
+  := by
+  refine fun i => arithmetic.internals.general_internals.lemma_induction_helper (n := 1) (f := f) i
+    (by decide)
+    (by intro i h; convert _0; omega)
+    _1
+    (by intro i ⟨_,_⟩; apply _2; simp_all; omega)
 
 @[verus_attr]
 theorem arithmetic.internals.mul_internals.lemma_mul_distributes_plus
@@ -1532,4 +1606,3 @@ theorem arithmetic.power2.lemma2_to64
       («no%param» : Int)
   : ((arithmetic.power2.pow2 0) = 1) ∧ ((arithmetic.power2.pow2 1) = 2) ∧ ((arithmetic.power2.pow2 2) = 4) ∧ ((arithmetic.power2.pow2 3) = 8) ∧ ((arithmetic.power2.pow2 4) = 16) ∧ ((arithmetic.power2.pow2 5) = 32) ∧ ((arithmetic.power2.pow2 6) = 64) ∧ ((arithmetic.power2.pow2 7) = 128) ∧ ((arithmetic.power2.pow2 8) = 256) ∧ ((arithmetic.power2.pow2 9) = 512) ∧ ((arithmetic.power2.pow2 10) = 1024) ∧ ((arithmetic.power2.pow2 11) = 2048) ∧ ((arithmetic.power2.pow2 12) = 4096) ∧ ((arithmetic.power2.pow2 13) = 8192) ∧ ((arithmetic.power2.pow2 14) = 16384) ∧ ((arithmetic.power2.pow2 15) = 32768) ∧ ((arithmetic.power2.pow2 16) = 65536) ∧ ((arithmetic.power2.pow2 17) = 131072) ∧ ((arithmetic.power2.pow2 18) = 262144) ∧ ((arithmetic.power2.pow2 19) = 524288) ∧ ((arithmetic.power2.pow2 20) = 1048576) ∧ ((arithmetic.power2.pow2 21) = 2097152) ∧ ((arithmetic.power2.pow2 22) = 4194304) ∧ ((arithmetic.power2.pow2 23) = 8388608) ∧ ((arithmetic.power2.pow2 24) = 16777216) ∧ ((arithmetic.power2.pow2 25) = 33554432) ∧ ((arithmetic.power2.pow2 26) = 67108864) ∧ ((arithmetic.power2.pow2 27) = 134217728) ∧ ((arithmetic.power2.pow2 28) = 268435456) ∧ ((arithmetic.power2.pow2 29) = 536870912) ∧ ((arithmetic.power2.pow2 30) = 1073741824) ∧ ((arithmetic.power2.pow2 31) = 2147483648) ∧ ((arithmetic.power2.pow2 32) = 4294967296) ∧ ((arithmetic.power2.pow2 64) = 18446744073709551616)
   := by verus_default_tac
-

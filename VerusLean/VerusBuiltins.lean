@@ -47,18 +47,34 @@ def Int.tactic_natAbs_elim : Lean.Elab.Tactic.TacticM Unit := do
   )
   ))
 
-@[aesop safe 1000 tactic (rule_sets := [VerusLean])]
-def evalLinarith : Lean.Elab.Tactic.TacticM Unit := do
+
+@[aesop unsafe 50% tactic (rule_sets := [VerusLean])]
+def evalOmega : Lean.Elab.Tactic.TacticM Unit := do
   Lean.Elab.Tactic.evalTactic (← `(tactic|
-    linarith
+    omega
   ))
 
-attribute [aesop unsafe 1% apply (rule_sets := [VerusLean])]
+--@[aesop unsafe 10% tactic (rule_sets := [VerusLean])]
+def evalRing : Lean.Elab.Tactic.TacticM Unit := do
+  Lean.Elab.Tactic.evalTactic (← `(tactic|
+    ring
+  ))
+
+attribute [aesop unsafe 10% apply (rule_sets := [VerusLean])]
   Int.ediv_eq_zero_of_lt
   Int.emod_eq_of_lt
   Int.emod_nonneg
   Int.emod_lt_of_pos
+  Int.mul_le_mul_of_nonneg_right
+  Int.ofNat_sub
+  Nat.sub_lt
+  Nat.pos_of_ne_zero
+
+attribute [aesop unsafe 10% forward]
   Int.mul_assoc
+  Int.mul_comm
+  add_one_mul
+  sub_one_mul
 
 attribute [aesop norm simp (rule_sets := [VerusLean])]
   Int.ediv_add_emod
