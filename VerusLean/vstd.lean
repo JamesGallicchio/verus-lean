@@ -29,7 +29,9 @@ def arithmetic.internals.div_internals.div_pos
 termination_by Int.natAbs ((if (x < 0) then (
 (d - x)) else (
 x)))
-decreasing_by all_goals (decreasing_with (verus_default_tac))
+decreasing_by
+· simp_wf; simp [*]; split <;> omega
+· simp_wf; simp [*]; omega
 
 @[verus_attr]
 def arithmetic.internals.div_internals.div_recursive
@@ -104,7 +106,9 @@ x) else (
 termination_by Int.natAbs ((if (x < 0) then (
 (d - x)) else (
 x)))
-decreasing_by all_goals (decreasing_with verus_default_tac)
+decreasing_by
+· simp_wf; simp [*]; split <;> omega
+· simp_wf; simp [*]; omega
 
 @[verus_attr]
 def arithmetic.internals.mul_internals.mul_pos
@@ -149,7 +153,7 @@ def arithmetic.logarithm.log
 0) else (
 (1 + (arithmetic.logarithm.log base (pow / base))))))
 termination_by Int.natAbs (pow)
-decreasing_by all_goals (decreasing_with verus_default_tac)
+decreasing_by all_goals (simp_wf; omega)
 
 @[verus_attr]
 def arithmetic.power.pow
@@ -160,12 +164,7 @@ def arithmetic.power.pow
 1) else (
 (b * (arithmetic.power.pow b (clip Nat (e - 1)))))))
 termination_by Int.natAbs (e)
-decreasing_by all_goals (decreasing_with
-  rename_i h
-  apply Nat.sub_lt
-  · apply Nat.pos_of_ne_zero
-    simp_all only [ne_eq, not_false_eq_true]
-  · simp_all only [zero_lt_one])
+decreasing_by all_goals (simp_wf; omega)
 
 @[verus_attr]
 def arithmetic.power2.pow2
@@ -181,25 +180,34 @@ theorem arithmetic.internals.div_internals_nonlinear.lemma_div_of0
       (d : Int)
       (_0 : (!(d = 0)) := by verus_default_tac)
   : ((0 / d) = 0)
-  := by verus_default_tac
+  := by
+  exact Int.zero_ediv d --exact?
 
 @[verus_attr]
 theorem arithmetic.internals.div_internals_nonlinear.lemma_div_by_self
       (d : Int)
       (_0 : (!(d = 0)) := by verus_default_tac)
   : ((d / d) = 1)
-  := by verus_default_tac
+  := by
+  simp at *
+  exact Int.ediv_self _0 -- exact?
 
 @[verus_attr]
 theorem arithmetic.internals.div_internals_nonlinear.lemma_small_div
       («no%param» : Int)
   : (∀ (x : Int) (d : Int), ((((0 ≤ x) ∧ (x < d)) ∧ (d > 0)) → ((x / d) = 0)))
-  := by verus_default_tac
+  := by
+  rintro x d ⟨⟨h1,h2⟩,h3⟩
+  exact Int.ediv_eq_zero_of_lt h1 h2 -- exact?
 
 @[verus_attr]
 theorem arithmetic.internals.general_internals.lemma_induction_helper_pos
       (n : Int) (f : (Int → Bool)) (x : Int)
-      (_0 : (x ≥ 0) := by verus_default_tac) (_1 : (n > 0) := by verus_default_tac) (_2 : (∀ (i : Int), (((0 ≤ i) ∧ (i < n)) → (f i))) := by verus_default_tac) (_3 : (∀ (i : Int), (((i ≥ 0) ∧ (f i)) → (f (math.add i n)))) := by verus_default_tac) (_4 : (∀ (i : Int), (((i < n) ∧ (f i)) → (f (math.sub i n)))) := by verus_default_tac)
+      (_0 : (x ≥ 0) := by verus_default_tac)
+      (_1 : (n > 0) := by verus_default_tac)
+      (_2 : (∀ (i : Int), (((0 ≤ i) ∧ (i < n)) → (f i))) := by verus_default_tac)
+      (_3 : (∀ (i : Int), (((i ≥ 0) ∧ (f i)) → (f (math.add i n)))) := by verus_default_tac)
+      (_4 : (∀ (i : Int), (((i < n) ∧ (f i)) → (f (math.sub i n)))) := by verus_default_tac)
   : (f x)
   := by
   have : x = x.natAbs := Int.eq_natAbs_of_zero_le _0
@@ -400,25 +408,29 @@ theorem arithmetic.internals.mul_internals.lemma_mul_distributes_plus
 theorem arithmetic.internals.mul_internals.lemma_mul_distributes_minus
       (x : Int) (y : Int) (z : Int)
   : (((x - y) * z) = ((x * z) - (y * z)))
-  := by verus_default_tac
+  := by exact Int.sub_mul x y z -- exact?
 
 @[verus_attr]
 theorem arithmetic.mul.lemma_mul_is_distributive_add_other_way
       (x : Int) (y : Int) (z : Int)
   : (((y + z) * x) = ((y * x) + (z * x)))
-  := by verus_default_tac
+  := by exact internals.mul_internals.lemma_mul_distributes_plus y z x -- exact?
 
 @[verus_attr]
 theorem arithmetic.mul.lemma_mul_is_distributive_sub
       (x : Int) (y : Int) (z : Int)
   : ((x * (y - z)) = ((x * y) - (x * z)))
-  := by verus_default_tac
+  := by
+  -- exact?
+  exact Int.mul_sub x y z
 
 @[verus_attr]
 theorem arithmetic.mul.lemma_mul_is_distributive_sub_other_way
       (x : Int) (y : Int) (z : Int)
   : (((y - z) * x) = ((y * x) - (z * x)))
-  := by verus_default_tac
+  := by
+  -- exact?
+  exact internals.mul_internals.lemma_mul_distributes_minus y z x
 
 @[verus_attr]
 theorem arithmetic.internals.mul_internals.lemma_mul_induction_auto
@@ -426,71 +438,121 @@ theorem arithmetic.internals.mul_internals.lemma_mul_induction_auto
       (_0 : ((arithmetic.internals.mul_internals.mul_auto 0) → (
 (((f 0) ∧ (∀ (i : Int), (((arithmetic.internals.general_internals.is_le 0 i) ∧ (f i)) → (f (i + 1))))) ∧ (∀ (i : Int), (((arithmetic.internals.general_internals.is_le i 0) ∧ (f i)) → (f (i - 1))))))) := by verus_default_tac)
   : (arithmetic.internals.mul_internals.mul_auto 0) ∧ (f x)
-  := by verus_default_tac
+  := by
+  simp at *
+  sorry
 
 @[verus_attr]
 theorem arithmetic.mul.lemma_mul_inequality
       (x : Int) (y : Int) (z : Int)
       (_0 : (x ≤ y) := by verus_default_tac) (_1 : (z ≥ 0) := by verus_default_tac)
   : ((x * z) ≤ (y * z))
-  := by verus_default_tac
+  := by
+  -- exact?
+  exact Int.mul_le_mul_of_nonneg_right _0 _1
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals.lemma_mod_add_denominator
       (n : Int) (x : Int)
       (_0 : (n > 0) := by verus_default_tac)
   : (((x + n) % n) = (x % n))
-  := by verus_default_tac
+  := by
+  --exact?
+  exact Int.add_emod_self
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals.lemma_mod_sub_denominator
       (n : Int) (x : Int)
       (_0 : (n > 0) := by verus_default_tac)
   : (((x - n) % n) = (x % n))
-  := by verus_default_tac
+  := by
+  --exact?
+  exact Int.Int.emod_sub_cancel x n
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals.lemma_div_add_denominator
       (n : Int) (x : Int)
       (_0 : (n > 0) := by verus_default_tac)
   : (((x + n) / n) = ((x / n) + 1))
-  := by verus_default_tac
+  := by
+  simp at *
+  have : 1 = n / n := by rw [Int.ediv_self]; omega
+  rw [this]
+  apply Int.add_ediv_of_dvd_right
+  exact Int.dvd_refl n
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals.lemma_div_sub_denominator
       (n : Int) (x : Int)
       (_0 : (n > 0) := by verus_default_tac)
   : (((x - n) / n) = ((x / n) - 1))
-  := by verus_default_tac
+  := by
+  simp at *
+  have : 1 = n / n := by rw [Int.ediv_self]; omega
+  rw [this]
+  apply Int.sub_ediv_of_dvd x
+  exact Int.dvd_refl n
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals.lemma_mod_below_denominator
       (n : Int) (x : Int)
       (_0 : (n > 0) := by verus_default_tac)
   : (((0 ≤ x) ∧ (x < n)) = ((x % n) = x))
-  := by verus_default_tac
+  := by
+  simp at *
+  constructor
+  · rintro ⟨h1,h2⟩; exact Int.emod_eq_of_lt h1 h2
+  · intro h; rw [← h]; clear h
+    constructor
+    · apply Int.emod_nonneg; omega
+    · exact Int.emod_lt_of_pos x _0
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals.lemma_mod_basics
       (n : Int)
       (_0 : (n > 0) := by verus_default_tac)
   : (∀ (x : Int), (((x + n) % n) = (x % n))) ∧ (∀ (x : Int), (((x - n) % n) = (x % n))) ∧ (∀ (x : Int), (((x + n) / n) = ((x / n) + 1))) ∧ (∀ (x : Int), (((x - n) / n) = ((x / n) - 1))) ∧ (∀ (x : Int), (((0 ≤ x) ∧ (x < n)) = ((x % n) = x)))
-  := by verus_default_tac
+  := by
+  refine ⟨?_1,?_2,?_3,?_4,?_5⟩
+  · intro x; exact lemma_mod_add_denominator n x _0
+  · intro x; exact lemma_mod_sub_denominator n x _0
+  · intro x; exact lemma_div_add_denominator n x _0
+  · intro x; exact lemma_div_sub_denominator n x _0
+  · intro x; exact lemma_mod_below_denominator n x _0
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals.lemma_quotient_and_remainder
       (x : Int) (q : Int) (r : Int) (n : Int)
       (_0 : (n > 0) := by verus_default_tac) (_1 : ((0 ≤ r) ∧ (r < n)) := by verus_default_tac) (_2 : (x = ((q * n) + r)) := by verus_default_tac)
   : (q = (x / n)) ∧ (r = (x % n))
-  := by verus_default_tac
+  := by
+  rcases _1 with ⟨_11, _12⟩; rcases _2
+  constructor
+  · rw [Int.add_ediv_of_dvd_left (by simp)]
+    rw [Int.mul_ediv_cancel _ (by omega)]
+    rw [Int.ediv_eq_zero_of_lt _11 _12]
+    simp
+  · rw [Int.add_emod]
+    simp
+    exact (Int.emod_eq_of_lt _11 _12).symm
 
 @[verus_attr]
 theorem arithmetic.internals.mod_internals.lemma_mod_auto
       (n : Int)
       (_0 : (n > 0) := by verus_default_tac)
   : (arithmetic.internals.mod_internals.mod_auto n)
-  := by verus_default_tac
+  := by
+  simp [mod_auto]
+  refine ⟨⟨?_,?_⟩,?_⟩
+  · intro z; rw [lemma_mod_below_denominator _ _ (by assumption)]
+  · simp [mod_auto_plus]
+    intro x y
+    rw [or_iff_not_imp_left]
+    sorry
+  · simp [mod_auto_minus]
+    sorry
 
+#exit
 @[verus_attr]
 theorem arithmetic.internals.div_internals.lemma_div_basics
       (n : Int)
