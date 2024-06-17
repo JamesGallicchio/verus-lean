@@ -1,4 +1,4 @@
-import VerusLean.Verus
+import VerusLean.VLIR
 
 namespace VerusLean
 

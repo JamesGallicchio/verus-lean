@@ -1,4 +1,4 @@
-import Lean.Data.Json
+import VerusLean.Upstream
 
 /-! A copy of the VIR AST from Verus. -/
 
@@ -13,27 +13,30 @@ import Lean.Data.Json
 
 open Lean (Json ToJson FromJson)
 
-def Ident := String
-def Idents := Array Ident
+def Any := Lean.Json
+deriving Lean.ToJson, FromJson, ToString
+instance : Repr Any where
+  reprPrec _ _ := "_"
 
-def Span := Json
-deriving ToJson, FromJson
+def Ident := String
+deriving ToJson, FromJson, Repr
+
+def Idents := Array Ident
+deriving ToJson, FromJson, Repr
 
 structure Binder (A : Type) where
   name: Ident
   a: A
+deriving ToJson, FromJson, Repr
 
-def Binders (A) := Array (Binder A)
-
-structure Spanned (X : Type) where
-  span: Span
-  x: X
+abbrev Binders (A) := Array (Binder A)
 
 /-- A fully-qualified name, such as a module name, function name, or datatype name -/
 structure Path where
   /-- None for local crate -/
   krate: Option Ident
   segments: Idents
+deriving ToJson, FromJson, Repr
 
 inductive VarIdentDisambiguate
   -- AIR names that don't derive from rustc's names:
@@ -60,20 +63,40 @@ inductive VarIdentDisambiguate
 | VirSubst : UInt64 → VarIdentDisambiguate
 | VirTemp : UInt64 → VarIdentDisambiguate
 | ExpandErrorsDecl : UInt64 → VarIdentDisambiguate
+deriving ToJson, FromJson, Repr
 
 /-- A local variable name, possibly renamed for disambiguation -/
 def VarIdent := Ident × VarIdentDisambiguate
+deriving Repr
+instance : ToJson VarIdent where
+  toJson := fun (id,dis) => .arr #[Lean.toJson id, Lean.toJson dis]
+instance : FromJson VarIdent where
+  fromJson? j := (do
+    let arr ← j.getArr?
+    if h : arr.size = 2 then
+      let id ← Lean.fromJson? arr[0]
+      let dis ← Lean.fromJson? arr[1]
+      return (id, dis)
+    else
+      throw s!"expected array of length 2, got {arr}"
+  ).mapError (fun s => s!"varident: {s}\n{j}")
+
 
 structure VarBinder (A: Type) where
   name: VarIdent
   a: A
+deriving ToJson, FromJson, Repr
 
 def VarBinders A := Array (VarBinder A)
+instance [ToJson A] : ToJson (VarBinders A) := inferInstanceAs (ToJson (Array _))
+instance [FromJson A] : FromJson (VarBinders A) := inferInstanceAs (FromJson (Array _))
+instance [Repr A] : Repr (VarBinders A) := inferInstanceAs (Repr (Array _))
 
 /-- Static function identifier -/
 structure Fun where
   /-- Path of function -/
   path: Path
+deriving ToJson, FromJson, Repr
 
 /-- Describes what access other modules have to a function, datatype, etc. -/
 structure Visibility where
@@ -82,6 +105,7 @@ structure Visibility where
   Some(path) means visible to path and path's descendents
   -/
   restricted_to: Option Path
+deriving ToJson, FromJson, Repr
 
 /-- Describes whether a variable, function, etc. is compiled or just used for verification -/
 inductive Mode where
@@ -91,6 +115,7 @@ inductive Mode where
   | Proof
   /-- Non-ghost (compiled code) -/
   | Exec
+deriving ToJson, FromJson, Repr
 
 
 /-- Describes integer types -/
@@ -107,32 +132,7 @@ inductive IntRange where
   | USize
   /-- Rust's isize type -/
   | ISize
-
-/--
-  Type information relevant to Rust but generally not relevant to the SMT encoding.
-  This information is relevant for resolving traits.
-  -/
-inductive TypDecoration where
-  /-- &T -/
-  | Ref
-  /-- &mut T -/
-  | MutRef
-  /-- Box<T> -/
-  | Box
-  /-- Rc<T> -/
-  | Rc
-  /-- Arc<T> -/
-  | Arc
-  /-- Ghost<T> -/
-  | Ghost
-  /-- Tracked<T> -/
-  | Tracked
-  /-- !, represented as Never<()> -/
-  | Never
-
-inductive Primitive where
-| Array
-| Slice
+deriving ToJson, FromJson, Repr
 
 inductive ImplPath
   /-- the usual `impl X for Trait`. The 'Path' is to the 'impl' block -/
@@ -140,12 +140,14 @@ inductive ImplPath
   /-- Declaration of a function `f` which conceptually implements a trait bound
      `FnDef(f) : FnOnce` -/
   | FnDefImplPath : Fun → ImplPath
+deriving ToJson, FromJson, Repr
 
 /-- Path of each impl that is used to satisfy a trait bound when instantiating the type parameter
 This is used to name the "dictionary" that is (conceptually) passed along with the
 type argument (see recursive_types.rs) -/
 -- REVIEW: should trait_typ_args also have ImplPaths?
 def ImplPaths := Array ImplPath
+deriving ToJson, FromJson, Repr
 
 /-- Rust type, but without Box, Rc, Arc, etc. -/
 inductive Typ
@@ -175,13 +177,8 @@ inductive Typ
   /-- StrSlice type. Currently the vstd StrSlice struct is "seen" as this type
     despite the fact that it is in fact a datatype -/
   | StrSlice
-  /-- Other primitive type (applied to type arguments) -/
-  | Primitive : Primitive → Array Typ → Typ
-  /-- Wrap type with extra information relevant to Rust but usually irrelevant to SMT encoding
-    (though needed sometimes to encode trait resolution) -/
-  | Decorate : TypDecoration → Typ → Typ
-  /-- Boxed for SMT encoding (unrelated to Rust Box type), can be unboxed: -/
-  | Boxed : Typ → Typ
+  | Array : Typ → Typ → Typ
+  | Slice : Typ → Typ
   /-- Type parameter (inherently SMT-boxed, and cannot be unboxed) -/
   | TypParam : Ident → Typ
   /-- Projection such as <D as T<S>>::X or <A as T>::X (SMT-boxed, and can sometimes be unboxed) -/
@@ -194,9 +191,11 @@ inductive Typ
   /-- Const integer type argument (e.g. for array sizes) -/
   | ConstInt : Int → Typ
   /- Left out: AIR constructor used internally -/
+  | Decorate : Any → Typ → Typ
+deriving FromJson, ToJson, Repr
 
 /-
-pub enum TriggerAnnotation {
+inductive TriggerAnnotation {
     -- /// Automatically choose triggers for the expression containing this annotation,
     -- /// with no diagnostics printed
     AutoTrigger,
@@ -211,7 +210,7 @@ pub enum TriggerAnnotation {
 
 -- /// Operations on Ghost and Tracked
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq, ToDebugSNode)]
-pub enum ModeCoercion {
+inductive ModeCoercion {
     -- /// Mutable borrows (Ghost::borrow_mut and Tracked::borrow_mut) are treated specially by
     -- /// the mode checker when checking assignments.
     BorrowMut,
@@ -219,20 +218,19 @@ pub enum ModeCoercion {
     -- /// (This includes Ghost::borrow, Tracked::get, etc.)
     Other,
 }
+-/
 
 -- /// Primitive 0-argument operations
-#[derive(Clone, Debug, Serialize, Deserialize, Hash, ToDebugSNode)]
-pub enum NullaryOpr {
+inductive NullaryOpr
     -- /// convert a const generic into an expression, as in fn f<const N: USize>() -> USize { N }
-    ConstGeneric(Typ),
+  | ConstGeneric : Typ → NullaryOpr
     -- /// predicate representing a satisfied trait bound T(t1, ..., tn) for trait T
-    TraitBound(Path, Typs),
+  | TraitBound : Path → Array Typ → NullaryOpr
     -- /// predicate representing a type equality bound T<t1, ..., tn, X = typ> for trait T
-    TypEqualityBound(Path, Typs, Ident, Typ),
+  | TypEqualityBound : Path → Array Typ → Ident → Typ → NullaryOpr
     -- /// A failed InferSpecForLoopIter subexpression
-    NoInferSpecForLoopIter,
-}
--/
+  | NoInferSpecForLoopIter
+deriving ToJson, FromJson, Repr
 
 /-- Primitive unary operations
  (not arbitrary user-defined functions -- these are represented by ExprX::Call) -/
@@ -276,36 +274,32 @@ inductive UnaryOp where
     -- /// May need coercion after casting a type argument
     CastToInteger,
     -/
+deriving ToJson, FromJson, Repr
 
-/-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord, ToDebugSNode)]
-pub enum VariantCheck {
-    None,
-    //Recommends,
-    Yes,
-}
+inductive VariantCheck
+  | None
+  -- Recommends,
+  | Yes
+deriving ToJson, FromJson, Repr
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord, ToDebugSNode)]
-structure FieldOpr {
-    pub datatype: Path,
-    pub variant: Ident,
-    pub field: Ident,
-    pub get_variant: Bool,
-    pub check: VariantCheck,
-}
+inductive IntegerTypeBoundKind
+  | UnsignedMax
+  | SignedMin
+  | SignedMax
+  | ArchWordBits
+deriving ToJson, FromJson, Repr
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord, ToDebugSNode)]
-pub enum IntegerTypeBoundKind {
-    UnsignedMax,
-    SignedMin,
-    SignedMax,
-    ArchWordBits,
-}
--/
+structure FieldOpr where
+  datatype: Path
+  variant: Ident
+  field: Ident
+  get_variant: Bool
+  check: VariantCheck
+deriving ToJson, FromJson, Repr
 
 /-- More complex unary operations (requires Clone rather than Copy)
   (Below, "boxed" refers to boxing types in the SMT encoding, not the Rust Box type) -/
-inductive UnaryOpr
+inductive UnaryOpr : Type
   /-- coerce Typ --> Boxed(Typ) -/
   | Box : Typ → UnaryOpr
   /-- coerce Boxed(Typ) --> Typ -/
@@ -328,6 +322,7 @@ inductive UnaryOpr
   | IntegerTypeBound : IntegerTypeBoundKind → Mode → UnaryOpr
     -- /// Custom diagnostic message
   | CustomErr : String → UnaryOpr
+deriving ToJson, FromJson, Repr
 
 -- /// Arithmetic operation that might fail (overflow or divide by zero)
 inductive ArithOp
@@ -341,6 +336,7 @@ inductive ArithOp
   | EuclideanDiv
     -- /// IntRange::Int % defined as Euclidean (returns non-negative result even for negative divisor)
   | EuclideanMod
+deriving ToJson, FromJson, Repr
 
 -- /// Bitwise operation
 inductive BitwiseOp
@@ -349,6 +345,7 @@ inductive BitwiseOp
   | BitOr
   | Shr
   | Shl
+deriving ToJson, FromJson, Repr
 
 
 inductive InequalityOp
@@ -360,10 +357,12 @@ inductive InequalityOp
   | Lt
     -- /// IntRange::Int >
   | Gt
+deriving ToJson, FromJson, Repr
 
 inductive ChainedOp
   | Inequality : InequalityOp → ChainedOp
   | MultiEq
+deriving ToJson, FromJson, Repr
 
 -- /// Primitive binary operations
 -- /// (not arbitrary user-defined functions -- these are represented by ExprX::Call)
@@ -396,78 +395,33 @@ inductive BinaryOp
   | Bitwise : BitwiseOp → Mode → BinaryOp
     -- /// Used only for handling builtin::strslice_get_char
   | StrGetChar
+deriving ToJson, FromJson, Repr
 
 -- /// More complex binary operations (requires Clone rather than Copy)
 inductive BinaryOpr
     -- /// extensional equality ext_equal (true ==> deep extensionality)
   | ExtEq : Bool → Typ → BinaryOpr
+deriving ToJson, FromJson, Repr
 
 inductive MultiOp
   | Chained : Array ChainedOp → MultiOp
-
--- /// Use Ghost(x) or Tracked(x) to unwrap an argument
-structure UnwrapParameter where
-    -- indicates Ghost or Tracked
-  mode: Mode
-    -- dummy name chosen for official Rust parameter name
-  outer_name: VarIdent
-    -- rename the parameter to a different name using a "let" binding
-  inner_name: VarIdent
-
--- /// Ghost annotations on functions and while loops; must appear at the beginning of function body
--- /// or while loop body
-inductive HeaderExpr
-    -- /// Use Ghost(x) or Tracked(x) to unwrap an argument, renaming outer_name to inner_name
-  | UnwrapParameter : UnwrapParameter → HeaderExpr
-    -- /// Marker that trait declaration method body is omitted and should be erased
-  | NoMethodBody
-    -- /// Preconditions on exec/proof functions
-  | Requires : Exprs → HeaderExpr
-    -- /// Postconditions on exec/proof functions, with an optional name and type for the return value
-  | Ensures : Option (VarIdent × Typ) → Exprs → HeaderExpr
-    -- /// Recommended preconditions on spec functions, used to help diagnose mistakes in specifications.
-    -- /// Checking of recommends is disabled by default.
-  | Recommends : Exprs → HeaderExpr
-    -- /// Invariants (except breaks) on loops
-  | InvariantExceptBreak : Exprs → HeaderExpr
-    -- /// Invariants on loops
-  | Invariant : Exprs → HeaderExpr
-    -- /// Decreases clauses for functions (possibly also for while loops, but this isn't implemented yet)
-  | Decreases : Exprs → HeaderExpr
-    -- /// Recursive function is uninterpreted when Expr is false
-  | DecreasesWhen : Expr → HeaderExpr
-    -- /// Proof function to prove termination for recursive functions
-  | DecreasesBy : Fun → HeaderExpr
-    -- /// The function might open the following invariants
-  | InvariantOpens : Exprs → HeaderExpr
-    -- /// The function might open any BUT the following invariants
-  | InvariantOpensExcept : Exprs → HeaderExpr
-    -- /// Make a function f opaque (definition hidden) within the current function body.
-    -- /// (The current function body can later reveal f in specific parts of the current function body if desired.)
-  | Hide : Fun → HeaderExpr
-    -- /// `extra_dependency(f)` means that recursion-checking should act as if the current
-    -- /// function calls `f`
-  | ExtraDependency : Fun → HeaderExpr
-
+deriving ToJson, FromJson, Repr
 
 -- /// Primitive constant values
 inductive Constant
     -- /// true or false
-  | Bool (_ : Bool)
+  | Bool : Bool → Constant
     -- /// integer of arbitrary size
-  | Int (_ : Int)
+  | Int : Int → Constant
     -- /// Hold generated string slices in here
-  | StrSlice (_ : String)
+  | StrSlice : String → Constant
     -- Hold unicode values here
-  | Char (_ : Char)
+    -- The standard library doesn't use string constants and i'm not sure how they are encoded by serde
+  --| Char : Char → Constant
+deriving ToJson, FromJson, Repr
 
-structure SpannedTyped (X : Type) where
-    span: Span
-    typ: Typ
-    x: X
-
-mutual
-inductive PatternX
+/-
+inductive Pattern : Type
     -- /// _
     -- /// True if this is implicitly added from a ..
   | Wildcard (_ : Bool)
@@ -478,27 +432,25 @@ inductive PatternX
       (mutable: Bool)
       (sub_pat: Pattern)
     -- /// Note: ast_simplify replaces this with Constructor
-  | Tuple (_ : Patterns)
+  | Tuple (_ : Array Pattern)
     -- /// Match constructor of datatype Path, variant Ident
     -- /// For tuple-style variants, the fields are named "_0", "_1", etc.
     -- /// Fields can appear **in any order** even for tuple variants.
-  | Constructor (_ : Path) (_1 : Ident) (_ : Binders Pattern)
+  | Constructor (_ : Path) (_1 : Ident) (_ : Array (Binder Pattern))
   | Or (_ : PatternX) (_: Pattern)
     -- /// Matches something equal to the value of this expr
     -- /// This only supports literals and consts, so we don't need to worry
     -- /// about side-effects, binding order, etc.
-  | Expr (_ : Expr)
+  --| Expr (_ : Expr)
     -- /// `e1 <= x <= e2` or `e1 <= x < e2`
     -- /// The start of the range is always inclusive (<=)
     -- /// The end of the range may be inclusive (<=) or exclusive (<),
     -- /// as given by the InequalityOp argument.
-  | Range (_ : Option Expr) (_ : Option (Expr × InequalityOp))
+  -- | Range (_ : Option Expr) (_ : Option (Expr × InequalityOp))
+
 
 -- /// Patterns for match expressions
-def Pattern := SpannedTyped PatternX
 def Patterns := Array Pattern
-end
-
 
 -- /// Arms of match expressions
 pub type Arm = Arc<Spanned<ArmX>>;
@@ -514,7 +466,7 @@ structure ArmX {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ToDebugSNode)]
-pub enum LoopInvariantKind {
+inductive LoopInvariantKind {
     -- /// holds at beginning of loop
     InvariantExceptBreak,
     -- /// holds at beginning of loop and after loop exit (including breaks)
@@ -529,196 +481,208 @@ structure LoopInvariant {
     pub kind: LoopInvariantKind,
     pub inv: Expr,
 }
+-/
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToDebugSNode)]
-pub enum BuiltinSpecFun {
+inductive BuiltinSpecFun
     -- Note that this now applies to any supported function type, e.g., FnDef types,
     -- not just "closure" types. TODO rename?
-    ClosureReq,
-    ClosureEns,
-}
+  | ClosureReq
+  | ClosureEns
+deriving ToJson, FromJson, Repr
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToDebugSNode)]
-pub enum CallTargetKind {
-    -- /// Statically known function
-    Static,
-    -- /// Dynamically dispatched method.  Optionally specify the statically resolved target if known.
-    Method(Option<(Fun, Typs, ImplPaths)>),
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToDebugSNode)]
-pub enum CallTarget {
-    -- /// Regular function, passing some type arguments
-    Fun(CallTargetKind, Fun, Typs, ImplPaths, AutospecUsage),
-    -- /// Call a dynamically computed FnSpec (no type arguments allowed),
-    -- /// where the function type is specified by the GenericBound of typ_param.
-    FnSpec(Expr),
-    BuiltinSpecFun(BuiltinSpecFun, Typs, ImplPaths),
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToDebugSNode, PartialEq, Eq, Hash)]
-pub enum VarAt {
-    Pre,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToDebugSNode, PartialEq, Eq, Hash)]
-pub enum InvAtomicity {
-    Atomic,
-    NonAtomic,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToDebugSNode, PartialEq, Eq, Hash)]
-pub enum AssertQueryMode {
-    NonLinear,
-    BitVector,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-structure Quant {
-    pub quant: air::ast::Quant,
-}
-
--- /// Computation mode for assert_by_compute
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, ToDebugSNode)]
-pub enum ComputeMode {
-    -- /// After simplifying an expression as far as possible,
-    -- /// pass the remainder as an assertion to Z3
-    Z3,
-    -- /// Asserted expression must simplify all the way to True
-    ComputeOnly,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, ToDebugSNode)]
-pub enum AutospecUsage {
+inductive AutospecUsage
     -- /// This function should be lowered by autospec iff the
     -- /// target function has an autospec attribute.
-    IfMarked,
+  | IfMarked
     -- /// Do not apply autospec. (This might be because we already applied it during lowering,
     -- /// or because it doesn't apply to this function.)
-    Final,
-}
+  | Final
+deriving ToJson, FromJson, Repr
 
--- /// Expression, similar to rustc_hir::Expr
-pub type Expr = Arc<SpannedTyped<ExprX>>;
-pub type Exprs = Arc<Vec<Expr>>;
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[to_node_impl(name = ">")]
-pub enum ExprX {
+
+inductive CallTargetKind
+    -- /// Statically known function
+  | Static
+    -- /// Dynamically dispatched method.  Optionally specify the statically resolved target if known.
+  | Method : (Option (Fun × Array Typ × ImplPaths)) → CallTargetKind
+deriving ToJson, FromJson, Repr
+
+inductive CallTarget
+    -- /// Regular function, passing some type arguments
+  | Fun : CallTargetKind → Fun → Array Typ → ImplPaths → AutospecUsage → CallTarget
+    -- /// Call a dynamically computed FnSpec (no type arguments allowed),
+    -- /// where the function type is specified by the GenericBound of typ_param.
+  --| FnSpec : Expr → CallTarget
+  | BuiltinSpecFun : BuiltinSpecFun → Array Typ → ImplPaths → CallTarget
+deriving ToJson, FromJson, Repr
+
+inductive VarAt
+  | Pre
+deriving ToJson, FromJson, Repr
+
+
+inductive InvAtomicity
+  | Atomic
+  | NonAtomic
+deriving ToJson, FromJson, Repr
+
+inductive AssertQueryMode
+  | NonLinear
+  | BitVector
+deriving ToJson, FromJson, Repr
+
+-- /// Computation mode for assert_by_compute
+inductive ComputeMode
+    -- /// After simplifying an expression as far as possible,
+    -- /// pass the remainder as an assertion to Z3
+  | Z3
+    -- /// Asserted expression must simplify all the way to True
+  | ComputeOnly
+deriving ToJson, FromJson, Repr
+
+inductive Quant.Inner
+  | Forall
+  | Exists
+deriving ToJson, FromJson, Repr
+
+structure Quant where
+  quant : Quant.Inner
+deriving ToJson, FromJson, Repr
+
+inductive ExprX : Type
     -- /// Constant
-    Const(Constant),
+  | Const : Constant → ExprX
     -- /// Local variable as a right-hand side
-    Var(VarIdent),
+  | Var : VarIdent → ExprX
     -- /// Local variable as a left-hand side
-    VarLoc(VarIdent),
+  | VarLoc : VarIdent → ExprX
     -- /// Local variable, at a different stage (e.g. a mutable reference in the post-state)
-    VarAt(VarIdent, VarAt),
+  | VarAt : VarIdent → VarAt → ExprX
     -- /// Use of a const variable.  Note: ast_simplify replaces this with Call.
-    ConstVar(Fun, AutospecUsage),
+  | ConstVar : Fun → AutospecUsage → ExprX
     -- /// Use of a static variable.
-    StaticVar(Fun),
+  | StaticVar : Fun → ExprX
     -- /// Mutable reference (location)
-    Loc(Expr),
+  | Loc : Spanned ExprX → ExprX
     -- /// Call to a function passing some expression arguments
-    Call(CallTarget, Exprs),
+  | Call : CallTarget → Array (Spanned ExprX) → ExprX
     -- /// Note: ast_simplify replaces this with Ctor
-    Tuple(Exprs),
+  | Tuple : Array (Spanned ExprX) → ExprX
     -- /// Construct datatype value of type Path and variant Ident,
     -- /// with field initializers Binders<Expr> and an optional ".." update expression.
     -- /// For tuple-style variants, the fields are named "_0", "_1", etc.
     -- /// Fields can appear **in any order** even for tuple variants.
-    Ctor(Path, Ident, Binders<Expr>, Option<Expr>),
+  | Ctor : Path → Ident → Array (Binder (Spanned ExprX))  → Option (Spanned ExprX) → ExprX
     -- /// Primitive 0-argument operation
-    NullaryOpr(NullaryOpr),
+  | NullaryOpr : NullaryOpr → ExprX
     -- /// Primitive unary operation
-    Unary(UnaryOp, Expr),
+  | Unary : UnaryOp → (Spanned ExprX) → ExprX
     -- /// Special unary operator
-    UnaryOpr(UnaryOpr, Expr),
+  | UnaryOpr : UnaryOpr → (Spanned ExprX) → ExprX
     -- /// Primitive binary operation
-    Binary(BinaryOp, Expr, Expr),
+  | Binary : BinaryOp → (Spanned ExprX) → (Spanned ExprX) → ExprX
     -- /// Special binary operation
-    BinaryOpr(BinaryOpr, Expr, Expr),
+  | BinaryOpr : BinaryOpr → (Spanned ExprX) → (Spanned ExprX) → ExprX
     -- /// Primitive multi-operand operation
-    Multi(MultiOp, Exprs),
-    -- /// Quantifier (forall/exists), binding the variables in Binders, with body Expr
-    Quant(Quant, VarBinders<Typ>, Expr),
+  | Multi : MultiOp → Array (Spanned ExprX) → ExprX
+    -- /// Quantifier (forall/exists), binding the variables in Binders, with body ExprX
+  | Quant : Quant → VarBinders Typ → (Spanned ExprX) → ExprX
     -- /// Specification closure
-    Closure(VarBinders<Typ>, Expr),
+  | Closure : VarBinders Typ → (Spanned ExprX) → ExprX
     -- /// Executable closure
-    ExecClosure {
-        params: VarBinders<Typ>,
-        body: Expr,
-        requires: Exprs,
-        ensures: Exprs,
-        ret: VarBinder<Typ>,
+  | ExecClosure
+        (params: VarBinders Typ)
+        (body: (Spanned ExprX))
+        (requires: Array (Spanned ExprX))
+        (ensures: Array (Spanned ExprX))
+        (ret: VarBinder Typ)
         -- /// The 'external spec' is an Option because it gets filled in during
         -- /// ast_simplify. It contains the assumptions that surrounding context
         -- /// can assume about a closure object after it is created.
-        external_spec: Option<(VarIdent, Expr)>,
-    },
+        (external_spec: Option (VarIdent × (Spanned ExprX)) )
     -- /// Array literal (can also be used for sequence literals in the future)
-    ArrayLiteral(Exprs),
+  | ArrayLiteral : Array (Spanned ExprX) → ExprX
     -- /// Executable function (declared with 'fn' and referred to by name)
-    ExecFnByName(Fun),
+  | ExecFnByName : Fun → ExprX
     -- /// Choose specification values satisfying a condition, compute body
-    Choose { params: VarBinders<Typ>, cond: Expr, body: Expr },
+  | Choose
+        (params: VarBinders Typ)
+        (cond: (Spanned ExprX))
+        (body: (Spanned ExprX))
     -- /// Manually supply triggers for body of quantifier
-    WithTriggers { triggers: Arc<Vec<Exprs>>, body: Expr },
+  | WithTriggers
+        (triggers: Array (Array (Spanned ExprX)) )
+        (body: (Spanned ExprX))
     -- /// Assign to local variable
     -- /// init_not_mut = true ==> a delayed initialization of a non-mutable variable
-    Assign { init_not_mut: Bool, lhs: Expr, rhs: Expr, op: Option<BinaryOp> },
+  | Assign
+        (init_not_mut: Bool)
+        (lhs: (Spanned ExprX))
+        (rhs: (Spanned ExprX))
+        (op: Option BinaryOp)
     -- /// Reveal definition of an opaque function with some integer fuel amount
-    Fuel(Fun, u32, Bool),
+  | Fuel: Fun → UInt32 → Bool → ExprX
     -- /// Reveal a string
-    RevealString(Arc<String>),
-    -- /// Header, which must appear at the beginning of a function or while loop.
-    -- /// Note: this only appears temporarily during rust_to_vir construction, and should not
-    -- /// appear in the final Expr produced by rust_to_vir (see vir::headers::read_header).
-    Header(HeaderExpr),
+  | RevealString : String → ExprX
     -- /// Assert or assume
-    AssertAssume { is_assume: Bool, expr: Expr },
+  | AssertAssume (is_assume: Bool) (expr: (Spanned ExprX))
     -- /// Assert-forall or assert-by statement
-    AssertBy { vars: VarBinders<Typ>, require: Expr, ensure: Expr, proof: Expr },
+  | AssertBy
+        (vars: VarBinders Typ)
+        (require: (Spanned ExprX))
+        (ensure: (Spanned ExprX))
+        (proof: (Spanned ExprX))
     -- /// `assert_by` with a dedicated prover option (nonlinear_arith, bit_vector)
-    AssertQuery { requires: Exprs, ensures: Exprs, proof: Expr, mode: AssertQueryMode },
+  | AssertQuery
+        (requires: Array (Spanned ExprX))
+        (ensures: Array (Spanned ExprX))
+        (proof: (Spanned ExprX))
+        (mode: AssertQueryMode)
     -- /// Assertion discharged via computation
-    AssertCompute(Expr, ComputeMode),
+  | AssertCompute : (Spanned ExprX) → ComputeMode → ExprX
     -- /// If-else
-    If(Expr, Expr, Option<Expr>),
+  | If: (Spanned ExprX) → (Spanned ExprX) → Option (Spanned ExprX) → ExprX
     -- /// Match (Note: ast_simplify replaces Match with other expressions)
-    Match(Expr, Arms),
+  | Match: (Spanned ExprX) → Any → ExprX
     -- /// Loop (either "while", cond = Some(...), or "loop", cond = None), with invariants
-    Loop {
-        loop_isolation: Bool,
-        is_for_loop: Bool,
-        label: Option<String>,
-        cond: Option<Expr>,
-        body: Expr,
-        invs: LoopInvariants,
-        decrease: Exprs,
-    },
+  | Loop
+        (loop_isolation: Bool)
+        (is_for_loop: Bool)
+        (label: Option String)
+        (cond: Option (Spanned ExprX))
+        (body: (Spanned ExprX))
+        --(invs: LoopInvariants)
+        (decrease: Array (Spanned ExprX))
     -- /// Open invariant
-    OpenInvariant(Expr, VarBinder<Typ>, Expr, InvAtomicity),
+  | OpenInvariant: (Spanned ExprX) → VarBinder Typ → (Spanned ExprX) → InvAtomicity → ExprX
     -- /// Return from function
-    Return(Option<Expr>),
+  | Return: Option (Spanned ExprX) → ExprX
     -- /// break or continue
-    BreakOrContinue { label: Option<String>, is_break: Bool },
+  | BreakOrContinue
+        (label: Option String)
+        (is_break: Bool)
     -- /// Enter a Rust ghost block, which will be erased during compilation.
     -- /// In principle, this is not needed, because we can infer which code to erase using modes.
     -- /// However, we can't easily communicate the inferred modes back to rustc for erasure
     -- /// and lifetime checking -- rustc needs syntactic annotations for these, and the mode checker
     -- /// needs to confirm that these annotations agree with what would have been inferred.
-    Ghost { alloc_wrapper: Bool, tracked: Bool, expr: Expr },
+  | Ghost
+        (alloc_wrapper: Bool)
+        (tracked: Bool)
+        (expr: (Spanned ExprX))
     -- /// Sequence of statements, optionally including an expression at the end
-    Block(Stmts, Option<Expr>),
-    -- /// Inline AIR statement
-    AirStmt(Arc<String>),
-}
+  -- | Block: Stmts → Option (Spanned ExprX) → ExprX
+deriving ToJson, FromJson, Repr
 
+abbrev Expr := Spanned ExprX
+
+/-
 -- /// Statement, similar to rustc_hir::Stmt
 pub type Stmt = Arc<Spanned<StmtX>>;
 pub type Stmts = Arc<Vec<Stmt>>;
 #[derive(Debug, Serialize, Deserialize, ToDebugSNode)]
-pub enum StmtX {
+inductive StmtX {
     -- /// Single expression
     Expr(Expr),
     -- /// Declare a local variable, which may be mutable, and may have an initial value
@@ -726,28 +690,28 @@ pub enum StmtX {
     -- /// however, ast_simplify replaces all patterns with PatternX::Var
     -- /// (The mode is only allowed to be None for one special case; see modes.rs)
     Decl { pattern: Pattern, mode: Option<Mode>, init: Option<Expr> },
-}
+}-/
 
 -- /// Function parameter
-pub type Param = Arc<Spanned<ParamX>>;
-pub type Params = Arc<Vec<Param>>;
-#[derive(Debug, Serialize, Deserialize, ToDebugSNode, Clone)]
-structure ParamX {
-    pub name: VarIdent,
-    pub typ: Typ,
-    pub mode: Mode,
+structure ParamX where
+    name: VarIdent
+    typ: Typ
+    mode: Mode
     -- /// An &mut parameter
-    pub is_mut: Bool,
+    is_mut: Bool
     -- /// If the parameter uses a Ghost(x) or Tracked(x) pattern to unwrap the value, this is
     -- /// the mode of the resulting unwrapped x variable (Spec for Ghost(x), Proof for Tracked(x)).
     -- /// We also save a copy of the original wrapped name for lifetime_generate
-    pub unwrapped_info: Option<(Mode, VarIdent)>,
-}
+    unwrapped_info: Option (Mode × VarIdent)
+deriving ToJson, FromJson, Repr
 
+abbrev Param := Spanned ParamX
+
+/-
 pub type GenericBound = Arc<GenericBoundX>;
 pub type GenericBounds = Arc<Vec<GenericBound>>;
 #[derive(Debug, Serialize, Deserialize, ToDebugSNode)]
-pub enum GenericBoundX {
+inductive GenericBoundX {
     -- /// Implemented trait T(t1, ..., tn) where t1...tn usually contain some type parameters
     -- REVIEW: add ImplPaths here?
     Trait(Path, Typs),
@@ -763,7 +727,7 @@ pub enum GenericBoundX {
 -- ///   enum Bar { Rec(S<Box<Bar>>) }
 -- ///   (instantiates A with recursive type Box<Foo> or Box<Bar>)
 #[derive(Debug, Serialize, Deserialize, ToDebugSNode, Clone, Copy, PartialEq, Eq)]
-pub enum AcceptRecursiveType {
+inductive AcceptRecursiveType {
     -- /// rejects the Foo example above
     -- /// (because A may occur negatively in S)
     Reject,
@@ -826,112 +790,95 @@ structure FunctionAttrsX {
 
 -- /// Function specification of its invariant mask
 #[derive(Clone, Debug, Serialize, Deserialize, ToDebugSNode)]
-pub enum MaskSpec {
+inductive MaskSpec {
     InvariantOpens(Exprs),
     InvariantOpensExcept(Exprs),
-}
+}-/
 
-#[derive(Debug, Serialize, Deserialize, ToDebugSNode, Clone)]
-pub enum FunctionKind {
-    Static,
+inductive FunctionKind
+  | Static
     -- /// Method declaration inside a trait
-    TraitMethodDecl {
-        trait_path: Path,
-    },
+  | TraitMethodDecl
+        (trait_path: Path)
     -- /// Method implementation inside an impl, implementing a trait method for a trait for a type
-    TraitMethodImpl {
+  | TraitMethodImpl
         -- /// Fun declared by trait for this method
-        method: Fun,
+        (method: Fun)
         -- /// Path of the impl (e.g. "impl2") that contains the method implementation
-        impl_path: Path,
-        trait_path: Path,
-        trait_typ_args: Typs,
+        (impl_path: Path)
+        (trait_path: Path)
+        (trait_typ_args: Array Typ)
         -- /// If Some, inherit default method body from function in the trait:
-        inherit_body_from: Option<Fun>,
-    },
+        (inherit_body_from: Option Fun)
     -- /// These should get demoted into Static functions in `demote_foreign_traits`.
     -- /// This really only exists so that we can check the trait really is foreign.
-    ForeignTraitMethodImpl {
-        method: Fun,
-        impl_path: Path,
-        trait_path: Path,
-        trait_typ_args: Typs,
-    },
-}
+  | ForeignTraitMethodImpl
+        (method: Fun)
+        (impl_path: Path)
+        (trait_path: Path)
+        (trait_typ_args: Array Typ)
+deriving ToJson, FromJson, Repr
+
 
 -- /// Function, including signature and body
-pub type Function = Arc<Spanned<FunctionX>>;
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[to_node_impl]
-structure FunctionX {
+structure Function where
     -- /// Name of function
-    pub name: Fun,
-    -- /// Proxy used to declare the spec of this function
-    -- /// (e.g., some function marked `external_fn_specification`)
-    pub proxy: Option<Spanned<Path>>,
-    -- /// Kind (translation to AIR is different for each different kind)
-    pub kind: FunctionKind,
-    -- /// Access control (public/private)
-    pub visibility: Visibility,
-    -- /// Owning module
-    pub owning_module: Option<Path>,
+    name: Fun
     -- /// exec functions are compiled, proof/spec are erased
     -- /// exec/proof functions can have requires/ensures, spec cannot
     -- /// spec functions can be used in requires/ensures, proof/exec cannot
-    pub mode: Mode,
-    -- /// Default amount of fuel: 0 means opaque, >= 1 means visible
-    -- /// For recursive functions, fuel determines the number of unfoldings that the SMT solver sees
-    pub fuel: u32,
+    mode: Mode
     -- /// Type parameters to generic functions
     -- /// (for trait methods, the trait parameters come first, then the method parameters)
-    pub typ_params: Idents,
+    typ_params: Idents
     -- /// Type bounds of generic functions
-    pub typ_bounds: GenericBounds,
+    --typ_bounds: GenericBounds
     -- /// Function parameters
-    pub params: Params,
+    params: Array Param
     -- /// Return value (unit return type is treated specially; see FunctionX::has_return in ast_util)
-    pub ret: Param,
+  --  ret: Param
     -- /// Preconditions (requires for proof/exec functions, recommends for spec functions)
-    pub require: Exprs,
+  --  require: Array Expr
     -- /// Postconditions (proof/exec functions only)
-    pub ensure: Exprs,
+  --  ensure: Array Expr
     -- /// Decreases clause to ensure recursive function termination
     -- /// decrease.len() == 0 means no decreases clause
     -- /// decrease.len() >= 1 means list of expressions, interpreted in lexicographic order
-    pub decrease: Exprs,
+  --  decrease: Array Expr
     -- /// If Expr is true for the arguments to the function,
     -- /// the function is defined according to the function body and the decreases clauses must hold.
     -- /// If Expr is false, the function is uninterpreted, the body and decreases clauses are ignored.
-    pub decrease_when: Option<Expr>,
-    -- /// Prove termination with a separate proof function
-    pub decrease_by: Option<Fun>,
-    -- /// For broadcast_forall functions, poly sets this to Some((params, reqs ==> enss))
-    -- /// where params and reqs ==> enss use coerce_typ_to_poly rather than coerce_typ_to_native
-    pub broadcast_forall: Option<(Params, Expr)>,
-    -- /// Axioms (similar to broadcast axioms) for the FnDef type corresponding to
-    -- /// this function, if one is generated for this particular function.
-    -- /// Similar to 'external_spec' in the ExecClosure node, this is filled
-    -- /// in during ast_simplify.
-    pub fndef_axioms: Option<Exprs>,
-    -- /// MaskSpec that specifies what invariants the function is allowed to open
-    pub mask_spec: Option<MaskSpec>,
-    -- /// Allows the item to be a const declaration or static
-    pub item_kind: ItemKind,
-    -- /// For public spec functions, publish == None means that the body is private
-    -- /// even though the function is public, the Bool indicates false = opaque, true = visible
-    -- /// the body is public
-    pub publish: Option<Bool>,
-    -- /// Various attributes
-    pub attrs: FunctionAttrs,
-    -- /// Body of the function (may be None for foreign functions or for external_body functions)
-    pub body: Option<Expr>,
-    -- /// Extra dependencies, only used for for the purposes of recursion-well-foundedness
-    -- /// Useful only for trusted fns.
-    pub extra_dependencies: Vec<Fun>,
-}
+  --  decrease_when: Option Expr
+deriving ToJson, FromJson
 
+#eval show IO Unit from do
+  let contents ← IO.FS.readFile "verus/source/vstd.json"
+  let tyjs ← IO.ofExcept <| do
+    (← Json.parse contents).getArr?
+  for tyj in tyjs do
+    try
+      let _f : Function ← IO.ofExcept (Lean.fromJson? tyj)
+      pure ()
+    catch e =>
+      IO.println e
+      IO.println <| ← IO.ofExcept do
+        let arr ← (← tyj.getObjVal? "require").getArr?
+        let a := arr[0]!
+        let b : Spanned Any ← Lean.fromJson? a
+        let c ← (← b.x.getObjVal? "Binary").getArr?
+        let d := c[1]!
+        let e : Spanned Any ← Lean.fromJson? d
+        let f := e.x
+        let g ← (← f.getObjVal? "Binary").getArr?
+        let h : Spanned Any ← Lean.fromJson? g[1]!
+        let i := h.x
+        return (repr <| Lean.fromJson? (α := ExprX) i, toString i)
+      break
+  return
+
+/-
 #[derive(Debug, Serialize, Deserialize, Clone, ToDebugSNode, Copy)]
-pub enum ItemKind {
+inductive ItemKind {
     Function,
     -- /// This function is actually a const declaration;
     -- /// we treat const declarations as functions with 0 arguments, having mode == Spec.
@@ -982,7 +929,7 @@ pub type Field = Binder<(Typ, Mode, Visibility)>;
 pub type Fields = Binders<(Typ, Mode, Visibility)>;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ToDebugSNode)]
-pub enum CtorPrintStyle {
+inductive CtorPrintStyle {
     Tuple,  -- actual tuple (a, b)
     Parens, -- tuple style: Ctor(a, b)
     Braces, -- struct: Ctor { a: ... }
@@ -999,7 +946,7 @@ structure Variant {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToDebugSNode)]
-pub enum DatatypeTransparency {
+inductive DatatypeTransparency {
     Never,
     WhenVisible(Visibility),
 }
@@ -1072,7 +1019,7 @@ structure TraitImplX {
 }
 
 #[derive(Clone, Debug, Hash, Serialize, Deserialize, ToDebugSNode, PartialEq, Eq)]
-pub enum WellKnownItem {
+inductive WellKnownItem {
     DropTrait,
 }
 
@@ -1087,7 +1034,7 @@ structure ModuleX {
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, ToDebugSNode)]
-pub enum ArchWordBits {
+inductive ArchWordBits {
     Either32Or64,
     Exactly(u32),
 }
@@ -1139,3 +1086,4 @@ structure KrateX {
     -- /// Arch info
     pub arch: Arch,
 }
+-/
