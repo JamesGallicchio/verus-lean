@@ -38,49 +38,9 @@ structure Path where
   segments: Idents
 deriving ToJson, FromJson, Repr
 
-inductive VarIdentDisambiguate
-  -- AIR names that don't derive from rustc's names:
-| AirLocal
-  -- rustc's parameter unique id comes from the function body; no body means no id:
-| NoBodyParam
-  -- TypParams are normally Idents, but sometimes we mix TypParams into lists of VarIdents:
-| TypParamBare
-| TypParamSuffixed
-| TypParamDecorated
-  -- Fields are normally Idents, but sometimes we mix field names into lists of VarIdents:
-| Field
-| RustcId : USize → VarIdentDisambiguate
-  -- We track whether the variable is SST/AIR statement-bound or expression-bound,
-  -- to help drop unnecessary ids from expression-bound variables
-| VirRenumbered (is_stmt: Bool) (does_shadow: Bool) (id: UInt64)
-  -- Some expression-bound variables don't need an id
-| VirExprNoNumber
-  -- We rename parameters to VirParam if the parameters don't conflict with each other
-| VirParam
-  -- Recursive definitions have an extra copy of the parameters
-| VirParamRecursion : USize → VarIdentDisambiguate
-  -- Capture-avoiding substitution creates new names:
-| VirSubst : UInt64 → VarIdentDisambiguate
-| VirTemp : UInt64 → VarIdentDisambiguate
-| ExpandErrorsDecl : UInt64 → VarIdentDisambiguate
-deriving ToJson, FromJson, Repr
-
 /-- A local variable name, possibly renamed for disambiguation -/
-def VarIdent := Ident × VarIdentDisambiguate
-deriving Repr
-instance : ToJson VarIdent where
-  toJson := fun (id,dis) => .arr #[Lean.toJson id, Lean.toJson dis]
-instance : FromJson VarIdent where
-  fromJson? j := (do
-    let arr ← j.getArr?
-    if h : arr.size = 2 then
-      let id ← Lean.fromJson? arr[0]
-      let dis ← Lean.fromJson? arr[1]
-      return (id, dis)
-    else
-      throw s!"expected array of length 2, got {arr}"
-  ).mapError (fun s => s!"varident: {s}\n{j}")
-
+def VarIdent := Ident
+deriving Repr, ToJson, FromJson
 
 structure VarBinder (A: Type) where
   name: VarIdent
@@ -153,11 +113,11 @@ deriving ToJson, FromJson, Repr
 inductive Typ
   /-- Bool, Int, Datatype are translated directly into corresponding SMT types (they are not SMT-boxed) -/
   | Bool
-  | Int : IntRange → Typ
+  | Int (_0: IntRange)
   /-- UTF-8 character type -/
   | Char
   /-- Tuple type (t1, ..., tn).  Note: ast_simplify replaces Tuple with Datatype. -/
-  | Tuple : Array Typ → Typ
+  | Tuple (_0: Array Typ)
   /--
     `FnSpec` type (TODO rename from 'Lambda' to just 'FnSpec')
     (t1, ..., tn) -> t0. -/
@@ -173,7 +133,7 @@ inductive Typ
     FnDef axioms to introduce. -/
   | FnDef : Fun → Array Typ → Option Fun → Typ
   /-- Datatype (concrete or abstract) applied to type arguments -/
-  | Datatype : Path → Array Typ → ImplPaths → Typ
+  | Datatype : Path → Array Typ → Typ
   /-- StrSlice type. Currently the vstd StrSlice struct is "seen" as this type
     despite the fact that it is in fact a datatype -/
   | StrSlice
@@ -233,7 +193,7 @@ inductive NullaryOpr
 deriving ToJson, FromJson, Repr
 
 /-- Primitive unary operations
- (not arbitrary user-defined functions -- these are represented by ExprX::Call) -/
+ (not arbitrary user-defined functions -- these are represented by Expr::Call) -/
 inductive UnaryOp where
     /-- Boolean not -/
     | Not
@@ -365,7 +325,7 @@ inductive ChainedOp
 deriving ToJson, FromJson, Repr
 
 -- /// Primitive binary operations
--- /// (not arbitrary user-defined functions -- these are represented by ExprX::Call)
+-- /// (not arbitrary user-defined functions -- these are represented by Expr::Call)
 -- /// Note that all integer operations are on mathematic integers (IntRange::Int),
 -- /// not on finite-width integer types or nat.
 -- /// Finite-width and nat operations are represented with a combination of IntRange::Int operations
@@ -410,11 +370,11 @@ deriving ToJson, FromJson, Repr
 -- /// Primitive constant values
 inductive Constant
     -- /// true or false
-  | Bool : Bool → Constant
+  | Bool (_0 : Bool)
     -- /// integer of arbitrary size
-  | Int : Int → Constant
+  | Int (_0 : String)
     -- /// Hold generated string slices in here
-  | StrSlice : String → Constant
+  | StrSlice (_0 : String)
     -- Hold unicode values here
     -- The standard library doesn't use string constants and i'm not sure how they are encoded by serde
   --| Char : Char → Constant
@@ -550,114 +510,104 @@ structure Quant where
   quant : Quant.Inner
 deriving ToJson, FromJson, Repr
 
-inductive ExprX : Type
+inductive Expr : Type
     -- /// Constant
-  | Const : Constant → ExprX
+  | Const (_0: Constant)
     -- /// Local variable as a right-hand side
-  | Var : VarIdent → ExprX
-    -- /// Local variable as a left-hand side
-  | VarLoc : VarIdent → ExprX
-    -- /// Local variable, at a different stage (e.g. a mutable reference in the post-state)
-  | VarAt : VarIdent → VarAt → ExprX
-    -- /// Use of a const variable.  Note: ast_simplify replaces this with Call.
-  | ConstVar : Fun → AutospecUsage → ExprX
-    -- /// Use of a static variable.
-  | StaticVar : Fun → ExprX
-    -- /// Mutable reference (location)
-  | Loc : Spanned ExprX → ExprX
+  | Var (_0 : VarIdent)
     -- /// Call to a function passing some expression arguments
-  | Call : CallTarget → Array (Spanned ExprX) → ExprX
+  | Call : CallTarget → Array Expr → Expr
     -- /// Note: ast_simplify replaces this with Ctor
-  | Tuple : Array (Spanned ExprX) → ExprX
+  | Tuple : Array Expr → Expr
     -- /// Construct datatype value of type Path and variant Ident,
     -- /// with field initializers Binders<Expr> and an optional ".." update expression.
     -- /// For tuple-style variants, the fields are named "_0", "_1", etc.
     -- /// Fields can appear **in any order** even for tuple variants.
-  | Ctor : Path → Ident → Array (Binder (Spanned ExprX))  → Option (Spanned ExprX) → ExprX
+  | Ctor : Path → Ident → Array (Binder Expr)  → Option Expr → Expr
     -- /// Primitive 0-argument operation
-  | NullaryOpr : NullaryOpr → ExprX
+  | NullaryOpr : NullaryOpr → Expr
     -- /// Primitive unary operation
-  | Unary : UnaryOp → (Spanned ExprX) → ExprX
+  | Unary : UnaryOp → Expr → Expr
     -- /// Special unary operator
-  | UnaryOpr : UnaryOpr → (Spanned ExprX) → ExprX
+  | UnaryOpr : UnaryOpr → Expr → Expr
     -- /// Primitive binary operation
-  | Binary : BinaryOp → (Spanned ExprX) → (Spanned ExprX) → ExprX
+  | Binary : BinaryOp → Expr → Expr → Expr
     -- /// Special binary operation
-  | BinaryOpr : BinaryOpr → (Spanned ExprX) → (Spanned ExprX) → ExprX
+  | BinaryOpr : BinaryOpr → Expr → Expr → Expr
     -- /// Primitive multi-operand operation
-  | Multi : MultiOp → Array (Spanned ExprX) → ExprX
-    -- /// Quantifier (forall/exists), binding the variables in Binders, with body ExprX
-  | Quant : Quant → VarBinders Typ → (Spanned ExprX) → ExprX
+  | Multi : MultiOp → Array Expr → Expr
+    -- /// Quantifier (forall/exists), binding the variables in Binders, with body Expr
+  | Quant : Quant → VarBinders Typ → Expr → Expr
     -- /// Specification closure
-  | Closure : VarBinders Typ → (Spanned ExprX) → ExprX
+  | Closure : VarBinders Typ → Expr → Expr
     -- /// Executable closure
   | ExecClosure
         (params: VarBinders Typ)
-        (body: (Spanned ExprX))
-        (requires: Array (Spanned ExprX))
-        (ensures: Array (Spanned ExprX))
+        (body: Expr)
+        (requires: Array Expr)
+        (ensures: Array Expr)
         (ret: VarBinder Typ)
         -- /// The 'external spec' is an Option because it gets filled in during
         -- /// ast_simplify. It contains the assumptions that surrounding context
         -- /// can assume about a closure object after it is created.
-        (external_spec: Option (VarIdent × (Spanned ExprX)) )
+        (external_spec: Option (VarIdent × Expr) )
     -- /// Array literal (can also be used for sequence literals in the future)
-  | ArrayLiteral : Array (Spanned ExprX) → ExprX
+  | ArrayLiteral : Array Expr → Expr
     -- /// Executable function (declared with 'fn' and referred to by name)
-  | ExecFnByName : Fun → ExprX
+  | ExecFnByName : Fun → Expr
     -- /// Choose specification values satisfying a condition, compute body
   | Choose
         (params: VarBinders Typ)
-        (cond: (Spanned ExprX))
-        (body: (Spanned ExprX))
+        (cond: Expr)
+        (body: Expr)
     -- /// Manually supply triggers for body of quantifier
   | WithTriggers
-        (triggers: Array (Array (Spanned ExprX)) )
-        (body: (Spanned ExprX))
+        (triggers: Array (Array Expr) )
+        (body: Expr)
     -- /// Assign to local variable
     -- /// init_not_mut = true ==> a delayed initialization of a non-mutable variable
   | Assign
         (init_not_mut: Bool)
-        (lhs: (Spanned ExprX))
-        (rhs: (Spanned ExprX))
+        (lhs: Expr)
+        (rhs: Expr)
         (op: Option BinaryOp)
     -- /// Reveal definition of an opaque function with some integer fuel amount
-  | Fuel: Fun → UInt32 → Bool → ExprX
+  | Fuel: Fun → UInt32 → Bool → Expr
     -- /// Reveal a string
-  | RevealString : String → ExprX
+  | RevealString : String → Expr
     -- /// Assert or assume
-  | AssertAssume (is_assume: Bool) (expr: (Spanned ExprX))
+  | AssertAssume (is_assume: Bool) (expr: Expr)
     -- /// Assert-forall or assert-by statement
   | AssertBy
         (vars: VarBinders Typ)
-        (require: (Spanned ExprX))
-        (ensure: (Spanned ExprX))
-        (proof: (Spanned ExprX))
+        (require: Expr)
+        (ensure: Expr)
+        (proof: Expr)
     -- /// `assert_by` with a dedicated prover option (nonlinear_arith, bit_vector)
   | AssertQuery
-        (requires: Array (Spanned ExprX))
-        (ensures: Array (Spanned ExprX))
-        (proof: (Spanned ExprX))
+        (requires: Array Expr)
+        (ensures: Array Expr)
+        (proof: Expr)
         (mode: AssertQueryMode)
     -- /// Assertion discharged via computation
-  | AssertCompute : (Spanned ExprX) → ComputeMode → ExprX
+  | AssertCompute : Expr → ComputeMode → Expr
     -- /// If-else
-  | If: (Spanned ExprX) → (Spanned ExprX) → Option (Spanned ExprX) → ExprX
+  | If: Expr → Expr → Option Expr → Expr
     -- /// Match (Note: ast_simplify replaces Match with other expressions)
-  | Match: (Spanned ExprX) → Any → ExprX
+  | Match: Expr → Any → Expr
     -- /// Loop (either "while", cond = Some(...), or "loop", cond = None), with invariants
   | Loop
         (loop_isolation: Bool)
         (is_for_loop: Bool)
         (label: Option String)
-        (cond: Option (Spanned ExprX))
-        (body: (Spanned ExprX))
+        (cond: Option Expr)
+        (body: Expr)
         --(invs: LoopInvariants)
-        (decrease: Array (Spanned ExprX))
+        (decrease: Array Expr)
     -- /// Open invariant
-  | OpenInvariant: (Spanned ExprX) → VarBinder Typ → (Spanned ExprX) → InvAtomicity → ExprX
+  | OpenInvariant: Expr → VarBinder Typ → Expr → InvAtomicity → Expr
     -- /// Return from function
-  | Return: Option (Spanned ExprX) → ExprX
+  | Return: Option Expr → Expr
     -- /// break or continue
   | BreakOrContinue
         (label: Option String)
@@ -670,12 +620,11 @@ inductive ExprX : Type
   | Ghost
         (alloc_wrapper: Bool)
         (tracked: Bool)
-        (expr: (Spanned ExprX))
+        (expr: Expr)
     -- /// Sequence of statements, optionally including an expression at the end
-  -- | Block: Stmts → Option (Spanned ExprX) → ExprX
+  -- | Block: Stmts → Option Expr → Expr
+  | Unsupported (_0: Any)
 deriving ToJson, FromJson, Repr
-
-abbrev Expr := Spanned ExprX
 
 /-
 -- /// Statement, similar to rustc_hir::Stmt
@@ -693,19 +642,8 @@ inductive StmtX {
 }-/
 
 -- /// Function parameter
-structure ParamX where
-    name: VarIdent
-    typ: Typ
-    mode: Mode
-    -- /// An &mut parameter
-    is_mut: Bool
-    -- /// If the parameter uses a Ghost(x) or Tracked(x) pattern to unwrap the value, this is
-    -- /// the mode of the resulting unwrapped x variable (Spec for Ghost(x), Proof for Tracked(x)).
-    -- /// We also save a copy of the original wrapped name for lifetime_generate
-    unwrapped_info: Option (Mode × VarIdent)
+def Param := VarBinder Typ
 deriving ToJson, FromJson, Repr
-
-abbrev Param := Spanned ParamX
 
 /-
 pub type GenericBound = Arc<GenericBoundX>;
@@ -827,7 +765,7 @@ structure Function where
     -- /// exec functions are compiled, proof/spec are erased
     -- /// exec/proof functions can have requires/ensures, spec cannot
     -- /// spec functions can be used in requires/ensures, proof/exec cannot
-    mode: Mode
+    -- mode: Mode
     -- /// Type parameters to generic functions
     -- /// (for trait methods, the trait parameters come first, then the method parameters)
     typ_params: Idents
@@ -836,7 +774,7 @@ structure Function where
     -- /// Function parameters
     params: Array Param
     -- /// Return value (unit return type is treated specially; see FunctionX::has_return in ast_util)
-  --  ret: Param
+    ret: Param
     -- /// Preconditions (requires for proof/exec functions, recommends for spec functions)
   --  require: Array Expr
     -- /// Postconditions (proof/exec functions only)
@@ -844,12 +782,12 @@ structure Function where
     -- /// Decreases clause to ensure recursive function termination
     -- /// decrease.len() == 0 means no decreases clause
     -- /// decrease.len() >= 1 means list of expressions, interpreted in lexicographic order
-  --  decrease: Array Expr
+    decrease: Array Expr
     -- /// If Expr is true for the arguments to the function,
     -- /// the function is defined according to the function body and the decreases clauses must hold.
     -- /// If Expr is false, the function is uninterpreted, the body and decreases clauses are ignored.
-  --  decrease_when: Option Expr
-deriving ToJson, FromJson
+    decrease_when: Option Expr
+deriving ToJson, FromJson, Repr
 
 #eval show IO Unit from do
   let contents ← IO.FS.readFile "verus/source/vstd.json"
@@ -858,21 +796,16 @@ deriving ToJson, FromJson
   for tyj in tyjs do
     try
       let _f : Function ← IO.ofExcept (Lean.fromJson? tyj)
-      pure ()
     catch e =>
       IO.println e
-      IO.println <| ← IO.ofExcept do
-        let arr ← (← tyj.getObjVal? "require").getArr?
-        let a := arr[0]!
-        let b : Spanned Any ← Lean.fromJson? a
-        let c ← (← b.x.getObjVal? "Binary").getArr?
-        let d := c[1]!
-        let e : Spanned Any ← Lean.fromJson? d
-        let f := e.x
-        let g ← (← f.getObjVal? "Binary").getArr?
-        let h : Spanned Any ← Lean.fromJson? g[1]!
-        let i := h.x
-        return (repr <| Lean.fromJson? (α := ExprX) i, toString i)
+      let a ← IO.ofExcept do
+        let a ← (tyj.getObjVal? "decrease")
+        let a ← a.getArrVal? 0
+        let a ← a.getObjVal? "If"
+        let a ← a.getArrVal? 1
+        return a
+      IO.println <| repr <| Lean.fromJson? (α := Expr) a
+      IO.println <| toString a
       break
   return
 
