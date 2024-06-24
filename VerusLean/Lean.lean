@@ -4,107 +4,116 @@ namespace VerusLean
 
 open Lean Elab Command
 
-def datatypeMap : HashMap Id (List Term → TermElabM Term) :=
+def datatypeMap : HashMap Path (Array Term → TermElabM Term) :=
   .ofList [
-    ( ⟨"core", ["result", "Result"]⟩
+    ( ⟨some "core", #["result", "Result"]⟩
     , fun
-      | [A,B] => do
+      | #[A,B] => do
         let exc := mkIdent ``Except
         `($exc $A $B)
       | _ => throwError "Result arity should be 2?"
     )
   ]
 
-partial def Id.toSyntax (i : Id) : Ident :=
-  Lean.mkIdent <| i.segments.foldl (· ++ .mkStr1 ·) (.mkStr1 i.krate)
+def Ident.toSyntax (i : Ident) : Lean.Ident :=
+  mkIdent (.mkSimple i)
+
+partial def Path.toSyntax (i : Path) : Lean.Ident :=
+  Lean.mkIdent <| i.segments.foldl
+    (init := i.krate.elim .anonymous .mkStr1)
+    (·.str ·)
 
 partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
   match t with
-  | .int ityp =>
+  | .Int ityp =>
     match ityp with
-    | .signed width =>
+    | .I width =>
       match width with
       | _ =>
         throwError "Signed int type: Unsupported width {width}"
-    | .unsigned width =>
+    | .ISize =>
+      throwError "Signed int type: Unsupported width ISize"
+    | .U width =>
       match width with
       | 32 =>
         return mkIdent `UInt32
       | _ =>
         throwError "Signed int type: Unsupported width {width}"
-    | .inf =>
-      return mkIdent `Int
-  | .datatype id params => do
+    | .USize => return mkIdent ``USize
+    | .Int => return mkIdent ``Int
+    | .Nat => return mkIdent ``Nat
+  | .Datatype id params => do
     match datatypeMap.find? id with
     | none =>
       throwError "Couldn't find datatype in datatype map"
     | some handler =>
       handler (← params.mapM Typ.toSyntax)
-  | .tuple tys => do
-    tys.foldrM (fun a b => do
-      `($(← Typ.toSyntax a) × $b))
-      (mkIdent ``Unit)
+  | _ => throwError "unsupported type: {repr t}"
 
-def PureExpr.toSyntax (e : PureExpr) : TermElabM Term :=
+def Expr.toSyntax (e : Expr) : TermElabM Term :=
   match e with
-  | .var n => return mkIdent n
-  | .binary op lhs rhs => do
+  | .Var n => return mkIdent (.mkStr1 n)
+  | .Binary op lhs rhs => do
     let lhs ← lhs.toSyntax
     let rhs ← rhs.toSyntax
     match op with
-    | .eq =>
+    | .Eq =>
       `($lhs = $rhs)
-    | .ne =>
+    | .Ne =>
       `($lhs ≠ $rhs)
-    | .lt =>
+    | .Inequality .Lt =>
       `($lhs < $rhs)
-    | .le =>
+    | .Inequality .Le =>
       `($lhs ≤ $rhs)
-    | .gt =>
+    | .Inequality .Gt =>
       `($lhs > $rhs)
-    | .ge =>
+    | .Inequality .Ge =>
       `($lhs ≥ $rhs)
-    | .and =>
+    | .And =>
       `($lhs ∧ $rhs)
-    | .or =>
+    | .Or =>
       `($lhs ∨ $rhs)
-  | .const (.int i) =>
+    | _ => throwError "unsupported binop {repr op}"
+  | .Const (.Int i) =>
     return Syntax.mkNumLit (toString i)
-  | .const (.bool b) =>
-    return Syntax.mkCApp (toString b) #[]
-  | .block _ _ =>
-    throwError "blocks currently unsupported"
+  | .Const (.Bool b) =>
+    return Syntax.mkCApp (.mkStr1 <| toString b) #[]
+  | _ =>
+    throwError "unsupported expr: {repr e}"
 
 def Function.toSyntax (f : Function) : CommandElabM (TSyntaxArray `command) :=
   match f with
-  | { id
+  | { name
+      typ_params
       params
       ret
       require
       ensure
+      decrease
+      decrease_when
     } => do
-  let ident := id.toSyntax
-  let ty ← liftTermElabM ret.typ.toSyntax
+  let ident := name.toSyntax
+  let ty ← liftTermElabM ret.a.toSyntax
   let args : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
     liftTermElabM <|
-    params.toArray.mapM (fun p => do
-      let arg := mkIdent p.name
-      let type ← p.typ.toSyntax
+    params.mapM (fun p => do
+      let arg := p.name.toSyntax
+      let type ← p.a.toSyntax
       `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
   let hyps : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
     liftTermElabM <|
-    require.toArray.mapIdxM (fun i req => do
-      let arg := mkIdent s!"_h{i}"
+    require.mapIdxM (fun i req => do
+      let arg := mkIdent (.mkSimple s!"_h{i}")
       let type ← req.toSyntax
       `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
   let func ← `(opaque $ident $(args ++ hyps):bracketedBinder* : $ty)
   let ensures ←
     liftTermElabM <|
-    ensure.toArray.mapIdxM (fun i ens => do
+    ensure.mapIdxM (fun i ens => do
       let thmIdent := mkIdent <| ident.getId.str s!"_{i}"
       `(theorem $thmIdent $(args ++ hyps):bracketedBinder* :
-          let $(mkIdent f.ret.name) : $(←f.ret.typ.toSyntax) :=
-            $ident $(params.toArray.map (mkIdent ·.name)):term*
+          let $(ident) : $(←ret.a.toSyntax) :=
+            $ident $(params.map (·.name.toSyntax)):term*
           $(← ens.toSyntax)
         := sorry
       )
