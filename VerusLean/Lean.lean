@@ -4,7 +4,27 @@ namespace VerusLean
 
 open Lean Elab Command
 
-def datatypeMap : HashMap Path (Array Term → TermElabM Term) :=
+def Ident.toSyntax (i : Ident) : Lean.Ident :=
+  mkIdent (.mkSimple i)
+
+partial def Path.toSyntax (i : Path) : Lean.Ident :=
+  Lean.mkIdent <| i.segments.foldl
+    (init := i.krate.elim .anonymous .mkStr1)
+    (·.str ·)
+
+def handleDatatype (id : Path) (params : Array Term) : TermElabM Term :=
+  match id with
+  | { krate := none, segments := #["tuple%0"] } =>
+    match params.back? with
+    | none => return mkIdent ``Unit
+    | some last =>
+      params.pop.foldrM (`(· × ·)) last
+  | _ =>
+  match datatypeMap.find? id with
+  | some handler => handler params
+  | none =>
+    throwError "Cannot handle datatype {repr id} with parameters {params}"
+where datatypeMap : HashMap Path (Array Term → TermElabM Term) :=
   .ofList [
     ( ⟨some "core", #["result", "Result"]⟩
     , fun
@@ -15,16 +35,9 @@ def datatypeMap : HashMap Path (Array Term → TermElabM Term) :=
     )
   ]
 
-def Ident.toSyntax (i : Ident) : Lean.Ident :=
-  mkIdent (.mkSimple i)
-
-partial def Path.toSyntax (i : Path) : Lean.Ident :=
-  Lean.mkIdent <| i.segments.foldl
-    (init := i.krate.elim .anonymous .mkStr1)
-    (·.str ·)
-
 partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
   match t with
+  | .Bool => return mkIdent ``Bool
   | .Int ityp =>
     match ityp with
     | .I width =>
@@ -36,24 +49,33 @@ partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
     | .U width =>
       match width with
       | 32 =>
-        return mkIdent `UInt32
+        return mkIdent ``UInt32
       | _ =>
         throwError "Signed int type: Unsupported width {width}"
     | .USize => return mkIdent ``USize
-    | .Int => return mkIdent ``Int
+    | .Int => return mkIdent ``_root_.Int
     | .Nat => return mkIdent ``Nat
   | .Datatype id params => do
-    match datatypeMap.find? id with
-    | none =>
-      throwError "Couldn't find datatype in datatype map"
-    | some handler =>
-      handler (← params.mapM Typ.toSyntax)
+    handleDatatype id (← params.mapM Typ.toSyntax)
+  | .Lambda t1 t2 =>
+    let t1 ← t1.mapM (·.toSyntax)
+    let t2 ← t2.toSyntax
+    t1.foldrM (`(· → ·)) t2
   | _ => throwError "unsupported type: {repr t}"
 
-def Expr.toSyntax (e : Expr) : TermElabM Term :=
+partial def Expr.toSyntax (e : Expr) : TermElabM Term := do
   match e with
   | .Var n => return mkIdent (.mkStr1 n)
-  | .Binary op lhs rhs => do
+  | .Unary op e =>
+    let e ← e.toSyntax
+    match op with
+    | .Id => return e
+    | .Not => `(! $e)
+    | .BitNot => `(~~~ $e)
+    | .Clip .Nat true =>
+      return mkIdent ``Int.natAbs
+    | _ => throwError "unsupported binop {repr op}"
+  | .Binary op lhs rhs =>
     let lhs ← lhs.toSyntax
     let rhs ← rhs.toSyntax
     match op with
@@ -73,11 +95,63 @@ def Expr.toSyntax (e : Expr) : TermElabM Term :=
       `($lhs ∧ $rhs)
     | .Or =>
       `($lhs ∨ $rhs)
+    | .Implies =>
+      `($lhs → $rhs)
+    | .Xor =>
+      `($lhs ^^^ $rhs)
+    | .Arith .Add =>
+      `($lhs + $rhs)
+    | .Arith .Mul =>
+      `($lhs * $rhs)
+    | .Arith .Sub =>
+      `($lhs - $rhs)
+    | .Arith .EuclideanDiv =>
+      `($lhs / $rhs)
+    | .Arith .EuclideanMod =>
+      `($lhs % $rhs)
+    | .Bitwise .Shl =>
+      `($lhs <<< $rhs)
+    | .Bitwise .Shr =>
+      `($lhs >>> $rhs)
+    | .Bitwise .BitOr =>
+      `($lhs ||| $rhs)
+    | .Bitwise .BitAnd =>
+      `($lhs &&& $rhs)
+    | .Bitwise .BitXor =>
+      `($lhs ^^^ $rhs)
     | _ => throwError "unsupported binop {repr op}"
-  | .Const (.Int i) =>
-    return Syntax.mkNumLit (toString i)
-  | .Const (.Bool b) =>
-    return Syntax.mkCApp (.mkStr1 <| toString b) #[]
+  | .Const c =>
+    match c with
+    | .Int i =>
+      return Syntax.mkNumLit i
+    | .Bool b=>
+      return Syntax.mkCApp (.mkStr1 <| toString b) #[]
+    | .StrSlice s =>
+      return Syntax.mkStrLit s
+  | .App f args =>
+    let f ← f.toSyntax
+    let args ← args.mapM (·.toSyntax)
+    `($f $args*)
+  | .StaticFun p =>
+    return p.toSyntax
+  | .Let decl e =>
+    let init ← decl.a.toSyntax
+    let e ← e.toSyntax
+    `(let $(decl.name.toSyntax) := $init; $e)
+  | .Quant q vs body =>
+    match q with
+    | .Forall =>
+      let vs : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
+        vs.mapM (fun b => do `(bracketedBinder|
+          ($(b.name.toSyntax) : $(← b.a.toSyntax))
+        ))
+      `(∀ $vs*, $(← body.toSyntax))
+    | .Exists =>
+      let vs : TSyntaxArray ``Lean.bracketedExplicitBinders ←
+        vs.mapM (fun b => do `(Lean.bracketedExplicitBinders|
+          ($(b.name.toSyntax):ident : $(← b.a.toSyntax))
+        ))
+      `(∃ $vs*, $(← body.toSyntax))
   | _ =>
     throwError "unsupported expr: {repr e}"
 
