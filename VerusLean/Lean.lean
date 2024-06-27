@@ -240,10 +240,3 @@ def Decl.toSyntax (d : Decl) :=
   match d with
   | .Defn d => d.toSyntax
   | .Theorem t => t.toSyntax
-
-#eval show CommandElabM Unit from do
-  let contents ← IO.FS.readFile "blah.json"
-  let json ← IO.ofExcept <| Lean.Json.parse contents
-  let d : Theorem ← IO.ofExcept <| Lean.fromJson? json
-  IO.println <| ← liftM <| liftTermElabM d.params[1]!.a.toSyntax
-  IO.println (← liftM d.toSyntax)
