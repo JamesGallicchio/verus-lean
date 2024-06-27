@@ -1,4 +1,5 @@
 import VerusLean.VLIR
+import VerusLean.VerusBuiltins
 
 namespace VerusLean
 
@@ -37,7 +38,7 @@ where datatypeMap : HashMap Path (Array Term → TermElabM Term) :=
 
 partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
   match t with
-  | .Bool => return mkIdent ``Bool
+  | .Bool => return mkIdent ``_root_.Bool
   | .Int ityp =>
     match ityp with
     | .I width =>
@@ -60,20 +61,19 @@ partial def Typ.toSyntax (t : Typ) : TermElabM Term := do
   | .Lambda t1 t2 =>
     let t1 ← t1.mapM (·.toSyntax)
     let t2 ← t2.toSyntax
-    t1.foldrM (`(· → ·)) t2
+    t1.foldrM (`($(·) → $(·))) t2
   | _ => throwError "unsupported type: {repr t}"
 
 partial def Expr.toSyntax (e : Expr) : TermElabM Term := do
   match e with
-  | .Var n => return mkIdent (.mkStr1 n)
+  | .Var n => return n.toSyntax
   | .Unary op e =>
     let e ← e.toSyntax
     match op with
     | .Id => return e
     | .Not => `(! $e)
     | .BitNot => `(~~~ $e)
-    | .Clip .Nat true =>
-      return mkIdent ``Int.natAbs
+    | .Clip .Nat true => `($(mkIdent ``Int.natAbs) $e)
     | _ => throwError "unsupported binop {repr op}"
   | .Binary op lhs rhs =>
     let lhs ← lhs.toSyntax
@@ -152,44 +152,98 @@ partial def Expr.toSyntax (e : Expr) : TermElabM Term := do
           ($(b.name.toSyntax):ident : $(← b.a.toSyntax))
         ))
       `(∃ $vs*, $(← body.toSyntax))
+  | .If cond tt ff => do
+    let cond ← cond.toSyntax
+    let tt ← tt.toSyntax
+    let ff ← ff.toSyntax
+    `(if $cond then $tt else $ff)
   | _ =>
     throwError "unsupported expr: {repr e}"
 
-def Function.toSyntax (f : Function) : CommandElabM (TSyntaxArray `command) :=
+def Defn.toSyntax (f : Defn) : CommandElabM (TSyntaxArray `command) :=
   match f with
   | { name
       typ_params
       params
       ret
-      require
-      ensure
+      body
       decrease
       decrease_when
     } => do
   let ident := name.toSyntax
   let ty ← liftTermElabM ret.a.toSyntax
   let args : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
-    liftTermElabM <|
-    params.mapM (fun p => do
-      let arg := p.name.toSyntax
-      let type ← p.a.toSyntax
-      `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
-  let hyps : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
-    liftTermElabM <|
-    require.mapIdxM (fun i req => do
-      let arg := mkIdent (.mkSimple s!"_h{i}")
-      let type ← req.toSyntax
-      `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
-  let func ← `(opaque $ident $(args ++ hyps):bracketedBinder* : $ty)
-  let ensures ←
-    liftTermElabM <|
-    ensure.mapIdxM (fun i ens => do
-      let thmIdent := mkIdent <| ident.getId.str s!"_{i}"
-      `(theorem $thmIdent $(args ++ hyps):bracketedBinder* :
-          let $(ident) : $(←ret.a.toSyntax) :=
-            $ident $(params.map (·.name.toSyntax)):term*
-          $(← ens.toSyntax)
-        := sorry
-      )
+    liftTermElabM (do
+      let tyParams ← typ_params.mapM (fun (t: Ident) =>
+        `(Lean.Parser.Term.bracketedBinderF| {$(t.toSyntax) : Type}))
+      let params ← params.mapM (fun p => do
+        let arg := p.name.toSyntax
+        let type ← p.a.toSyntax
+        `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
+      return tyParams ++ params
     )
-  return #[func] ++ ensures
+  let body : Term ← liftTermElabM <| do
+    let body ← body.toSyntax
+    match decrease_when with
+    | some d => `(if $(← d.toSyntax) then $body else $(mkIdent ``undefined))
+    | none => pure body
+  let func ← liftTermElabM <| do
+    if _h: decrease.size > 0 then
+      let hd := Syntax.mkApp (mkIdent ``Int.natAbs) <| #[← (decrease[0]'_h).toSyntax ]
+      let tl ← (decrease[1:].toArray).mapM (·.toSyntax)
+      let lexOrd : Term ←
+        if tl.size > 0 then
+          `( ( $hd, $tl,* ) )
+        else
+          pure hd
+      `(def $ident $args* : $ty := $body
+        termination_by $lexOrd
+        decreasing_by all_goals (simp_wf; aesop (rule_sets := [$(mkIdent `VerusLean):ident]))
+      )
+    else
+      `(def $ident $args* : $ty := $body)
+  return #[func]
+
+def Theorem.toSyntax (f : Theorem) : CommandElabM (TSyntaxArray `command) :=
+  match f with
+  | { name
+      typ_params
+      params
+      require
+      ensure
+    } => do
+  let ident := name.toSyntax
+  let args : TSyntaxArray ``Lean.Parser.Term.bracketedBinder ←
+    liftTermElabM (do
+      let tyParams ← typ_params.mapM (fun (t: Ident) =>
+        `(Lean.Parser.Term.bracketedBinderF| {$(t.toSyntax) : Type}))
+      let params ← params.mapM (fun p => do
+        let arg := p.name.toSyntax
+        let type ← p.a.toSyntax
+        `(Lean.Parser.Term.bracketedBinderF| ($arg : $type) ))
+      return tyParams ++ params
+    )
+  let hyps : TSyntaxArray `term ← liftTermElabM <| require.mapM (·.toSyntax)
+  let concs : TSyntaxArray `term ← liftTermElabM <| ensure.mapM (·.toSyntax)
+  let typ : Term ←
+    hyps.foldrM (fun h acc => `($h → $acc))
+      <| (← (concs.foldrM (fun h acc => `($h ∧ $acc))
+      <| (mkIdent ``True)))
+  let c ← `(command|
+    theorem $ident $(args):bracketedBinder*
+      : $typ
+      := sorry
+  )
+  return #[c]
+
+def Decl.toSyntax (d : Decl) :=
+  match d with
+  | .Defn d => d.toSyntax
+  | .Theorem t => t.toSyntax
+
+#eval show CommandElabM Unit from do
+  let contents ← IO.FS.readFile "blah.json"
+  let json ← IO.ofExcept <| Lean.Json.parse contents
+  let d : Theorem ← IO.ofExcept <| Lean.fromJson? json
+  IO.println <| ← liftM <| liftTermElabM d.params[1]!.a.toSyntax
+  IO.println (← liftM d.toSyntax)

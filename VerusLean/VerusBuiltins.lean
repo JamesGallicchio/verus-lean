@@ -1,8 +1,9 @@
 import VerusLean.VerusAesopSetup
 import Mathlib.Tactic.Ring
 
-abbrev math.add (x y : Int) := x + y
-abbrev math.sub (x y : Int) := x - y
+abbrev vstd.math.add (x y : Int) := x + y
+abbrev vstd.math.sub (x y : Int) := x - y
+abbrev vstd.arithmetic.power.pow (x y : Nat) := x ^ y
 
 noncomputable def undefined [Nonempty α] : α := Classical.choice inferInstance
 

@@ -13,12 +13,12 @@ def readAndGen (files : Term) : CommandElabM (TSyntaxArray `command) := do
 
   let json ← IO.ofExcept <| Lean.Json.parse <| ← IO.FS.readFile file
 
-  let funcs : Array Function ← IO.ofExcept <| Lean.fromJson? json
+  let funcs : Array Decl ← IO.ofExcept <| Lean.fromJson? json
 
   logInfo m!"Processing {funcs.size} functions"
   let res ← funcs.mapM (fun f => do
     try
-      return ← Function.toSyntax f
+      return ← Decl.toSyntax f
     catch e =>
       logWarning e.toMessageData
       return #[])

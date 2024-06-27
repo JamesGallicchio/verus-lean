@@ -193,7 +193,7 @@ inductive Expr : Type
     -- /// Primitive multi-operand operation
   | Multi : MultiOp → Array Expr → Expr
     -- /// If-else
-  | If: Expr → Expr → Option Expr → Expr
+  | If: Expr → Expr → Expr → Expr
     -- Let binding
   | Let : Binder Expr → Expr → Expr
     -- /// Quantifier (forall/exists), binding the variables in Binders, with body Expr
@@ -207,10 +207,10 @@ inductive Expr : Type
         (params: Binders Typ)
         (cond: Expr)
         (body: Expr)
-deriving ToJson, FromJson, Repr
+deriving ToJson, FromJson, Repr, Inhabited
 
 -- /// Function, including signature and body
-structure Function where
+structure Defn where
     -- /// Name of function
     name: Path
     -- /// Type parameters to generic functions
@@ -220,10 +220,8 @@ structure Function where
     params: Binders Typ
     -- /// Return value (unit return type is treated specially; see FunctionX::has_return in ast_util)
     ret: Binder Typ
-    -- /// Preconditions (requires for proof/exec functions, recommends for spec functions)
-    require: Array Expr
-    -- /// Postconditions (proof/exec functions only)
-    ensure: Array Expr
+    -- /// Body
+    body: Expr
     -- /// Decreases clause to ensure recursive function termination
     -- /// decrease.len() == 0 means no decreases clause
     -- /// decrease.len() >= 1 means list of expressions, interpreted in lexicographic order
@@ -234,9 +232,22 @@ structure Function where
     decrease_when: Option Expr
 deriving ToJson, FromJson, Repr, Inhabited
 
-#eval show IO Unit from do
-  let contents ← IO.FS.readFile "verus/source/vstd.json"
-  let json ← IO.ofExcept <| Lean.Json.parse contents
-  let res : Array Function ← IO.ofExcept <| Lean.fromJson? json
-  for f in [0:10] do
-    IO.println (repr res[f]!)
+-- /// Function, including signature and body
+structure Theorem where
+    -- /// Name of function
+    name: Path
+    -- /// Type parameters to generic functions
+    -- /// (for trait methods, the trait parameters come first, then the method parameters)
+    typ_params: Idents
+    -- /// Function parameters
+    params: Binders Typ
+    -- /// Preconditions (requires for proof/exec functions, recommends for spec functions)
+    require: Array Expr
+    -- /// Postconditions (proof/exec functions only)
+    ensure: Array Expr
+deriving ToJson, FromJson, Repr, Inhabited
+
+inductive Decl
+| Defn : Defn → Decl
+| Theorem : Theorem → Decl
+deriving ToJson, FromJson, Repr, Inhabited
