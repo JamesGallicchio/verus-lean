@@ -225,14 +225,17 @@ def Theorem.toSyntax (f : Theorem) : CommandElabM (TSyntaxArray `command) :=
     )
   let hyps : TSyntaxArray `term ← liftTermElabM <| require.mapM (·.toSyntax)
   let concs : TSyntaxArray `term ← liftTermElabM <| ensure.mapM (·.toSyntax)
-  let typ : Term ←
-    hyps.foldrM (fun h acc => `($h → $acc))
-      <| (← (concs.foldrM (fun h acc => `($h ∧ $acc))
-      <| (mkIdent ``True)))
+  let conc : Term := Option.getD (dflt := mkIdent ``True) <|
+    ← concs.foldrM (fun h acc =>
+        match acc with
+        | some acc => `($h ∧ $acc)
+        | none => pure h
+      ) none
+  let typ : Term ← hyps.foldrM (fun h acc => `($h → $acc)) conc
   let c ← `(command|
     theorem $ident $(args):bracketedBinder*
       : $typ
-      := sorry
+      := by sorry
   )
   return #[c]
 

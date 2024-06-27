@@ -26,7 +26,7 @@ def readAndGen (files : Term) : CommandElabM (TSyntaxArray `command) := do
 
 
 syntax (name := generate_verus_funcs)
-  "#generate_verus_funcs " term (" {{" (ppLine command)* ppDedent(ppLine "}}") )? : command
+  "#generate_verus_funcs " term (" {{" (ppLine command)* ppDedent(ppLine ppLine "}}") )? : command
 
 deriving instance TypeName for String
 
