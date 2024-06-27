@@ -20,20 +20,10 @@
           shellHook = ''
             SHELL=${pkgs.bashInteractive}/bin/bash
             VERUS_Z3_PATH=$(whereis z3 | awk '{print $2}')
-            ( cd verus; source tools/activate; cd source; rm -f z3; ln -s $VERUS_Z3_PATH z3; vargo build --release )
             PATH=$(realpath ./verus/source/target-verus/release):$PATH
           '';
           buildInputs = [ pkgs.bashInteractive ];
           nativeBuildInputs = with pkgs; [
-            rustup
-            tokei
-      
-            llvmPackages_14.libcxxStdenv
-            llvmPackages_14.libunwind
-            llvmPackages_14.libcxx
-            clang-tools_14
-            gnumake
-
             z3_4_12
           ];
         };
