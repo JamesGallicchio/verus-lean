@@ -20,11 +20,15 @@
           shellHook = ''
             SHELL=${pkgs.bashInteractive}/bin/bash
             VERUS_Z3_PATH=$(whereis z3 | awk '{print $2}')
+            VERUS_SINGULAR_PATH=$(whereis Singular | awk '{print $2}')
             PATH=$(realpath ./verus/source/target-verus/release):$PATH
           '';
           buildInputs = [ pkgs.bashInteractive ];
           nativeBuildInputs = with pkgs; [
             z3_4_12
+            singular
+            unzip
+            rustup
           ];
         };
       }
