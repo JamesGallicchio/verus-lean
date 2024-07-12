@@ -1,0 +1,1150 @@
+[{"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "46638"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "Mul"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary": [{"Arith": "Add"}, {"Var": "x"}, {"Var": "y"}]},
+          {"Var": "z"}]},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary": [{"Arith": "Add"}, {"Var": "x"}, {"Var": "y"}]},
+          {"Var": "z"}]}]},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "x"}]},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "y"}]}]},
+          {"Var": "z"}]},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Const": {"Int": "2"}},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Binary":
+             [{"Arith": "Add"},
+              {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+              {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "z"}]}]},
+            {"Binary":
+             [{"Arith": "Mul"}, {"Var": "z"}, {"Var": "x"}]}]}]}]}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "31097"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "Mul"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary": [{"Arith": "Add"}, {"Var": "x"}, {"Var": "y"}]},
+          {"Var": "z"}]},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary": [{"Arith": "Add"}, {"Var": "x"}, {"Var": "y"}]},
+          {"Var": "z"}]}]},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "x"}]},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "y"}]}]},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "z"}, {"Var": "z"}]}]},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Const": {"Int": "2"}},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Binary":
+             [{"Arith": "Add"},
+              {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+              {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "z"}]}]},
+            {"Binary":
+             [{"Arith": "Mul"}, {"Var": "z"}, {"Var": "x"}]}]}]}]}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     [{"Inequality": "Gt"},
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Sub"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "23083"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "z"}]},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "z"}]}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params": [{"name": "x", "a": {"Int": "Int"}}],
+   "name": {"segments": ["may_div_zero", "49052"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "x"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Var": "x"},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Var": "x_0"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "B"}]}]},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "B"}]},
+            {"Var": "B"}]}]},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "B"}]},
+            {"Var": "B"}]},
+          {"Var": "B"}]}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "y"},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Var": "y_0"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "y_1"}, {"Var": "B"}]}]},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "y_2"}, {"Var": "B"}]},
+            {"Var": "B"}]}]},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "y_3"}, {"Var": "B"}]},
+            {"Var": "B"}]},
+          {"Var": "B"}]}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p0"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_0"}, {"Var": "y_0"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p1"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "y_0"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p2"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_0"}, {"Var": "y_1"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p3"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "y_0"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p4"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "y_1"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p5"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_0"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p6"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "y_0"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p7"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p8"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p9"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_0"}, {"Var": "y_3"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p10"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "y_1"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p11"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p12"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "y_3"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p13"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p14"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "y_3"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p15"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "y_3"}]}]}],
+   "params":
+   [{"name": "B", "a": {"Int": "Int"}},
+    {"name": "p0", "a": {"Int": "Int"}},
+    {"name": "p1", "a": {"Int": "Int"}},
+    {"name": "p2", "a": {"Int": "Int"}},
+    {"name": "p3", "a": {"Int": "Int"}},
+    {"name": "p4", "a": {"Int": "Int"}},
+    {"name": "p5", "a": {"Int": "Int"}},
+    {"name": "p6", "a": {"Int": "Int"}},
+    {"name": "p7", "a": {"Int": "Int"}},
+    {"name": "p8", "a": {"Int": "Int"}},
+    {"name": "p9", "a": {"Int": "Int"}},
+    {"name": "p10", "a": {"Int": "Int"}},
+    {"name": "p11", "a": {"Int": "Int"}},
+    {"name": "p12", "a": {"Int": "Int"}},
+    {"name": "p13", "a": {"Int": "Int"}},
+    {"name": "p14", "a": {"Int": "Int"}},
+    {"name": "p15", "a": {"Int": "Int"}},
+    {"name": "x", "a": {"Int": "Int"}},
+    {"name": "x_0", "a": {"Int": "Int"}},
+    {"name": "x_1", "a": {"Int": "Int"}},
+    {"name": "x_2", "a": {"Int": "Int"}},
+    {"name": "x_3", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "y_0", "a": {"Int": "Int"}},
+    {"name": "y_1", "a": {"Int": "Int"}},
+    {"name": "y_2", "a": {"Int": "Int"}},
+    {"name": "y_3", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "2876"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Binary":
+             [{"Arith": "Add"},
+              {"Binary":
+               [{"Arith": "Add"},
+                {"Binary":
+                 [{"Arith": "Add"},
+                  {"Var": "p0"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"}, {"Var": "p1"}, {"Var": "p2"}]},
+                    {"Var": "B"}]}]},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"},
+                      {"Binary":
+                       [{"Arith": "Add"}, {"Var": "p3"}, {"Var": "p4"}]},
+                      {"Var": "p5"}]},
+                    {"Var": "B"}]},
+                  {"Var": "B"}]}]},
+              {"Binary":
+               [{"Arith": "Mul"},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"},
+                      {"Binary":
+                       [{"Arith": "Add"},
+                        {"Binary":
+                         [{"Arith": "Add"}, {"Var": "p6"}, {"Var": "p7"}]},
+                        {"Var": "p8"}]},
+                      {"Var": "p9"}]},
+                    {"Var": "B"}]},
+                  {"Var": "B"}]},
+                {"Var": "B"}]}]},
+            {"Binary":
+             [{"Arith": "Mul"},
+              {"Binary":
+               [{"Arith": "Mul"},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"},
+                      {"Binary":
+                       [{"Arith": "Add"}, {"Var": "p10"}, {"Var": "p11"}]},
+                      {"Var": "p12"}]},
+                    {"Var": "B"}]},
+                  {"Var": "B"}]},
+                {"Var": "B"}]},
+              {"Var": "B"}]}]},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary":
+             [{"Arith": "Mul"},
+              {"Binary":
+               [{"Arith": "Mul"},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"}, {"Var": "p13"}, {"Var": "p14"}]},
+                    {"Var": "B"}]},
+                  {"Var": "B"}]},
+                {"Var": "B"}]},
+              {"Var": "B"}]},
+            {"Var": "B"}]}]},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary":
+             [{"Arith": "Mul"},
+              {"Binary":
+               [{"Arith": "Mul"},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary": [{"Arith": "Mul"}, {"Var": "p15"}, {"Var": "B"}]},
+                  {"Var": "B"}]},
+                {"Var": "B"}]},
+              {"Var": "B"}]},
+            {"Var": "B"}]},
+          {"Var": "B"}]}]}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "5639"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]},
+          {"Var": "y"}]},
+        {"Var": "m"}]},
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Var": "x"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "y"}, {"Var": "m"}]}]},
+        {"Var": "m"}]},
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "y"}, {"Var": "m"}]}]},
+        {"Var": "m"}]},
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Sub"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "36238"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "z"}]},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "z"}]}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"App":
+           [{"StaticFun": {"segments": ["square"], "krate": null}},
+            [{"Unary": ["Id", {"Var": "x"}]}]]},
+          {"App":
+           [{"StaticFun": {"segments": ["square"], "krate": null}},
+            [{"Unary": ["Id", {"Var": "y"}]}]]}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]},
+    {"Binary":
+     ["Eq",
+      {"App":
+       [{"StaticFun": {"segments": ["square"], "krate": null}},
+        [{"Unary": ["Id", {"Var": "x"}]}]]},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "x"}]}]},
+    {"Binary":
+     ["Eq",
+      {"App":
+       [{"StaticFun": {"segments": ["square"], "krate": null}},
+        [{"Unary": ["Id", {"Var": "y"}]}]]},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "y"}]}]},
+    {"Binary":
+     ["Eq",
+      {"App":
+       [{"StaticFun": {"segments": ["quad"], "krate": null}},
+        [{"Unary": ["Id", {"Var": "x"}]}]]},
+      {"Binary":
+       [{"Arith": "Mul"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "x"}]},
+          {"Var": "x"}]},
+        {"Var": "x"}]}]},
+    {"Binary":
+     ["Eq",
+      {"App":
+       [{"StaticFun": {"segments": ["quad"], "krate": null}},
+        [{"Unary": ["Id", {"Var": "y"}]}]]},
+      {"Binary":
+       [{"Arith": "Mul"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "y"}]},
+          {"Var": "y"}]},
+        {"Var": "y"}]}]}],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "18354"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"App":
+           [{"StaticFun": {"segments": ["quad"], "krate": null}},
+            [{"Unary": ["Id", {"Var": "x"}]}]]},
+          {"App":
+           [{"StaticFun": {"segments": ["quad"], "krate": null}},
+            [{"Unary": ["Id", {"Var": "y"}]}]]}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Sub"}, {"Var": "singular_tmp_1"}, {"Var": "y"}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}],
+   "params":
+   [{"name": "singular_tmp_1", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "42782"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"Binary":
+           [{"Arith": "Mul"}, {"Var": "singular_tmp_1"}, {"Var": "z"}]},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "z"}]}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Unary":
+     ["Not",
+      {"Binary":
+       ["Eq",
+        {"Binary":
+         [{"Arith": "EuclideanMod"},
+          {"Binary": [{"Arith": "Sub"}, {"Var": "x"}, {"Var": "y"}]},
+          {"Var": "m"}]},
+        {"Const": {"Int": "0"}}]}]}],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "33266"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "z"}]},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "z"}]}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "63242"], "krate": null},
+   "ensure": []}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Var": "x"},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Var": "x_0"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "B"}]}]},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "B"}]},
+            {"Var": "B"}]}]},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "B"}]},
+            {"Var": "B"}]},
+          {"Var": "B"}]}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "y"},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Var": "y_0"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "y_1"}, {"Var": "B"}]}]},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "y_2"}, {"Var": "B"}]},
+            {"Var": "B"}]}]},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary": [{"Arith": "Mul"}, {"Var": "y_3"}, {"Var": "B"}]},
+            {"Var": "B"}]},
+          {"Var": "B"}]}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p0"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_0"}, {"Var": "y_0"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p1"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "y_0"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p2"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_0"}, {"Var": "y_1"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p3"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "y_0"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p4"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "y_1"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p5"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_0"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p6"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "y_0"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p7"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "y_1"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p8"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p9"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_0"}, {"Var": "y_3"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p10"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "y_1"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p11"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p12"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_1"}, {"Var": "y_3"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p13"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "y_2"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p14"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_2"}, {"Var": "y_3"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Var": "p15"},
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x_3"}, {"Var": "y_3"}]}]}],
+   "params":
+   [{"name": "B", "a": {"Int": "Int"}},
+    {"name": "p0", "a": {"Int": "Int"}},
+    {"name": "p1", "a": {"Int": "Int"}},
+    {"name": "p2", "a": {"Int": "Int"}},
+    {"name": "p3", "a": {"Int": "Int"}},
+    {"name": "p4", "a": {"Int": "Int"}},
+    {"name": "p5", "a": {"Int": "Int"}},
+    {"name": "p6", "a": {"Int": "Int"}},
+    {"name": "p7", "a": {"Int": "Int"}},
+    {"name": "p8", "a": {"Int": "Int"}},
+    {"name": "p9", "a": {"Int": "Int"}},
+    {"name": "p10", "a": {"Int": "Int"}},
+    {"name": "p11", "a": {"Int": "Int"}},
+    {"name": "p12", "a": {"Int": "Int"}},
+    {"name": "p13", "a": {"Int": "Int"}},
+    {"name": "p14", "a": {"Int": "Int"}},
+    {"name": "p15", "a": {"Int": "Int"}},
+    {"name": "x", "a": {"Int": "Int"}},
+    {"name": "x_0", "a": {"Int": "Int"}},
+    {"name": "x_1", "a": {"Int": "Int"}},
+    {"name": "x_2", "a": {"Int": "Int"}},
+    {"name": "x_3", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "y_0", "a": {"Int": "Int"}},
+    {"name": "y_1", "a": {"Int": "Int"}},
+    {"name": "y_2", "a": {"Int": "Int"}},
+    {"name": "y_3", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "28094"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary":
+           [{"Arith": "Add"},
+            {"Binary":
+             [{"Arith": "Add"},
+              {"Binary":
+               [{"Arith": "Add"},
+                {"Binary":
+                 [{"Arith": "Add"},
+                  {"Var": "p0"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"}, {"Var": "p1"}, {"Var": "p2"}]},
+                    {"Var": "B"}]}]},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"},
+                      {"Binary":
+                       [{"Arith": "Add"}, {"Var": "p3"}, {"Var": "p4"}]},
+                      {"Var": "p5"}]},
+                    {"Var": "B"}]},
+                  {"Var": "B"}]}]},
+              {"Binary":
+               [{"Arith": "Mul"},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"},
+                      {"Binary":
+                       [{"Arith": "Add"},
+                        {"Binary":
+                         [{"Arith": "Add"}, {"Var": "p6"}, {"Var": "p7"}]},
+                        {"Var": "p8"}]},
+                      {"Var": "p9"}]},
+                    {"Var": "B"}]},
+                  {"Var": "B"}]},
+                {"Var": "B"}]}]},
+            {"Binary":
+             [{"Arith": "Mul"},
+              {"Binary":
+               [{"Arith": "Mul"},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"},
+                      {"Binary":
+                       [{"Arith": "Add"}, {"Var": "p10"}, {"Var": "p11"}]},
+                      {"Var": "p12"}]},
+                    {"Var": "B"}]},
+                  {"Var": "B"}]},
+                {"Var": "B"}]},
+              {"Var": "B"}]}]},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary":
+             [{"Arith": "Mul"},
+              {"Binary":
+               [{"Arith": "Mul"},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary":
+                   [{"Arith": "Mul"},
+                    {"Binary":
+                     [{"Arith": "Add"}, {"Var": "p13"}, {"Var": "p14"}]},
+                    {"Var": "B"}]},
+                  {"Var": "B"}]},
+                {"Var": "B"}]},
+              {"Var": "B"}]},
+            {"Var": "B"}]}]},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary":
+           [{"Arith": "Mul"},
+            {"Binary":
+             [{"Arith": "Mul"},
+              {"Binary":
+               [{"Arith": "Mul"},
+                {"Binary":
+                 [{"Arith": "Mul"},
+                  {"Binary": [{"Arith": "Mul"}, {"Var": "p15"}, {"Var": "B"}]},
+                  {"Var": "B"}]},
+                {"Var": "B"}]},
+              {"Var": "B"}]},
+            {"Var": "B"}]},
+          {"Var": "B"}]}]}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "51840"], "krate": null},
+   "ensure": []}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "B", "a": {"Int": "Int"}},
+    {"name": "p0", "a": {"Int": "Int"}},
+    {"name": "p1", "a": {"Int": "Int"}},
+    {"name": "p2", "a": {"Int": "Int"}},
+    {"name": "p3", "a": {"Int": "Int"}},
+    {"name": "p4", "a": {"Int": "Int"}},
+    {"name": "p5", "a": {"Int": "Int"}},
+    {"name": "p6", "a": {"Int": "Int"}},
+    {"name": "p7", "a": {"Int": "Int"}},
+    {"name": "p8", "a": {"Int": "Int"}},
+    {"name": "p9", "a": {"Int": "Int"}},
+    {"name": "p10", "a": {"Int": "Int"}},
+    {"name": "p11", "a": {"Int": "Int"}},
+    {"name": "p12", "a": {"Int": "Int"}},
+    {"name": "p13", "a": {"Int": "Int"}},
+    {"name": "p14", "a": {"Int": "Int"}},
+    {"name": "p15", "a": {"Int": "Int"}},
+    {"name": "x", "a": {"Int": "Int"}},
+    {"name": "x_0", "a": {"Int": "Int"}},
+    {"name": "x_1", "a": {"Int": "Int"}},
+    {"name": "x_2", "a": {"Int": "Int"}},
+    {"name": "x_3", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "y_0", "a": {"Int": "Int"}},
+    {"name": "y_1", "a": {"Int": "Int"}},
+    {"name": "y_2", "a": {"Int": "Int"}},
+    {"name": "y_3", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "47720"], "krate": null},
+   "ensure": []}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "62323"], "krate": null},
+   "ensure": []}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "2706"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]},
+          {"Var": "y"}]},
+        {"Var": "m"}]},
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "y"}, {"Var": "m"}]}]},
+        {"Var": "m"}]},
+      {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Var": "x"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "y"}, {"Var": "m"}]}]},
+        {"Var": "m"}]},
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Sub"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "5192"], "krate": null},
+   "ensure":
+   [{"Binary":
+     [{"Inequality": "Lt"},
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Add"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "z"}]},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "z"}]}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "2059"], "krate": null},
+   "ensure": []}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "26010"], "krate": null},
+   "ensure": []}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Sub"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "17114"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "z"}]},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "y"}, {"Var": "z"}]}]},
+        {"Var": "m"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "3481"], "krate": null},
+   "ensure": []}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "45660"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]},
+          {"Var": "y"}]},
+        {"Var": "m"}]},
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Mul"}, {"Var": "x"}, {"Var": "y"}]},
+        {"Var": "m"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "y"}, {"Var": "m"}]}]},
+        {"Var": "m"}]},
+      {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Mul"},
+          {"Var": "x"},
+          {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "y"}, {"Var": "m"}]}]},
+        {"Var": "m"}]},
+      {"Binary": [{"Arith": "EuclideanMod"}, {"Var": "x"}, {"Var": "m"}]}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require": [],
+   "params":
+   [{"name": "x", "a": {"Int": "Int"}},
+    {"name": "y", "a": {"Int": "Int"}},
+    {"name": "z", "a": {"Int": "Int"}},
+    {"name": "m", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "10806"], "krate": null},
+   "ensure": []}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "a"}, {"Var": "R"}]},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "RR"}, {"Var": "s"}]}]},
+        {"Var": "M"}]},
+      {"Const": {"Int": "0"}}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "R_INV"}, {"Var": "R"}]},
+          {"Const": {"Int": "1"}}]},
+        {"Var": "M"}]},
+      {"Const": {"Int": "0"}}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "Sub"},
+        {"Var": "RR"},
+        {"Binary":
+         [{"Arith": "EuclideanMod"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "R"}, {"Var": "R"}]},
+          {"Var": "M"}]}]},
+      {"Const": {"Int": "0"}}]}],
+   "params":
+   [{"name": "a", "a": {"Int": "Int"}},
+    {"name": "s", "a": {"Int": "Int"}},
+    {"name": "R", "a": {"Int": "Int"}},
+    {"name": "M", "a": {"Int": "Int"}},
+    {"name": "RR", "a": {"Int": "Int"}},
+    {"name": "R_INV", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "13912"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"Var": "a"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "s"}, {"Var": "R"}]}]},
+        {"Var": "M"}]},
+      {"Const": {"Int": "0"}}]}]}},
+ {"Theorem":
+  {"typ_params": [],
+   "require":
+   [{"Binary":
+     ["Eq",
+      {"Var": "p2_full"},
+      {"Binary":
+       [{"Arith": "Add"},
+        {"Binary": [{"Arith": "Mul"}, {"Var": "ui"}, {"Var": "m0"}]},
+        {"Var": "p1_lh"}]}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary": [{"Arith": "Sub"}, {"Var": "p1_full"}, {"Var": "p1_lh"}]},
+        {"Var": "BASE"}]},
+      {"Const": {"Int": "0"}}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "m0d"}, {"Var": "m0"}]},
+          {"Binary":
+           [{"Arith": "Sub"}, {"Var": "BASE"}, {"Const": {"Int": "1"}}]}]},
+        {"Var": "BASE"}]},
+      {"Const": {"Int": "0"}}]},
+    {"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"},
+        {"Binary":
+         [{"Arith": "Sub"},
+          {"Var": "ui"},
+          {"Binary": [{"Arith": "Mul"}, {"Var": "p1_full"}, {"Var": "m0d"}]}]},
+        {"Var": "BASE"}]},
+      {"Const": {"Int": "0"}}]}],
+   "params":
+   [{"name": "p2_full", "a": {"Int": "Int"}},
+    {"name": "BASE", "a": {"Int": "Int"}},
+    {"name": "ui", "a": {"Int": "Int"}},
+    {"name": "m0", "a": {"Int": "Int"}},
+    {"name": "m0d", "a": {"Int": "Int"}},
+    {"name": "p1_lh", "a": {"Int": "Int"}},
+    {"name": "p1_full", "a": {"Int": "Int"}}],
+   "name": {"segments": ["test", "22701"], "krate": null},
+   "ensure":
+   [{"Binary":
+     ["Eq",
+      {"Binary":
+       [{"Arith": "EuclideanMod"}, {"Var": "p2_full"}, {"Var": "BASE"}]},
+      {"Const": {"Int": "0"}}]}]}}]
