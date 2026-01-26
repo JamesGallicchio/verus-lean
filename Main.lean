@@ -1,6 +1,7 @@
 import Lean
 import Lean.PrettyPrinter
 import VerusLean
+import VerusLean.VLIR.ToCore
 
 open VerusLean
 
@@ -85,8 +86,21 @@ unsafe def genFromFile (path : String) (printFn : String → IO Unit) : IO Unit 
     | .error e => IO.println s!"Error: {e}"
   | .error e => IO.println e
 
+unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit) : IO Unit := do
+  match ← Decls.fromFile? path with
+  | .ok (_ns, defs, thms) =>
+    let allDecls := defs ++ thms
+    match ToCore.declsToCoreString allDecls with
+    | .ok str => printFn str
+    | .error e => IO.println s!"Error: {e}"
+  | .error e => IO.println e
+
 unsafe def main : List String → IO Unit
   | [path] => genFromFile path IO.println
+  | ["boogie", path] => genCoreFromFile path IO.println
+  | ["boogie", path, toFile] => genCoreFromFile path (IO.FS.writeFile toFile)
+  | ["core", path] => genCoreFromFile path IO.println
+  | ["core", path, toFile] => genCoreFromFile path (IO.FS.writeFile toFile)
   /-| ["dir", path] => do
     -- IO.println "Reading from a directory"
     let res ← genFromDir' path
@@ -99,4 +113,7 @@ unsafe def main : List String → IO Unit
     let res ← genFromDir' path
     IO.FS.writeFile toFile (preludeString "hello" ++ res ++ postludeString "hello") -/
 
-  | _ => IO.println "Wrong number of arguments"
+  | _ =>
+    IO.println "Usage: ./verus-lean <input.json> [output.lean]\n\
+      ./verus-lean boogie <input.json> [output.core.st]\n\
+      ./verus-lean core <input.json> [output.core.st]"

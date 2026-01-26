@@ -164,6 +164,12 @@ def addFreeVarIfNotBound (var : String) : VParser Unit := do
 
 def addDecl (d : Decl) : VParser Unit :=
   match d with
+  | .mutualBlock _ =>
+    modify fun st =>
+      let key := Lean.Name.str Lean.Name.anonymous s!"mutual_{st.defsInRevOrder.length}"
+      { st with
+        defs := st.defs.insert key d
+        defsInRevOrder := key :: st.defsInRevOrder }
   | .assertion _
   | .proofFn _ => modify fun st => { st with
       thms := st.thms.insert (name d) d
@@ -818,11 +824,18 @@ def Dest.fromJson (j : Json) : VParser (String × Typ) := do
   | .Var i => return (i, ty)
   | _ => throw s!"Expected a variable expression, got {e}"
 
+def LoopInvariant.fromJson (j : Json) : VParser LoopInvariant := do
+  let atEntry ← j.getBoolUnderKeyM "at_entry"
+  let atExit ← j.getBoolUnderKeyM "at_exit"
+  let invObj ← j.getObjValM "inv"
+  let invExp ← fromJsonSpanned invObj Exp.fromJson
+  return LoopInvariant.mk atEntry atExit invExp
+
 
 partial def Stm.fromJson (j : Json) : VParser Stm := do
   match ← j["Call", "Assert", "AssertBitVector", "AssertQuery", "AssertCompute", "AssertLean",
     "Assume", "Assign", "DeadEnd", "Return", "BreakOrContinue", "If", "Loop",
-    "OpenInvariant", "ClosureInner", "Block"] with
+    "OpenInvariant", "ClosureInner", "Block", "Fuel", "RevealString", "Air"] with
 
   | ("Call", obj) =>
     let fnName ← pathedNameFromNameJson obj (nameKey := "fun")
@@ -846,7 +859,8 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     return .AssertBitVector requires.toList ensures.toList
 
   | ("AssertQuery", obj) =>
-    let stm ← fromJsonSpanned obj Stm.fromJson
+    let bodyObj ← obj.getObjValM "body"
+    let stm ← fromJsonSpanned bodyObj Stm.fromJson
     return .AssertQuery stm
 
   | ("AssertCompute", obj) =>
@@ -854,7 +868,8 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     return .AssertCompute e
 
   | ("AssertLean", obj) =>
-    let e ← fromJsonSpanned obj Exp.fromJson
+    let bodyObj ← obj.getObjValM "body"
+    let e ← fromJsonSpanned bodyObj Exp.fromJson
     return .AssertLean e
 
   | ("Assume", obj) =>
@@ -874,11 +889,22 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     let stm ← fromJsonSpanned obj Stm.fromJson
     return .DeadEnd stm
 
-  | ("Return", _) =>
-    return .Return (Exp.Const <| Const.Bool true)
+  | ("Return", obj) =>
+    match obj.getObjVal? "ret_exp" with
+    | .ok retExpObj =>
+      let retExp ← fromJsonSpanned retExpObj Exp.fromJson
+      return .Return (some retExp)
+    | .error _ => return .Return none
 
-  | ("BreakOrContinue", _) =>
-    throw "BreakOrContinue not yet implemented"
+  | ("BreakOrContinue", obj) =>
+    let isBreak ← obj.getBoolUnderKeyM "is_break"
+    let label ←
+      match obj.getObjVal? "label" with
+      | .ok (.str s) => pure (some s)
+      | .ok .null => pure none
+      | .ok v => throw s!"expected string or null for label, got {v}"
+      | .error _ => pure none
+    return .BreakOrContinue label isBreak
 
   | ("If", obj) =>
     -- The three parts of an if-statement are stored in a Verus tuple
@@ -895,7 +921,29 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
       return .If cond branch₁ (some branch₂)
 
   | ("Loop", obj) =>
-    throw "Loop not yet implemented"
+    let isForLoop ← obj.getBoolUnderKeyM "is_for_loop"
+    let label ←
+      match obj.getObjVal? "label" with
+      | .ok (.str s) => pure (some s)
+      | .ok .null => pure none
+      | .ok v => throw s!"expected string or null for loop label, got {v}"
+      | .error _ => pure none
+    let cond ←
+      match obj.getObjVal? "cond" with
+      | .ok .null => pure none
+      | .ok v => do
+        let arr ← v.getArrM
+        if h : arr.size ≥ 2 then
+          let stm ← fromJsonSpanned arr[0] Stm.fromJson
+          let exp ← fromJsonSpanned arr[1] Exp.fromJson
+          pure (some (stm, exp))
+        else
+          throw s!"expected loop cond array of size 2, got {arr.size}"
+      | .error _ => pure none
+    let body ← fromJsonSpanned (← obj.getObjValM "body") Stm.fromJson
+    let invsArr ← obj.getArrUnderKeyM "invs"
+    let invs ← invsArr.mapM LoopInvariant.fromJson
+    return .Loop isForLoop label cond body invs.toList
 
   | ("OpenInvariant", obj) =>
     let stm ← fromJsonSpanned obj Stm.fromJson
@@ -910,6 +958,15 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     let arr ← obj.getArrM
     let stmts ← arr.mapM (do Stm.fromJson <| ← xJsonFromSpanned ·)
     return .Block stmts.toList
+
+  | ("Fuel", _) =>
+    return .Block []
+
+  | ("RevealString", _) =>
+    return .Block []
+
+  | ("Air", _) =>
+    return .Block []
 
   | s => throw s!"[Stm.fromJson?]: Expected one of many Stm options, got {s}"
 
@@ -1007,6 +1064,21 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
     --return ProofFn.mk name args requires.toList ensures.toList none
 
 
+def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
+  let name ← pathedNameFromNameJson j
+  if name.head = VstdStr then return none else
+  let args ← fnParseArgs j
+  let retBinder ← VarBinder.fromJson <| ← j.getObjValByPathM ["ret", "x"]
+  let (retName, returnType) := retBinder
+  let requiresObj ← j.getArrByPathM ["exec_proof_check", "reqs"]
+  let requires ← requiresObj.mapM (fromJsonSpanned · Exp.fromJson)
+  let ensuresObj ← j.getArrByPathM ["exec_proof_check", "post_condition", "ens_exps"]
+  let ensures ← ensuresObj.mapM (fromJsonSpanned · Exp.fromJson)
+  let bodyObj ← j.getObjValByPathM ["exec_proof_check", "body", "x"]
+  let bodyStm ← Stm.fromJson bodyObj
+  return some <| ExecFn.mk name args retName returnType requires.toList ensures.toList bodyStm
+
+
 def typeParamsFromJson (j : Json) : m (List String) := do
   let typeParamsArr ← j.getArrUnderKeyM "typ_params"
   -- dbg_trace s!"typeParamsFromJson: {typeParamsArr}"
@@ -1089,6 +1161,8 @@ def datatypeFromJson (j : Json) : VParser (Option Decl) := do
   | "Struct" =>
     let struct ← Struct.fromJson j
     return struct.map (Decl.struct ·)
+  | "External" =>
+    return none
   | _ => throw s!"Unsupported datatype: {dtType}"
 
 
@@ -1112,6 +1186,7 @@ partial def Decl.fromJson (j : Json) : VParser (Option Decl) := do
   | "Datatype" => datatypeFromJson declObj
   | "SpecFn" => return (← SpecFn.fromJson declObj).map (Decl.specFn ·)
   | "ProofFn" => ProofFn.fromJson declObj
+  | "ExecFn" => return (← ExecFn.fromJson declObj).map (Decl.execFn ·)
   | "Mutual" =>
     -- A mutual declaration is a list of declarations, each of which
     -- is a `DeclType` object

@@ -1,7 +1,6 @@
 import VerusLean.VLIR.Elab
 import Lean.PrettyPrinter
 import Lean.Elab.Command
-import Lean.Util.SearchPath
 
 namespace VerusLean
 
@@ -148,6 +147,10 @@ unsafe def Decl.toFormat (ns : String) (defs thms : List Decl) : IO (Except Stri
 
   match res with
   | .error _ => return throw "bad syntax"
-  | .ok res => return (return Std.Format.pretty res)
+  | .ok res =>
+      let out := Std.Format.pretty res
+      let out := out.replace "_root_.DecidableEq.1" "DecidableEq"
+      let out := out.replace "DecidableEq.1" "DecidableEq"
+      return (return out)
 
 end VerusLean

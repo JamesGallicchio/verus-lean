@@ -1,5 +1,4 @@
 import Std.Data.HashMap
-import Batteries.Data.List
 
 /-
   Verus `Seq`s are just Lean `List`s. All `Seq`s are finite.

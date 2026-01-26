@@ -50,7 +50,7 @@ open Lean (Json ToJson FromJson)
   requires UTF-8 encoding.
 -/
 def toJson (c : Char) : Json :=
-  Json.obj (Lean.RBNode.singleton "char" (Json.num <| c.toNat))
+  Json.obj (Std.TreeMap.Raw.empty.insert "char" (Json.num <| c.toNat))
 
 /--
   Attemps to map a JSON back into a `Char`.
@@ -60,7 +60,7 @@ def toJson (c : Char) : Json :=
 def fromJson? (j : Json) : Except String Char :=
   match j with
   | Json.obj o =>
-    match o.find String.cmp "char" with
+    match o.get? "char" with
     | some (Json.num n) =>
       -- Assume that the underlying implementation of `JsonNumber.fromNat` sets the exponent to 0
       match n with

@@ -2,7 +2,10 @@ import Lake
 open Lake DSL
 
 package «verus-lean» where
-  -- add package configuration options here
+  -- enable experimental `module` syntax for dependencies on Lean 4.26
+  leanOptions := #[
+    ⟨`experimental.module, true⟩
+  ]
 
 lean_lib «VerusLean» where
   -- add library configuration options here
@@ -14,5 +17,4 @@ lean_exe «verus-lean» where
 lean_exe VerusParser where
   root := `VerusLean.VLIRParser
 
---require batteries from git "https://github.com/leanprover-community/batteries" @ "master"
-require "leanprover-community" / "batteries" @ git "main"
+require Strata from "../Strata"

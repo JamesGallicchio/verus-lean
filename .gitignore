@@ -4,3 +4,13 @@
 .DS_Store
 testJSON/*
 testJSON.lean
+verus-lean
+tests/BoogieFiles/*.boogie.st
+tests/BoogieFiles/*.core.st
+tests/LeanFiles/*.lean
+tests/LeanFilesNew/*.lean
+tests/JSONFiles/*.json
+tests/JSONFilesLean/*.json
+tests/JSONFilesBoogie/*.json
+tests/VerusFiles/**
+VerusLean/VLIR/ToCore.lean.bak

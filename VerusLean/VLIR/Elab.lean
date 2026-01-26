@@ -37,7 +37,6 @@ private def falseIdent : Lean.Ident := mkIdent ``false
 private def TrueIdent : Lean.Ident := mkIdent ``True
 private def FalseIdent : Lean.Ident := mkIdent ``False
 private def ArrayIdent : Lean.Ident := mkIdent ``Array
-private def decEqIdent : Lean.Ident := mkIdent ``DecidableEq
 
 
 inductive Air where
@@ -744,6 +743,13 @@ def ProofFn.toCommand (f : ProofFn) : CoreM (TSyntax `command) := do
   `(command| theorem $ident $args:bracketedBinder* : $premises → ($conclusions) := by
       auto? )
 
+def ExecFn.toCommand (f : ExecFn) : CoreM (TSyntax `command) := do
+  let ⟨name, inputs, _retName, returnType, _requires, _ensures, _body⟩ := f
+  let ident ← name.toIdent
+  let args ← makeBracketedBinders inputs.toArray
+  let returnType ← returnType.toTerm
+  `(command| opaque $ident $args:bracketedBinder* : $returnType)
+
 def Struct.toCommand (s : Struct) : CoreM (TSyntax `command) := do
   let ⟨name, params, fields⟩ := s
   let nameAsIdent ← name.toIdent
@@ -756,7 +762,7 @@ def Struct.toCommand (s : Struct) : CoreM (TSyntax `command) := do
   `(command|
     structure $nameAsIdent:ident $params:bracketedBinder* where
       $fields:structSimpleBinder*
-    deriving $decEqIdent)
+    deriving _root_.DecidableEq)
 
 
 def Enum.toCommand (e : Enum) : CoreM (TSyntax `command) := do
@@ -779,7 +785,7 @@ def Enum.toCommand (e : Enum) : CoreM (TSyntax `command) := do
   `(command|
     inductive $nameAsIdent:ident $params:bracketedBinder* where
       $fields:ctor*
-    deriving $decEqIdent)
+    deriving _root_.DecidableEq)
 
 
 def FuncCheckSst.toCommand (f : FuncCheckSst) : CoreM (TSyntax `command) := do
@@ -818,6 +824,7 @@ partial def Decl.toTerm (d : Decl) : CoreM (TSyntax `command) := do
   | .assertion a => a.toCommand
   | .specFn f => f.toCommand
   | .proofFn f => f.toCommand
+  | .execFn f => f.toCommand
   | .struct s => s.toCommand
   | .enum e => e.toCommand
   | .func f => f.toCommand

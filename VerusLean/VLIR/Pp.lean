@@ -255,6 +255,13 @@ def ProofFn.pp (f : ProofFn) : String :=
   else
     s!"theorem {name} : {ensures} := by sorry"
 
+def ExecFn.pp (f : ExecFn) : String :=
+  let ⟨name, args, _retName, ret, _requires, _ensures, _body⟩ := f
+  if args.length > 0 then
+    s!"def {name} {args} : {ret} := by sorry"
+  else
+    s!"def {name} : {ret} := by sorry"
+
 def Struct.pp (s : Struct) : String :=
   let ⟨name, _, fields⟩ := s
   let fields := fields.map (fun ⟨name, ty⟩ => s!"{name} : {ty}")
@@ -278,6 +285,7 @@ def Decl.pp (d : Decl) : String :=
   | .assertion a => Assertion.pp a
   | .specFn f => SpecFn.pp f
   | .proofFn f => ProofFn.pp f
+  | .execFn f => ExecFn.pp f
   | .struct s => Struct.pp s
   | .enum e => Enum.pp e
   | .func f => FuncCheckSst.pp f
@@ -286,6 +294,7 @@ def Decl.pp (d : Decl) : String :=
 instance Assertion.toString : ToString Assertion := ⟨Assertion.pp⟩
 instance SpecFn.toString : ToString SpecFn := ⟨SpecFn.pp⟩
 instance ProofFn.toString : ToString ProofFn := ⟨ProofFn.pp⟩
+instance ExecFn.toString : ToString ExecFn := ⟨ExecFn.pp⟩
 instance Struct.toString : ToString Struct := ⟨Struct.pp⟩
 instance Decl.toString : ToString Decl := ⟨Decl.pp⟩
 

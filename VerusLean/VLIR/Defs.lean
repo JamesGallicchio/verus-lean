@@ -425,6 +425,16 @@ structure ProofFn where
   body : Option Stm
 deriving Repr, Inhabited, Hashable
 
+structure ExecFn where
+  name : Ident
+  inputs : List (String × Typ)
+  retName : String
+  returnType : Typ
+  requires : List Exp
+  ensures : List Exp
+  body : Stm
+deriving Repr, Inhabited, Hashable
+
 structure Struct where
   name : Ident
   typeParams : List String := []
@@ -450,6 +460,7 @@ inductive Decl where
   | assertion (a : Assertion)
   | specFn (f : SpecFn)
   | proofFn (f : ProofFn)
+  | execFn (f : ExecFn)
   | struct (s : Struct)
   | enum (e : Enum)
   | func (f : FuncCheckSst)
@@ -459,6 +470,7 @@ deriving Repr, Inhabited, Hashable
 instance Assertion.instCoeDecl : Coe Assertion Decl := ⟨Decl.assertion⟩
 instance SpecFn.instCoeDecl : Coe SpecFn Decl := ⟨Decl.specFn⟩
 instance ProofFn.instCoeDecl : Coe ProofFn Decl := ⟨Decl.proofFn⟩
+instance ExecFn.instCoeDecl : Coe ExecFn Decl := ⟨Decl.execFn⟩
 instance Struct.instCoeDecl : Coe Struct Decl := ⟨Decl.struct⟩
 instance Enum.instCoeDecl : Coe Enum Decl := ⟨Decl.enum⟩
 instance FuncCheckSst.instCoeDecl : Coe FuncCheckSst Decl := ⟨Decl.func⟩
@@ -466,6 +478,7 @@ instance FuncCheckSst.instCoeDecl : Coe FuncCheckSst Decl := ⟨Decl.func⟩
 instance Assertion.instVName : VName Assertion := ⟨Assertion.name⟩
 instance SpecFn.instVName : VName SpecFn := ⟨SpecFn.name⟩
 instance ProofFn.instVName : VName ProofFn := ⟨ProofFn.name⟩
+instance ExecFn.instVName : VName ExecFn := ⟨ExecFn.name⟩
 instance Struct.instVName : VName Struct := ⟨Struct.name⟩
 instance Enum.instVName : VName Enum := ⟨Enum.name⟩
 instance FuncCheckSst.instVName : VName FuncCheckSst := ⟨FuncCheckSst.name⟩
@@ -474,6 +487,7 @@ instance Decl.instVName : VName Decl where
     | .assertion a => a.name
     | .specFn f => f.name
     | .proofFn f => f.name
+    | .execFn f => f.name
     | .struct s => s.name
     | .enum e => e.name
     | .func f => f.name

@@ -2,10 +2,11 @@ import VerusLean.VLIR.Defs
 import VerusLean.Vstd.Seq.Defs
 import VerusLean.Vstd.Set.Defs
 import VerusLean.Vstd.Map.Defs
+import Lean.Elab
 
 namespace VerusLean
 
-open Lean Syntax Elab Command Parser Term Parser.Command Parser.Term
+open Lean
 /-
 def combine2Maps (map1 map2 : Std.HashMap Ident Ident) : Std.HashMap Ident Ident :=
   map2.fold (fun acc k v => acc.insert k v) map1
@@ -18,8 +19,8 @@ private def TranslationNames : Std.HashMap Ident Ident :=
  -/
 
 def translateSyntaxOriginal (fn : Lean.Ident) (params : List Term) : CoreM Term := do
-  -- let f ← Ident.toIdent fn
-  params.foldlM (init := fn) (fun acc t => do
+  let init ← `($fn:ident)
+  params.foldlM (init := init) (fun acc t => do
     `($acc:term ($t:term)))
 
 def translateSyntaxView (_ : Lean.Ident) (params : List Term) : CoreM Term := do
@@ -52,7 +53,8 @@ def translateSyntaxIndex (fn : Lean.Ident) (params : List Term) : CoreM Term := 
     let k := params[1]!
     `($m:term[$k:term]!)
 
-def VstdSyntaxTable : Std.HashMap Name (Name × (Lean.Ident → List Term → CoreM Term)) :=
+def VstdSyntaxTable :
+    Std.HashMap Lean.Name (Lean.Name × (Lean.Ident → List Term → CoreM Term)) :=
   (Std.HashMap.ofList <|
   (List.map (f := fun (x, y) => (String.toName s!"Vstd.Set.{x}", (String.toName y, translateSyntaxOriginal))) <|
   [("empty", "Set.empty"), -- or do we translate them to VSetF, by default assuming finite sets?
