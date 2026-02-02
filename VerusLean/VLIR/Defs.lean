@@ -423,6 +423,7 @@ structure ProofFn where
   requires : List Exp
   ensures : List Exp
   body : Option Stm
+  locals : List (String × Typ) := []
 deriving Repr, Inhabited, Hashable
 
 structure ExecFn where
@@ -433,6 +434,7 @@ structure ExecFn where
   requires : List Exp
   ensures : List Exp
   body : Stm
+  locals : List (String × Typ) := []
 deriving Repr, Inhabited, Hashable
 
 structure Struct where
@@ -491,7 +493,7 @@ instance Decl.instVName : VName Decl where
     | .struct s => s.name
     | .enum e => e.name
     | .func f => f.name
-    | .mutualBlock d => .anonymous -- todo
+    | .mutualBlock _d => .anonymous -- todo
 
 --------------------------------------------------------------------------------
 

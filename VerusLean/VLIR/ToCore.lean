@@ -21,10 +21,6 @@ abbrev CoreExpr := Core.Expression.Expr
 abbrev VarEnv := Std.HashMap String Typ -- global/free variables
 abbrev BoundEnv := List (String × Typ) -- bound variables introduced by binders in quantifiers, lets, etc.
 
-structure ToCoreCtx where
-  -- A temporary flag, map `u32` to `int` when the file does not use bitvector ops.
-  useIntU32 : Bool
-
 /-! ## Utilities -/
 
 -- Check if a character is valid in a Core identifier.
@@ -38,20 +34,23 @@ def sanitizeIdent (s : String) : String :=
   | c :: _ => if c.isDigit then "_" ++ mapped else mapped
   | [] => "_"
 
+def declSentinelName : String := "__verus_decl__"
+
+def declSentinel : CoreExpr :=
+  LExpr.fvar () (CoreIdent.unres declSentinelName) none
+
+def isDeclSentinel : CoreExpr → Bool
+  | LExpr.fvar _ id _ => CoreIdent.toPretty id == declSentinelName
+  | _ => false
+
 def identToCore (i : Ident) : CoreIdent :=
   CoreIdent.unres (sanitizeIdent i.toString)
 
 def varToCore (s : String) : CoreIdent :=
   CoreIdent.unres (sanitizeIdent s)
 
-def envExtend (env : VarEnv) (decls : List (String × Typ)) : VarEnv :=
-  decls.foldl (init := env) fun acc (n, t) => acc.insert n t
-
 def envFromDecls (decls : List (String × Typ)) : VarEnv :=
-  envExtend Std.HashMap.emptyWithCapacity decls
-
-def envFind? (env : VarEnv) (key : String) : Option Typ :=
-  env.fold (fun acc k v => if k == key then some v else acc) none
+  decls.foldl (init := Std.HashMap.emptyWithCapacity) fun acc (n, t) => acc.insert n t
 
 def boundIndex? (bound : BoundEnv) (name : String) : Option Nat :=
   let rec go (i : Nat) (rest : BoundEnv) : Option Nat :=
@@ -65,77 +64,100 @@ def boundType? (bound : BoundEnv) (name : String) : Option Typ :=
   | some (_, t) => some t
   | none => none
 
-def listWithIndices (xs : List α) : List (α × Nat) :=
-  let rec go (i : Nat) (rest : List α) : List (α × Nat) :=
-    match rest with
-    | [] => []
-    | x :: xs' => (x, i) :: go (i + 1) xs'
-  go 0 xs
-
-def concatMap (f : α → List β) (xs : List α) : List β :=
-  xs.foldl (init := []) (fun acc x => acc ++ f x)
-
 def isFuelVar : Exp → Bool
   | .Var name => name.startsWith "fuel%" || name.startsWith "fuel_"
   | _ => false
 
 /-! ## Type Translation -/
 
-def monoTyOfTyp (ctx : ToCoreCtx) : Typ → LMonoTy
+def monoTyOfTyp : Typ → LMonoTy
   | .Empty => .tcons "Unit" []
   | .Unit => .tcons "Unit" []
-  | .Tuple t1 t2 => .tcons "Tuple" [monoTyOfTyp ctx t1, monoTyOfTyp ctx t2]
+  | .Tuple t1 t2 => .tcons "Tuple" [monoTyOfTyp t1, monoTyOfTyp t2]
   | .Bool => .bool
   | .Int => .int
   | .Nat => .int
-  -- map u32 to int for now
-  | .UInt w => if ctx.useIntU32 && w == 32 then .int else .bitvec w
+  | .UInt w => .bitvec w
   | .SInt w => .bitvec w
   | .Char => .int -- TODO
   | .StrSlice => .string
-  | .Array t => Core.mapTy .int (monoTyOfTyp ctx t)
+  | .Array t => Core.mapTy .int (monoTyOfTyp t)
   | .TypParam name => .ftvar name -- TODO
   | .SpecFn params ret =>
-    let paramTys := params.map (monoTyOfTyp ctx)
-    LMonoTy.mkArrow' (monoTyOfTyp ctx ret) paramTys
-  | .Decorated _ ty => monoTyOfTyp ctx ty -- TODO, ignore for now
-  | .Struct name params => .tcons (sanitizeIdent name.toString) (params.map (monoTyOfTyp ctx))
-  | .Enum name params => .tcons (sanitizeIdent name.toString) (params.map (monoTyOfTyp ctx))
+    let paramTys := params.map monoTyOfTyp
+    LMonoTy.mkArrow' (monoTyOfTyp ret) paramTys
+  | .Decorated _ ty => monoTyOfTyp ty -- TODO, ignore for now
+  | .Struct name params => .tcons (sanitizeIdent name.toString) (params.map monoTyOfTyp)
+  | .Enum name params => .tcons (sanitizeIdent name.toString) (params.map monoTyOfTyp)
   | .AirNamed str => .tcons str []
 
-def tyOfTyp (ctx : ToCoreCtx) (t : Typ) : LTy :=
-  .forAll [] (monoTyOfTyp ctx t)
-
-def needsReturn (t : Typ) : Bool :=
-  match t with
-  | .Unit | .Empty => false
-  | _ => true
-
-def bitWidthOfTyp (ctx : ToCoreCtx) : Typ → Option Nat
-  | .UInt w => if ctx.useIntU32 && w == 32 then none else some w
+def bitWidthOfTyp : Typ → Option Nat
+  | .UInt w => some w
   | .SInt w => some w
-  | .Decorated _ ty => bitWidthOfTyp ctx ty
+  | .Decorated _ ty => bitWidthOfTyp ty
+  | _ => none
+
+def bitInfoOfTyp : Typ → Option (Nat × Bool)
+  | .UInt w => some (w, false)
+  | .SInt w => some (w, true)
+  | .Decorated _ ty => bitInfoOfTyp ty
   | _ => none
 
 /-! ## Expression Translation -/
 
-def constToCore (ctx : ToCoreCtx) (expected? : Option Typ) : Const → CoreExpr
+def constToCore (expected? : Option Typ) : Const → CoreExpr
   | .Bool b => LExpr.boolConst () b
   | .Int i =>
-    match expected?.bind (bitWidthOfTyp ctx) with
+    match expected?.bind bitWidthOfTyp with
     | some w =>
-      let n := Int.toNat i
-      LExpr.bitvecConst () w (BitVec.ofNat w n)
+      LExpr.bitvecConst () w (BitVec.ofInt w i)
     | none => LExpr.intConst () i
   | .StrSlice s => LExpr.strConst () s
   | .Char c => LExpr.intConst () c.toNat
 
-def varExpr (ctx : ToCoreCtx) (env : VarEnv) (name : String) : CoreExpr :=
-  let ty? := envFind? env name |>.map (monoTyOfTyp ctx)
-  LExpr.fvar () (varToCore name) ty?
+def bvByWidth (w : Nat)
+    (op1 op8 op16 op32 op64 : CoreExpr) : Option CoreExpr :=
+  match w with
+  | 1 => some op1
+  | 8 => some op8
+  | 16 => some op16
+  | 32 => some op32
+  | 64 => some op64
+  | _ => none
 
-def applyOp (op : CoreExpr) (args : List CoreExpr) : CoreExpr :=
-  LExpr.mkApp () op args
+def bvOp (w : Nat) (op : String) : Option CoreExpr :=
+  match op with
+  | "And" => bvByWidth w Core.bv1AndOp Core.bv8AndOp Core.bv16AndOp Core.bv32AndOp Core.bv64AndOp
+  | "Or" => bvByWidth w Core.bv1OrOp Core.bv8OrOp Core.bv16OrOp Core.bv32OrOp Core.bv64OrOp
+  | "Xor" => bvByWidth w Core.bv1XorOp Core.bv8XorOp Core.bv16XorOp Core.bv32XorOp Core.bv64XorOp
+  | "Shl" => bvByWidth w Core.bv1ShlOp Core.bv8ShlOp Core.bv16ShlOp Core.bv32ShlOp Core.bv64ShlOp
+  | "UShr" => bvByWidth w Core.bv1UShrOp Core.bv8UShrOp Core.bv16UShrOp Core.bv32UShrOp Core.bv64UShrOp
+  | "SShr" => bvByWidth w Core.bv1SShrOp Core.bv8SShrOp Core.bv16SShrOp Core.bv32SShrOp Core.bv64SShrOp
+  | "Not" => bvByWidth w Core.bv1NotOp Core.bv8NotOp Core.bv16NotOp Core.bv32NotOp Core.bv64NotOp
+  | _ => none
+
+def bvArithOp (w : Nat) (op : String) : Option CoreExpr :=
+  match op with
+  | "Add" => bvByWidth w Core.bv1AddOp Core.bv8AddOp Core.bv16AddOp Core.bv32AddOp Core.bv64AddOp
+  | "Sub" => bvByWidth w Core.bv1SubOp Core.bv8SubOp Core.bv16SubOp Core.bv32SubOp Core.bv64SubOp
+  | "Mul" => bvByWidth w Core.bv1MulOp Core.bv8MulOp Core.bv16MulOp Core.bv32MulOp Core.bv64MulOp
+  | "UDiv" => bvByWidth w Core.bv1UDivOp Core.bv8UDivOp Core.bv16UDivOp Core.bv32UDivOp Core.bv64UDivOp
+  | "UMod" => bvByWidth w Core.bv1UModOp Core.bv8UModOp Core.bv16UModOp Core.bv32UModOp Core.bv64UModOp
+  | "SDiv" => bvByWidth w Core.bv1SDivOp Core.bv8SDivOp Core.bv16SDivOp Core.bv32SDivOp Core.bv64SDivOp
+  | "SMod" => bvByWidth w Core.bv1SModOp Core.bv8SModOp Core.bv16SModOp Core.bv32SModOp Core.bv64SModOp
+  | _ => none
+
+def bvCmpOp (w : Nat) (op : String) : Option CoreExpr :=
+  match op with
+  | "ULt" => bvByWidth w Core.bv1ULtOp Core.bv8ULtOp Core.bv16ULtOp Core.bv32ULtOp Core.bv64ULtOp
+  | "ULe" => bvByWidth w Core.bv1ULeOp Core.bv8ULeOp Core.bv16ULeOp Core.bv32ULeOp Core.bv64ULeOp
+  | "UGt" => bvByWidth w Core.bv1UGtOp Core.bv8UGtOp Core.bv16UGtOp Core.bv32UGtOp Core.bv64UGtOp
+  | "UGe" => bvByWidth w Core.bv1UGeOp Core.bv8UGeOp Core.bv16UGeOp Core.bv32UGeOp Core.bv64UGeOp
+  | "SLt" => bvByWidth w Core.bv1SLtOp Core.bv8SLtOp Core.bv16SLtOp Core.bv32SLtOp Core.bv64SLtOp
+  | "SLe" => bvByWidth w Core.bv1SLeOp Core.bv8SLeOp Core.bv16SLeOp Core.bv32SLeOp Core.bv64SLeOp
+  | "SGt" => bvByWidth w Core.bv1SGtOp Core.bv8SGtOp Core.bv16SGtOp Core.bv32SGtOp Core.bv64SGtOp
+  | "SGe" => bvByWidth w Core.bv1SGeOp Core.bv8SGeOp Core.bv16SGeOp Core.bv32SGeOp Core.bv64SGeOp
+  | _ => none
 
 def binaryOpToCore : BinaryOp → Option CoreExpr
   | .And => some Core.boolAndOp
@@ -157,9 +179,24 @@ def binaryOpToCore : BinaryOp → Option CoreExpr
 
 def unaryOpToCore : UnaryOp → Option CoreExpr
   | .Not => some Core.boolNotOp
+  | .BitNot (some w) => bvOp w "Not"
   | _ => none
 
-/-- Inline let-bindings since Core expressions are let-free. -/
+def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bool) :=
+  match e with
+  | .Var x =>
+    (boundType? bound x <|> env.get? x) |>.bind bitInfoOfTyp
+  | .Unary (.BitNot (some w)) _ => some (w, false)
+  | .Unary (.Clip (.U w) _) _ => some (w.toNat, false)
+  | .Unary (.Clip (.I w) _) _ => some (w.toNat, true)
+  | .Binary (.Bitwise (.Shl w _) _) _ _ => some (w, false)
+  | .Binary (.Bitwise (.Shr w) _) _ _ => some (w, false)
+  | .Unary _ e => inferBitInfo env bound e
+  | .Binary _ e1 e2 => inferBitInfo env bound e1 <|> inferBitInfo env bound e2
+  | .If _ t f => inferBitInfo env bound t <|> inferBitInfo env bound f
+  | _ => none
+
+-- Inline let-bindings since Core expressions are let-free.
 partial def substExp (name : String) (rhs : Exp) : Exp → Exp
   | .Const c => .Const c
   | .Var x => if x == name then rhs else .Var x
@@ -198,177 +235,229 @@ partial def substExp (name : String) (rhs : Exp) : Exp → Exp
     let (e, t) := scrut
     .MatchBlock (substExp name rhs e, t) (substExp name rhs body)
 
-partial def expToCoreWithBound (ctx : ToCoreCtx) (env : VarEnv) (bound : BoundEnv)
+partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     (expected? : Option Typ) :
     Exp → Except String CoreExpr
-  | .Const c => return constToCore ctx expected? c
+  | .Const c => return constToCore expected? c
   | .Var x =>
     match boundIndex? bound x with
     | some idx => return LExpr.bvar () idx
-    | none => return varExpr ctx env x
+    | none =>
+      let ty? := env.get? x |>.map monoTyOfTyp
+      return LExpr.fvar () (varToCore x) ty?
   | .StructCtor dt fields => do
     let ctor := LExpr.op () (CoreIdent.unres (sanitizeIdent dt.toString ++ "_ctor")) none
-    let args ← fields.mapM (fun (_, e) => expToCoreWithBound ctx env bound none e)
-    return applyOp ctor args
+    let args ← fields.mapM (fun (_, e) => expToCoreWithBound env bound none e)
+    return LExpr.mkApp () ctor args
   | .EnumCtor dt variant data => do
     let ctor := LExpr.op () (CoreIdent.unres (sanitizeIdent dt.toString ++ "_" ++ sanitizeIdent variant)) none
-    let args ← data.mapM (fun (_, e) => expToCoreWithBound ctx env bound none e)
-    return applyOp ctor args
+    let args ← data.mapM (fun (_, e) => expToCoreWithBound env bound none e)
+    return LExpr.mkApp () ctor args
   | .TupleCtor _ _ => throw "TODO: tuple constructors"
   | .Binary (.Eq _) lhs rhs => do
-    let l ← expToCoreWithBound ctx env bound none lhs
-    let r ← expToCoreWithBound ctx env bound none rhs
+    let l ← expToCoreWithBound env bound none lhs
+    let r ← expToCoreWithBound env bound none rhs
     return LExpr.eq () l r
   | .Binary .Ne lhs rhs => do
-    let l ← expToCoreWithBound ctx env bound none lhs
-    let r ← expToCoreWithBound ctx env bound none rhs
+    let l ← expToCoreWithBound env bound none lhs
+    let r ← expToCoreWithBound env bound none rhs
     let eq := LExpr.eq () l r
-    return applyOp Core.boolNotOp [eq]
+    return LExpr.mkApp () Core.boolNotOp [eq]
   | .Binary .Xor lhs rhs => do
-    let l ← expToCoreWithBound ctx env bound none lhs
-    let r ← expToCoreWithBound ctx env bound none rhs
-    let eq := applyOp Core.boolEquivOp [l, r]
-    return applyOp Core.boolNotOp [eq]
+    let info? := inferBitInfo env bound lhs <|> inferBitInfo env bound rhs
+    let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
+    let l ← expToCoreWithBound env bound argTy? lhs
+    let r ← expToCoreWithBound env bound argTy? rhs
+    let eq := LExpr.mkApp () Core.boolEquivOp [l, r]
+    return LExpr.mkApp () Core.boolNotOp [eq]
   | .Binary op lhs rhs => do
-    let l ← expToCoreWithBound ctx env bound none lhs
-    let r ← expToCoreWithBound ctx env bound none rhs
+    let info? :=
+      inferBitInfo env bound lhs
+        <|> inferBitInfo env bound rhs
+        <|> expected?.bind bitInfoOfTyp
+    let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
+    let l ← expToCoreWithBound env bound argTy? lhs
+    let r ← expToCoreWithBound env bound argTy? rhs
     match op with
-    | .Bitwise _ _ => throw "TODO: bitvector ops"
+    | .Bitwise bitop _ =>
+      let w? := match bitop with
+        | .Shl w _ => some w
+        | .Shr w => some w
+        | _ => info?.map Prod.fst
+      let signed := info?.map Prod.snd |>.getD false
+      let opName := match bitop with
+        | .BitAnd => "And"
+        | .BitOr => "Or"
+        | .BitXor => "Xor"
+        | .Shl _ _ => "Shl"
+        | .Shr _ => if signed then "SShr" else "UShr"
+      match w? with
+      | some w =>
+        match bvOp w opName with
+        | some bop => return LExpr.mkApp () bop [l, r]
+        | none => throw s!"unsupported bitvector width {w} for op {opName}"
+      | none => throw s!"missing bitvector width for op {opName}"
+    | .Arith a _ =>
+      match info? with
+      | some (w, signed) =>
+        let opName := match a with
+          | .Add => "Add"
+          | .Sub => "Sub"
+          | .Mul => "Mul"
+          | .EuclideanDiv => if signed then "SDiv" else "UDiv"
+          | .EuclideanMod => if signed then "SMod" else "UMod"
+        match bvArithOp w opName with
+        | some bop => return LExpr.mkApp () bop [l, r]
+        | none => throw s!"unsupported bitvector width {w} for op {opName}"
+      | none =>
+        match binaryOpToCore op with
+        | some bop => return LExpr.mkApp () bop [l, r]
+        | none => throw s!"unsupported binary op: {repr op}"
+    | .Inequality cmp =>
+      match info? with
+      | some (w, signed) =>
+        let opName := match cmp with
+          | .Le => if signed then "SLe" else "ULe"
+          | .Lt => if signed then "SLt" else "ULt"
+          | .Ge => if signed then "SGe" else "UGe"
+          | .Gt => if signed then "SGt" else "UGt"
+        match bvCmpOp w opName with
+        | some bop => return LExpr.mkApp () bop [l, r]
+        | none => throw s!"unsupported bitvector width {w} for op {opName}"
+      | none =>
+        match binaryOpToCore op with
+        | some bop => return LExpr.mkApp () bop [l, r]
+        | none => throw s!"unsupported binary op: {repr op}"
     | _ =>
       match binaryOpToCore op with
-      | some bop => return applyOp bop [l, r]
+      | some bop => return LExpr.mkApp () bop [l, r]
       | none => throw s!"unsupported binary op: {repr op}"
   | .Unary op e => do
-    let x ← expToCoreWithBound ctx env bound expected? e
+    let x ← expToCoreWithBound env bound expected? e
     match op with
     | .Clip _ _ => return x
     | .Trigger => return x
+    | .Box _ => return x
+    | .Unbox _ => return x
+    | .HasType _ => return x
     | .Proj dt _variant field =>
       let proj := LExpr.op () (CoreIdent.unres (sanitizeIdent dt.toString ++ "_" ++ sanitizeIdent field)) none
-      return applyOp proj [x]
+      return LExpr.mkApp () proj [x]
     | .IsVariant dt variant =>
       let isFn := LExpr.op () (CoreIdent.unres ("is_" ++ sanitizeIdent dt.toString ++ "_" ++ sanitizeIdent variant)) none
-      return applyOp isFn [x]
+      return LExpr.mkApp () isFn [x]
     | .Proj' _ _ => throw "TODO: tuple projections"
-    | .BitNot _ => throw "TODO: bitvector ops"
+    | .BitNot none =>
+      let w? :=
+        (expected?.bind bitInfoOfTyp |>.map Prod.fst)
+          <|> ((inferBitInfo env bound e).map Prod.fst)
+      match w? with
+      | some w =>
+        match bvOp w "Not" with
+        | some bop => return LExpr.mkApp () bop [x]
+        | none => throw s!"unsupported bitvector width {w} for op Not"
+      | none => throw "missing bitvector width for op Not"
     | _ =>
       match unaryOpToCore op with
-      | some uop => return applyOp uop [x]
+      | some uop => return LExpr.mkApp () uop [x]
       | none => throw s!"unsupported unary op: {repr op}"
   | .If c t e => do
-    let c' ← expToCoreWithBound ctx env bound (some .Bool) c
-    let t' ← expToCoreWithBound ctx env bound expected? t
-    let e' ← expToCoreWithBound ctx env bound expected? e
+    let c' ← expToCoreWithBound env bound (some .Bool) c
+    let t' ← expToCoreWithBound env bound expected? t
+    let e' ← expToCoreWithBound env bound expected? e
     return LExpr.ite () c' t' e'
   | .Call fn _typs args => do
     let fname := match fn with
       | .Fun name => name
-    let f := LExpr.op () (identToCore fname) none
     let argsFiltered := args.filter (fun e => !isFuelVar e)
-    let args' ← argsFiltered.mapM (expToCoreWithBound ctx env bound none)
-    return applyOp f args'
+    let mkFallback := do
+      let args' ← argsFiltered.mapM (expToCoreWithBound env bound none)
+      let f := LExpr.op () (identToCore fname) none
+      return LExpr.mkApp () f args'
+    mkFallback
   | .CallLambda body args => do
-    let fnExpr ← expToCoreWithBound ctx env bound none body
-    let args' ← args.mapM (expToCoreWithBound ctx env bound none)
-    return applyOp fnExpr args'
+    let fnExpr ← expToCoreWithBound env bound none body
+    let args' ← args.mapM (expToCoreWithBound env bound none)
+    return LExpr.mkApp () fnExpr args'
   | .Bind bind body =>
     match bind with
     | .Let v _ty rhs =>
       let body' := substExp v rhs body
-      expToCoreWithBound ctx env bound expected? body'
+      expToCoreWithBound env bound expected? body'
     | .Quant q vars => do
       let boundVars := vars.reverse ++ bound
-      let bodyExpr ← expToCoreWithBound ctx env boundVars (some .Bool) body
+      let bodyExpr ← expToCoreWithBound env boundVars (some .Bool) body
       let qk := match q with
         | .Forall => Lambda.QuantifierKind.all
         | .Exists => Lambda.QuantifierKind.exist
       let wrap := fun (_v, ty) acc =>
-        LExpr.quant () qk (some (monoTyOfTyp ctx ty)) (LExpr.noTrigger ()) acc
+        LExpr.quant () qk (some (monoTyOfTyp ty)) (LExpr.noTrigger ()) acc
       return vars.foldr wrap bodyExpr
     | .Lambda _vars =>
-      throw "lambda expressions are not supported in Core output yet"
+      throw "TODO: lambda expressions"
   | .MatchBlock _scrut body =>
-    expToCoreWithBound ctx env bound expected? body
+    expToCoreWithBound env bound expected? body
   | .ArrayLiteral _ => throw "TODO: array literals"
 
-partial def expToCore (ctx : ToCoreCtx) (env : VarEnv) (expected? : Option Typ) (e : Exp) :
+partial def expToCore (env : VarEnv) (expected? : Option Typ) (e : Exp) :
     Except String CoreExpr :=
-  expToCoreWithBound ctx env [] expected? e
+  expToCoreWithBound env [] expected? e
 
 /-! ## Statement Translation -/
-
-def boolTrue : CoreExpr :=
-  LExpr.boolConst () true
-
-def mkAssert (label : String) (e : CoreExpr) : Core.Statement :=
-  Core.Statement.assert label e
-
-def mkAssume (label : String) (e : CoreExpr) : Core.Statement :=
-  Core.Statement.assume label e
-
-def mkGoto (label : String) : Core.Statement :=
-  Imperative.Stmt.goto label
-
-def mkBlock (label : String) (stms : List Core.Statement) : Core.Statement :=
-  Imperative.Stmt.block label stms
-
-def mkIte (cond : CoreExpr) (thenStms elseStms : List Core.Statement) : Core.Statement :=
-  Imperative.Stmt.ite cond thenStms elseStms
 
 def mkLoop (guard : CoreExpr) (measure : Option CoreExpr) (inv : Option CoreExpr)
     (body : List Core.Statement) : Core.Statement :=
   Imperative.Stmt.loop guard measure inv body
 
-def mkAnd (es : List CoreExpr) : CoreExpr :=
-  match es with
-  | [] => boolTrue
-  | e :: rest => rest.foldl (init := e) (fun acc x => applyOp Core.boolAndOp [acc, x])
-
-def loopInvariantToCore (ctx : ToCoreCtx) (env : VarEnv) (invs : List LoopInvariant) :
+def loopInvariantToCore (env : VarEnv) (invs : List LoopInvariant) :
     Except String (Option CoreExpr) := do
-  let invs' ← invs.mapM (fun inv => expToCore ctx env (some .Bool) inv.body)
+  let invs' ← invs.mapM (fun inv => expToCore env (some .Bool) inv.body)
   if invs'.isEmpty then
     return none
   else
-    return some (mkAnd invs')
+    let invExpr :=
+      match invs' with
+      | [] => LExpr.boolConst () true
+      | e :: rest => rest.foldl (init := e) (fun acc x => LExpr.mkApp () Core.boolAndOp [acc, x])
+    return some invExpr
 
 mutual
-partial def stmToCore (ctx : ToCoreCtx) (env : VarEnv) (retVar? : Option (String × Typ)) :
+partial def stmToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
     Stm → Except String (List Core.Statement)
   | .Call fn _typArgs args => do
-    let args' ← args.mapM (expToCore ctx env none)
+    let args' ← args.mapM (expToCore env none)
     return [Core.Statement.call [] (sanitizeIdent fn.toString) args']
   | .Assert exp => do
     match exp with
     | .Unary (.HasType _) _ => return []
     | _ =>
-      let e ← expToCore ctx env (some .Bool) exp
-      return [mkAssert "" e]
+      let e ← expToCore env (some .Bool) exp
+      return [Core.Statement.assert "" e]
   | .AssertBitVector requires ensures => do
-    let reqs ← requires.mapM (expToCore ctx env (some .Bool))
-    let enss ← ensures.mapM (expToCore ctx env (some .Bool))
-    let reqStms := reqs.map (mkAssert "bv_requires")
-    let ensStms := enss.map (mkAssert "bv_ensures")
+    let reqs ← requires.mapM (expToCore env (some .Bool))
+    let enss ← ensures.mapM (expToCore env (some .Bool))
+    let reqStms := reqs.map (Core.Statement.assert "bv_requires") -- intended to be checked, placeholder
+    let ensStms := enss.map (Core.Statement.assert "bv_ensures")
     return reqStms ++ ensStms
-  | .AssertQuery body => stmToCore ctx env retVar? body
+  | .AssertQuery body => stmToCore env retVar? body
   | .AssertCompute exp => do
-    let e ← expToCore ctx env (some .Bool) exp
-    return [mkAssert "compute" e]
+    let e ← expToCore env (some .Bool) exp
+    return [Core.Statement.assert "compute" e]
   | .AssertLean exp => do
-    let e ← expToCore ctx env (some .Bool) exp
-    return [mkAssert "lean" e]
+    let e ← expToCore env (some .Bool) exp
+    return [Core.Statement.assert "lean" e]
   | .Assume exp => do
-    let e ← expToCore ctx env (some .Bool) exp
-    return [mkAssume "assume" e]
+    let e ← expToCore env (some .Bool) exp
+    return [Core.Statement.assume "assume" e]
   | .Assign lhs lhsTy rhs lhsIsInit => do
-    let rhs' ← expToCore ctx env (some lhsTy) rhs
+    let rhs' ← expToCore env (some lhsTy) rhs
     let name := varToCore lhs
     if lhsIsInit then
-      return [Core.Statement.init name (tyOfTyp ctx lhsTy) rhs']
+      return [Core.Statement.init name (.forAll [] (monoTyOfTyp lhsTy)) rhs']
     else
       return [Core.Statement.set name rhs']
   | .DeadEnd stm =>
-    stmToCore ctx env retVar? stm
+    stmToCore env retVar? stm
   | .Return exp => do
     match exp, retVar? with
     | none, _ => return []
@@ -376,139 +465,129 @@ partial def stmToCore (ctx : ToCoreCtx) (env : VarEnv) (retVar? : Option (String
     | some (.TupleCtor 0 []), _ => return []
     | some (.StructCtor _ []), _ => return []
     | some e, some (retName, retTy) =>
-      let rhs ← expToCore ctx env (some retTy) e
+      let rhs ← expToCore env (some retTy) e
       return [Core.Statement.set (varToCore retName) rhs]
     | some _, none => return []
   | .BreakOrContinue label isBreak =>
     let target := match label with
       | some l => sanitizeIdent l
       | none => if isBreak then "break" else "continue"
-    return [mkGoto target]
+    return [Imperative.Stmt.goto target]
   | .If cond b1 b2 => do
-    let c ← expToCore ctx env (some .Bool) cond
-    let thenStms ← stmToCore ctx env retVar? b1
+    let c ← expToCore env (some .Bool) cond
+    let thenStms ← stmToCore env retVar? b1
     let elseStms ← match b2 with
-      | some s => stmToCore ctx env retVar? s
+      | some s => stmToCore env retVar? s
       | none => pure []
-    return [mkIte c thenStms elseStms]
+    return [Imperative.Stmt.ite c thenStms elseStms]
   | .Loop _isForLoop label cond body invs => do
     let condExpr ← match cond with
-      | some (_, e) => expToCore ctx env (some .Bool) e
-      | none => pure (boolTrue : CoreExpr)
+      | some (_, e) => expToCore env (some .Bool) e
+      | none => pure (LExpr.boolConst () true : CoreExpr)
     let condStms ← match cond with
-      | some (s, _) => stmToCore ctx env retVar? s
+      | some (s, _) => stmToCore env retVar? s
       | none => pure []
-    let invExpr? ← loopInvariantToCore ctx env invs
-    let bodyStms ← stmToCore ctx env retVar? body
+    let invExpr? ← loopInvariantToCore env invs
+    let bodyStms ← stmToCore env retVar? body
     let loopStmt := mkLoop condExpr none invExpr? bodyStms
     let stmt :=
       match label with
-      | some l => mkBlock (sanitizeIdent l) [loopStmt]
+      | some l => Imperative.Stmt.block (sanitizeIdent l) [loopStmt]
       | none => loopStmt
     return condStms ++ [stmt]
   | .OpenInvariant stm =>
-    stmToCore ctx env retVar? stm
+    stmToCore env retVar? stm
   | .ClosureInner body =>
-    stmToCore ctx env retVar? body
+    stmToCore env retVar? body
   | .Block stms =>
-    stmListToCore ctx env retVar? stms
+    stmListToCore env retVar? stms
 
-partial def stmListToCore (ctx : ToCoreCtx) (env : VarEnv) (retVar? : Option (String × Typ)) :
+partial def stmListToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
     List Stm → Except String (List Core.Statement)
   | .Assign lhs lhsTy rhs lhsIsInit :: .Assert (.Var v1) :: .Assume (.Var v2) :: rest =>
     if lhs == v1 && v1 == v2 then
       do
-        let e ← expToCore ctx env (some lhsTy) rhs
-        let st := mkAssert "" e
-        let tail ← stmListToCore ctx env retVar? rest
+        let e ← expToCore env (some lhsTy) rhs
+        let st := Core.Statement.assert "" e
+        let tail ← stmListToCore env retVar? rest
         return st :: tail
     else
       do
-        let s1 ← stmToCore ctx env retVar? (.Assign lhs lhsTy rhs lhsIsInit)
-        let s2 ← stmToCore ctx env retVar? (.Assert (.Var v1))
-        let s3 ← stmToCore ctx env retVar? (.Assume (.Var v2))
-        let tail ← stmListToCore ctx env retVar? rest
+        let s1 ← stmToCore env retVar? (.Assign lhs lhsTy rhs lhsIsInit)
+        let s2 ← stmToCore env retVar? (.Assert (.Var v1))
+        let s3 ← stmToCore env retVar? (.Assume (.Var v2))
+        let tail ← stmListToCore env retVar? rest
         return s1 ++ s2 ++ s3 ++ tail
   | stm :: rest => do
-    let s1 ← stmToCore ctx env retVar? stm
-    let s2 ← stmListToCore ctx env retVar? rest
+    let s1 ← stmToCore env retVar? stm
+    let s2 ← stmListToCore env retVar? rest
     return s1 ++ s2
   | [] => return []
-end
-
-/-! ## Local Variable Collection -/
-
-mutual
-partial def collectLocals : Stm → List (String × Typ)
-  | .Assign lhs ty _rhs _isInit => [(lhs, ty)]
-  | .AssertQuery body => collectLocals body
-  | .DeadEnd stm => collectLocals stm
-  | .If _cond b1 b2 =>
-    collectLocals b1 ++ (b2.map collectLocals).getD []
-  | .Loop _isForLoop _label cond body _invs =>
-    let condLocals := match cond with
-      | some (s, _) => collectLocals s
-      | none => []
-    condLocals ++ collectLocals body
-  | .OpenInvariant stm => collectLocals stm
-  | .ClosureInner body => collectLocals body
-  | .Block stms => collectLocalsList stms
-  | _ => []
-
-partial def collectLocalsList : List Stm → List (String × Typ)
-  | .Assign lhs ty rhs isInit :: .Assert (.Var v1) :: .Assume (.Var v2) :: rest =>
-    if lhs == v1 && v1 == v2 then
-      collectLocalsList rest
-    else
-      collectLocals (.Assign lhs ty rhs isInit)
-        ++ collectLocalsList (.Assert (.Var v1) :: .Assume (.Var v2) :: rest)
-  | stm :: rest => collectLocals stm ++ collectLocalsList rest
-  | [] => []
 end
 
 def dedupLocals (locals : List (String × Typ)) : List (String × Typ) :=
   locals.foldl (init := []) (fun acc (n, t) =>
     if acc.any (fun (n', _) => n' == n) then acc else acc ++ [(n, t)])
 
-def ctxFromDecls (_decls : List Decl) : ToCoreCtx :=
-  -- TODO: compute context flags from decls (e.g. bitvector usage).
-  { useIntU32 := true }
+mutual
+partial def collectInitVars : Stm → List String
+  | .Assign lhs _ _ lhsIsInit => if lhsIsInit then [lhs] else []
+  | .AssertQuery body => collectInitVars body
+  | .DeadEnd stm => collectInitVars stm
+  | .If _cond b1 b2 =>
+    collectInitVars b1 ++ (b2.map collectInitVars).getD []
+  | .Loop _isForLoop _label cond body _invs =>
+    let condVars := match cond with
+      | some (s, _) => collectInitVars s
+      | none => []
+    condVars ++ collectInitVars body
+  | .OpenInvariant stm => collectInitVars stm
+  | .ClosureInner body => collectInitVars body
+  | .Block stms => collectInitVarsList stms
+  | _ => []
+
+partial def collectInitVarsList : List Stm → List String
+  | stm :: rest => collectInitVars stm ++ collectInitVarsList rest
+  | [] => []
+end
 
 /-! ## Declaration Translation -/
 
-def signatureOf (ctx : ToCoreCtx) (decls : List (String × Typ)) :
+def signatureOf (decls : List (String × Typ)) :
     @Lambda.LMonoTySignature Visibility :=
-  decls.map (fun (n, t) => (varToCore n, monoTyOfTyp ctx t))
+  decls.map (fun (n, t) => (varToCore n, monoTyOfTyp t))
 
-def mkChecks (ctx : ToCoreCtx) (env : VarEnv) (checkPrefix : String) (exps : List Exp) :
+def mkChecks (env : VarEnv) (checkPrefix : String) (exps : List Exp) :
     Except String (ListMap CoreLabel Procedure.Check) := do
-  let exprs ← exps.mapM (expToCore ctx env (some .Bool))
-  let checks := (listWithIndices exprs).map (fun (e, idx) =>
-    (s!"{checkPrefix}{idx}", { expr := e, attr := .Default }))
-  return checks
+  let exprs ← exps.mapM (expToCore env (some .Bool))
+  let rec withIdx (i : Nat) (rest : List CoreExpr) : ListMap CoreLabel Procedure.Check :=
+    match rest with
+    | [] => []
+    | e :: es => (s!"{checkPrefix}{i}", { expr := e, attr := .Default }) :: withIdx (i + 1) es
+  return withIdx 0 exprs
 
-def specFnToCore (ctx : ToCoreCtx) (emitBody : Bool) (f : SpecFn) : Except String Core.Function := do
+def specFnToCore (emitBody : Bool) (f : SpecFn) : Except String Core.Function := do
   let env := envFromDecls f.inputs
   let body ←
     if emitBody then
-      expToCore ctx env (some f.returnType) f.body
+      expToCore env (some f.returnType) f.body
     else
-      pure (boolTrue : CoreExpr)
+      pure (LExpr.boolConst () true : CoreExpr)
   return {
     name := identToCore f.name
     typeArgs := []
-    inputs := signatureOf ctx f.inputs
-    output := monoTyOfTyp ctx f.returnType
+    inputs := signatureOf f.inputs
+    output := monoTyOfTyp f.returnType
     body := if emitBody then some body else none
   }
 
-def proofFnToCore (ctx : ToCoreCtx) (f : ProofFn) : Except String Core.Procedure :=
+def proofFnToCore (f : ProofFn) : Except String Core.Procedure :=
   -- Placeholder: proof bodies are not emitted yet.
   return {
     header := {
       name := identToCore f.name
       typeArgs := []
-      inputs := signatureOf ctx f.inputs
+      inputs := signatureOf f.inputs
       outputs := []
     }
     spec := {
@@ -519,37 +598,47 @@ def proofFnToCore (ctx : ToCoreCtx) (f : ProofFn) : Except String Core.Procedure
     body := []
   }
 
-def execFnToCore (ctx : ToCoreCtx) (f : ExecFn) : Except String Core.Procedure := do
-  let rawLocals := collectLocals f.body
-  let hasRet := needsReturn f.returnType
+def execFnToCore (f : ExecFn) : Except String Core.Procedure := do
+  let hasRet :=
+    match f.returnType with
+    | .Unit | .Empty => false
+    | _ => true
   let retDecls := if hasRet then [(f.retName, f.returnType)] else []
-  let env := envFromDecls (f.inputs ++ retDecls ++ dedupLocals rawLocals)
-  let pre ← mkChecks ctx env "requires_" f.requires
-  let post ← mkChecks ctx env "ensures_" f.ensures
+  let inputNames := f.inputs.map Prod.fst
+  let retNames := if hasRet then [f.retName] else []
+  let initVars := collectInitVars f.body
+  let localsAll := dedupLocals <| f.locals.filter (fun (n, _) =>
+    !(inputNames.any (fun x => x == n) || retNames.any (fun x => x == n)))
+  let localsDecls := localsAll.filter (fun (n, _) => !initVars.any (fun x => x == n))
+  let env := envFromDecls (f.inputs ++ retDecls ++ localsAll)
+  let pre ← mkChecks env "requires_" f.requires
+  let post ← mkChecks env "ensures_" f.ensures
   let retVar? := if hasRet then some (f.retName, f.returnType) else none
-  let body ← stmToCore ctx env retVar? f.body
+  let body ← stmToCore env retVar? f.body
+  let localDecls :=
+    localsDecls.map (fun (n, t) => Core.Statement.init (varToCore n) (.forAll [] (monoTyOfTyp t)) declSentinel)
   return {
     header := {
       name := identToCore f.name
       typeArgs := []
-      inputs := signatureOf ctx f.inputs
-      outputs := signatureOf ctx retDecls
+      inputs := signatureOf f.inputs
+      outputs := signatureOf retDecls
     }
     spec := {
       modifies := []
       preconditions := pre
       postconditions := post
     }
-    body := body
+    body := localDecls ++ body
   }
 
-def assertionToCore (ctx : ToCoreCtx) (a : Assertion) : Except String Core.Procedure :=
+def assertionToCore (a : Assertion) : Except String Core.Procedure :=
   -- Placeholder: assertion bodies are not emitted yet.
   return {
     header := {
       name := identToCore a.name
       typeArgs := []
-      inputs := signatureOf ctx a.decls
+      inputs := signatureOf a.decls
       outputs := []
     }
     spec := {
@@ -561,15 +650,15 @@ def assertionToCore (ctx : ToCoreCtx) (a : Assertion) : Except String Core.Proce
   }
 
 -- TODO
-def funcCheckSstToCore (ctx : ToCoreCtx) (f : FuncCheckSst) : Except String Core.Procedure := do
+def funcCheckSstToCore (f : FuncCheckSst) : Except String Core.Procedure := do
   let env := envFromDecls f.decls
-  let pre ← mkChecks ctx env "requires_" f.reqs
-  let post ← mkChecks ctx env "ensures_" f.postCondition
+  let pre ← mkChecks env "requires_" f.reqs
+  let post ← mkChecks env "ensures_" f.postCondition
   return {
     header := {
       name := identToCore f.name
       typeArgs := []
-      inputs := signatureOf ctx f.decls
+      inputs := signatureOf f.decls
       outputs := []
     }
     spec := {
@@ -582,21 +671,21 @@ def funcCheckSstToCore (ctx : ToCoreCtx) (f : FuncCheckSst) : Except String Core
 
 -- TODO: struct/enum/tuple/array translations
 
-partial def declToCore (ctx : ToCoreCtx) : Decl → Except String (List Core.Decl)
+partial def declToCore : Decl → Except String (List Core.Decl)
   | .assertion a => do
-    let p ← assertionToCore ctx a
+    let p ← assertionToCore a
     return [Core.Decl.proc p]
   | .specFn f => do
-    let fn ← specFnToCore ctx true f
+    let fn ← specFnToCore true f
     return [Core.Decl.func fn]
   | .proofFn f => do
-    let p ← proofFnToCore ctx f
+    let p ← proofFnToCore f
     return [Core.Decl.proc p]
   | .execFn f => do
-    let p ← execFnToCore ctx f
+    let p ← execFnToCore f
     return [Core.Decl.proc p]
   | .func f => do
-    let p ← funcCheckSstToCore ctx f
+    let p ← funcCheckSstToCore f
     return [Core.Decl.proc p]
   | .struct _ => throw "TODO: struct translation not implemented yet"
   | .enum _ => throw "TODO: enum translation not implemented yet"
@@ -604,15 +693,14 @@ partial def declToCore (ctx : ToCoreCtx) : Decl → Except String (List Core.Dec
     let parts ← ds.mapM (fun d =>
       match d with
       | .specFn f => do
-        let fn ← specFnToCore ctx true f
+        let fn ← specFnToCore true f
         return [Core.Decl.func fn]
-      | _ => declToCore ctx d)
+      | _ => declToCore d)
     -- TODO: mutual recursion?
     return parts.flatten
 
 def declsToProgram (decls : List Decl) : Except String Core.Program := do
-  let ctx := ctxFromDecls decls
-  let parts ← decls.mapM (declToCore ctx)
+  let parts ← decls.mapM declToCore
   let flat := parts.flatten
   let typeDecls := flat.filter (fun d => match d with | .type _ _ => true | _ => false)
   let otherDecls := flat.filter (fun d => match d with | .type _ _ => false | _ => true)
@@ -675,6 +763,9 @@ where
   bvBinaryOp? (name : String) : Option String :=
     if name.startsWith "Bv" then
       match (name.splitOn ".").getLast? with
+      | some "Add" => some "+"
+      | some "Sub" => some "-"
+      | some "Mul" => some "*"
       | some "And" => some "&"
       | some "Or" => some "|"
       | some "Xor" => some "^"
@@ -782,7 +873,10 @@ partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
   match s with
   | .cmd (.cmd (.init name ty e _)) =>
     let n := CoreIdent.toPretty name
-    [s!"{pad}var {n} : {tyToString ty};", s!"{pad}{n} := {exprToString e};"]
+    if isDeclSentinel e then
+      [s!"{pad}var {n} : {tyToString ty};"]
+    else
+      [s!"{pad}var {n} : {tyToString ty} := {exprToString e};"]
   | .cmd (.cmd (.set name e _)) =>
     [s!"{pad}{CoreIdent.toPretty name} := {exprToString e};"]
   | .cmd (.cmd (.havoc name _)) =>

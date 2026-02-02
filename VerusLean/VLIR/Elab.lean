@@ -210,10 +210,10 @@ def UnaryOp.toTerm (u : UnaryOp) (e : Term) : CoreM Term := do
   | .Proj dt variant field =>
     dbg_trace s!"[Elab.lean]: UnaryOp.Proj: {dt} {variant} {field}"
     -- UnaryOp.Proj: Matching.life Arthropod legs
-    let dt ← dt.toIdent
-    let variant ← variant.toIdent
+    let _dt ← dt.toIdent
+    let _variant ← variant.toIdent
     let field ← field.toIdent
-    let defaultIdent := mkIdent `opaque_default
+    let _defaultIdent := mkIdent `opaque_default
     `($e.$field)
     -- TODO: use dot notation if it is a structure,
     -- use match expression if it is an enum variable
@@ -335,7 +335,7 @@ partial def collectMatchArmsFromIfChain (exp : Exp) : CoreM (Array (Term × Term
 
   let rec walkIfChain (current : Exp) (arms : Array (Term × Term)) : CoreM (Array (Term × Term)) := do
     match current with
-    | .If (.Unary (UnaryOp.IsVariant dt variant) scrutinee) thenBranch elseBranch =>
+    | .If (.Unary (UnaryOp.IsVariant dt variant) _scrutinee) thenBranch elseBranch =>
       -- dbg_trace s!"[Elab.lean]: Found IsVariant: {dt} {variant} in {scrutinee}"
       let dtIdent ← dt.toIdent
       let variantIdent ← variant.toIdent
@@ -498,7 +498,7 @@ partial def Exp.toTerm (e : Exp) : CoreM Term := do
     -- dbg_trace s!"[Elab.lean]: .If case - cond: {cond}"
     -- Check if this is a match pattern (IsVariant condition with MatchBlock branches)
     match cond with
-    | .Unary (UnaryOp.IsVariant dt variant) scrutinee =>
+    | .Unary (UnaryOp.IsVariant _dt _variant) scrutinee =>
       -- dbg_trace s!"[Elab.lean]: Detected IsVariant pattern: {dt}.{variant}"
       try
         let matchArms ← collectMatchArmsFromIfChain e
@@ -537,7 +537,7 @@ partial def Exp.toTerm (e : Exp) : CoreM Term := do
       `(term| $e:term))
     `({ $es:term,* }) -- to avoid the reserved Lean array notation `(#[ $es:term,* ])
 
-  | .MatchBlock (scrutinee, typ) body =>
+  | .MatchBlock (scrutinee, _typ) body =>
     let scrutineeTerm ← scrutinee.toTerm
     try
       let matchArms ← collectMatchArmsFromIfChain e
@@ -545,7 +545,7 @@ partial def Exp.toTerm (e : Exp) : CoreM Term := do
       let alts : Array (TSyntax ``matchAlt) ← matchArms.mapM fun (pattern, body) =>
         `(matchAltExpr| | $pattern => $body)
       `(match $scrutineeTerm:term with $alts:matchAlt*)
-    catch e =>
+    catch _ =>
       dbg_trace s!"[Elab.lean]: .MatchBlock case: Error collecting match arms"
       -- Fallback to the original MatchBlock translation
       body.toTerm
@@ -567,19 +567,19 @@ partial def Stm.toTerm (stm : Stm) : CoreM Term := do
     `(term| skip)
 
   | .Assume e =>
-    let e ← e.toTerm
+    let _e ← e.toTerm
     `(term| skip)
 
-  | .AssertBitVector _ ens =>
+  | .AssertBitVector _ _ens =>
     `(term| skip)
 
   | .AssertLean e =>
-    let e ← e.toTerm
+    let _e ← e.toTerm
     `(term| skip)
 
   | .Assign lhs lhsTy rhs _ =>
-    let lhs ← lhs.toIdent
-    let lhsTy ← lhsTy.toTerm
+    let _lhs ← lhs.toIdent
+    let _lhsTy ← lhsTy.toTerm
     let rhs ← rhs.toTerm
     `(term| $rhs)
 
@@ -731,7 +731,7 @@ def SpecFn.toCommand (f : SpecFn) : CoreM (TSyntax `command) := do
         termination_by $dec)
 
 def ProofFn.toCommand (f : ProofFn) : CoreM (TSyntax `command) := do
-  let ⟨name, inputs, requires, ensures, body⟩ := f
+  let ⟨name, inputs, requires, ensures, body, _locals⟩ := f
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let _ ← -- Currently we ignore the proof body if the whole proof function is marked with `by(lean)`
@@ -744,7 +744,7 @@ def ProofFn.toCommand (f : ProofFn) : CoreM (TSyntax `command) := do
       auto? )
 
 def ExecFn.toCommand (f : ExecFn) : CoreM (TSyntax `command) := do
-  let ⟨name, inputs, _retName, returnType, _requires, _ensures, _body⟩ := f
+  let ⟨name, inputs, _retName, returnType, _requires, _ensures, _body, _locals⟩ := f
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let returnType ← returnType.toTerm

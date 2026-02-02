@@ -249,14 +249,14 @@ def SpecFn.pp (f : SpecFn) : String :=
     s!"def {name} : {ret} := {body}"
 
 def ProofFn.pp (f : ProofFn) : String :=
-  let ⟨name, args, requires, ensures, body⟩ := f
+  let ⟨name, args, _requires, ensures, _body, _locals⟩ := f
   if args.length > 0 then
     s!"theorem {name} {args} : {ensures} := by sorry"
   else
     s!"theorem {name} : {ensures} := by sorry"
 
 def ExecFn.pp (f : ExecFn) : String :=
-  let ⟨name, args, _retName, ret, _requires, _ensures, _body⟩ := f
+  let ⟨name, args, _retName, ret, _requires, _ensures, _body, _locals⟩ := f
   if args.length > 0 then
     s!"def {name} {args} : {ret} := by sorry"
   else

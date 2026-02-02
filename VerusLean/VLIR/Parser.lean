@@ -22,6 +22,10 @@ abbrev DeclMap := Std.HashMap Ident Decl
 
 private def VstdStr := "Vstd"
 
+private def isVstdName (name : Ident) : Bool :=
+  let h := name.head
+  h == "vstd" || h == VstdStr
+
 /--
   The parsing monad for Verus JSONs,
   which includes a state with a map from variable names to types.
@@ -1017,7 +1021,7 @@ def fnParseArgs (j : Json) : VParser (List (String × Typ)) := do
 
 def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
   let name ← pathedNameFromNameJson j
-  if name.head = VstdStr then return none else
+  if isVstdName name then return none else
   let args ← fnParseArgs j
 
   -- TODO: This ignores other info about the return value, (a `Par` in Verus)
@@ -1037,6 +1041,23 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
     return some <| SpecFn.mk name args returnType decreases bodyExp
   catch _ =>
     return some <| SpecFn.mk name args returnType none bodyExp
+
+def localDeclsFromJson (j : Json) : VParser (List (String × Typ)) := do
+  match j.getArrByPath? ["exec_proof_check", "local_decls"] with -- to be extended
+  | .error _ => return []
+  | .ok arr =>
+    let mut locals : List (String × Typ) := []
+    for decl in arr do
+      let kind ← decl.getObjValM "kind"
+      let isStmtLet := match kind.getObjVal? "StmtLet" with | .ok _ => true | .error _ => false
+      if isStmtLet then
+        pure ()
+      else
+        continue
+      let name ← Var.fromJson <| ← decl.getObjValM "ident"
+      let typ ← Typ.fromJson <| ← decl.getObjValM "typ"
+      locals := locals ++ [(name, typ)]
+    return locals
 
 
 def ProofFn.fromJson (j : Json) : VParser ProofFn := do
@@ -1059,14 +1080,15 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
   -- For proof functions, this expression is stored in the "exec_proof_check"
   let bodyObj ← j.getObjValByPathM ["exec_proof_check", "body", "x"]
   let bodyStm ← Stm.fromJson bodyObj
-  return ProofFn.mk name args requires.toList ensures.toList bodyStm
+  let locals ← localDeclsFromJson j
+  return ProofFn.mk name args requires.toList ensures.toList bodyStm locals
   --else
     --return ProofFn.mk name args requires.toList ensures.toList none
 
 
 def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
   let name ← pathedNameFromNameJson j
-  if name.head = VstdStr then return none else
+  if isVstdName name then return none else
   let args ← fnParseArgs j
   let retBinder ← VarBinder.fromJson <| ← j.getObjValByPathM ["ret", "x"]
   let (retName, returnType) := retBinder
@@ -1076,7 +1098,8 @@ def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
   let ensures ← ensuresObj.mapM (fromJsonSpanned · Exp.fromJson)
   let bodyObj ← j.getObjValByPathM ["exec_proof_check", "body", "x"]
   let bodyStm ← Stm.fromJson bodyObj
-  return some <| ExecFn.mk name args retName returnType requires.toList ensures.toList bodyStm
+  let locals ← localDeclsFromJson j
+  return some <| ExecFn.mk name args retName returnType requires.toList ensures.toList bodyStm locals
 
 
 def typeParamsFromJson (j : Json) : m (List String) := do
@@ -1103,7 +1126,7 @@ def Struct.fromJson (j : Json) : VParser (Option Struct) := do
 
   -- It is acceptable for the `Vstd` datatypes not to have any fields
   -- Elaboration will test for these later, omitting their definitions
-  if name.head = VstdStr then
+  if isVstdName name then
     return none
   else
     /-
