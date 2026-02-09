@@ -219,7 +219,9 @@ open VParser
 variable {m : Type → Type} [Monad m] [MonadExceptOf String m]
 
 def xJsonFromSpanned (j : Json) : m Json :=
-  j.getObjValM "x"
+  match j.getObjVal? "x" with
+  | .ok v => return v
+  | .error _ => throw s!"Expected spanned JSON object with key `x`, got: {j}"
 
 def widthFromJson (j : Json) : m Nat := do
   try
@@ -283,6 +285,7 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       | some j =>
         match j.getStr? with
         | .ok "StrSlice" => return .StrSlice
+        | .ok "Global" => return .AirNamed "Global"
         | .ok "Array" =>
           -- In Verus, arrays are specified by their type and length
           -- We drop the length requirement (for now TODO)
@@ -388,7 +391,7 @@ def fromJsonSpanned {α : Type} (j : Json) (fj : Json → VParser α) : VParser 
   match j.getObjVal? "typ" with
   | .ok typObj => setTyp <| ← Typ.fromJson typObj
   | _ => setTyp (← getTyp) -- no-op
-  fj <| ← j.getObjVal? "x"
+  fj <| ← xJsonFromSpanned j
 
 --------------------------------------------------------------------------------
 
@@ -844,10 +847,22 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
   | ("Call", obj) =>
     let fnName ← pathedNameFromNameJson obj (nameKey := "fun")
     let typArgsArr ← obj.getArrUnderKeyM "typ_args"
-    let typArgs ← typArgsArr.mapM (fromJsonSpanned · Typ.fromJson)
+    -- In current Verus JSON, type args may be either wrapped (`{x: ...}`) or
+    -- already unwrapped type JSON.
+    let typArgs ← typArgsArr.mapM (fun tj => do
+      match tj.getObjVal? "x" with
+      | .ok v => Typ.fromJson v
+      | .error _ => Typ.fromJson tj)
     let argsArr ← obj.getArrUnderKeyM "args"
     let args ← argsArr.mapM (fromJsonSpanned · Exp.fromJson)
-    return .Call fnName typArgs.toList args.toList
+    match obj.getObjVal? "dest" with
+    | .ok destObj =>
+      let (lhs, lhsTy) ← Dest.fromJson <| ← destObj.getObjValM "dest"
+      let lhsIsInit ← destObj.getBoolUnderKeyM "is_init"
+      let rhs := Exp.Call (.Fun fnName) typArgs.toList args.toList
+      return .Assign lhs lhsTy rhs lhsIsInit
+    | .error _ =>
+      return .Call fnName typArgs.toList args.toList
 
   | ("Assert", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 3
@@ -1048,8 +1063,10 @@ def localDeclsFromJson (j : Json) : VParser (List (String × Typ)) := do
   | .ok arr =>
     let mut locals : List (String × Typ) := []
     for decl in arr do
-      let kind ← decl.getObjValM "kind"
-      let isStmtLet := match kind.getObjVal? "StmtLet" with | .ok _ => true | .error _ => false
+      let kindObj? := decl.getObjVal? "kind"
+      let isStmtLet := match kindObj? with
+        | .ok kind => match kind.getObjVal? "StmtLet" with | .ok _ => true | .error _ => false
+        | .error _ => false
       if isStmtLet then
         pure ()
       else
@@ -1089,6 +1106,11 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
 def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
   let name ← pathedNameFromNameJson j
   if isVstdName name then return none else
+  -- Skip exec fns without a body (e.g. external std/alloc helpers).
+  match Lean.Json.getObjValByPath j ["exec_proof_check", "body", "x"] with
+  | .ok (Json.obj _) => pure ()
+  | .ok _ => return none
+  | .error _ => return none
   let args ← fnParseArgs j
   let retBinder ← VarBinder.fromJson <| ← j.getObjValByPathM ["ret", "x"]
   let (retName, returnType) := retBinder

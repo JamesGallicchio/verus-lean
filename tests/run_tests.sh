@@ -32,11 +32,11 @@ Convenience:
   -h, --help       Show this help
 
 Target:
-  Optional base name or file name to run a single test, e.g.
+  Optional base name or a concrete file path to run a single test, e.g.
     LoopSimple
-    LoopSimple.rs
-    serialized_LoopSimple.json
-    serialized_LoopSimple.core.st
+    /path/to/LoopSimple.rs
+    /path/to/serialized_LoopSimple.json
+    /path/to/serialized_LoopSimple.core.st
 EOF
 }
 
@@ -146,7 +146,12 @@ run_verus_lean_jsons() {
     cmd+=("boogie")
   fi
 
-  if [ -n "$target_base" ]; then
+  if [ -n "$target_path" ]; then
+    case "$target_path" in
+      *.json) json_files=("$target_path") ;;
+      *) echo "Target is not a .json file: $target_path"; exit 1 ;;
+    esac
+  elif [ -n "$target_base" ]; then
     out_base=$(map_output_base "$target_base")
     json="$json_dir/serialized_${out_base}.json"
     if [ ! -f "$json" ]; then
@@ -193,6 +198,7 @@ run_boogie=false
 run_lean=false
 run_verify=false
 target_base=""
+target_path=""
 
 if [ $# -eq 0 ]; then
   usage
@@ -223,12 +229,31 @@ if [ ${#positional[@]} -gt 1 ]; then
 fi
 
 if [ ${#positional[@]} -eq 1 ]; then
-  target_base=$(normalize_target_base "${positional[0]}")
+  if [ -f "${positional[0]}" ]; then
+    target_path="${positional[0]}"
+  else
+    target_base=$(normalize_target_base "${positional[0]}")
+  fi
 fi
 
 if ! $run_verus && ! $run_boogie && ! $run_lean && ! $run_verify; then
   usage
   exit 1
+fi
+
+# A concrete file target (.rs/.json/.core.st) is stage-specific.
+# For multi-stage runs, normalize once to a base name so each stage resolves
+# the corresponding artifact in its own format.
+if [ -n "$target_path" ]; then
+  stage_count=0
+  $run_verus && stage_count=$((stage_count + 1))
+  $run_boogie && stage_count=$((stage_count + 1))
+  $run_lean && stage_count=$((stage_count + 1))
+  $run_verify && stage_count=$((stage_count + 1))
+  if [ "$stage_count" -gt 1 ]; then
+    target_base=$(normalize_target_base "$target_path")
+    target_path=""
+  fi
 fi
 
 mkdir -p "$JSON_LEAN_DIR" "$JSON_BOOGIE_DIR" "$BOOGIE_DIR" "$LEAN_DIR"
@@ -269,7 +294,12 @@ if $run_verus; then
     source ../tools/activate
     vargo build --release --features lean
 
-    if [ -n "$target_base" ]; then
+    if [ -n "$target_path" ]; then
+      case "$target_path" in
+        *.rs) files=("$target_path") ;;
+        *) echo "Target is not a .rs file: $target_path"; exit 1 ;;
+      esac
+    elif [ -n "$target_base" ]; then
       in_base=$(map_input_base "$target_base")
       file="$VERUSFILES_DIR/$in_base.rs"
       if [ ! -f "$file" ]; then
@@ -326,7 +356,13 @@ if $run_verify; then
     echo "Missing Strata repo at $STRATA_DIR"
     exit 1
   fi
-  if [ -n "$target_base" ]; then
+  if [ -n "$target_path" ]; then
+    case "$target_path" in
+      *.core.st) verify_path="$target_path" ;;
+      *) echo "Target is not a .core.st file: $target_path"; exit 1 ;;
+    esac
+    (cd "$STRATA_DIR" && lake exe StrataVerify "$verify_path")
+  elif [ -n "$target_base" ]; then
     out_base=$(map_output_base "$target_base")
     file="$BOOGIE_DIR/serialized_${out_base}.core.st"
     if [ ! -f "$file" ]; then
