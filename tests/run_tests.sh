@@ -9,10 +9,13 @@ BOOGIE_DIR="${BOOGIE_DIR:-$ROOT_DIR/tests/BoogieFiles}"
 LEAN_DIR="${LEAN_DIR:-$ROOT_DIR/tests/LeanFiles}"
 VERUS_DIR="$ROOT_DIR/../verus"
 VERUS_SRC="$VERUS_DIR/source"
+VERUS_BIN="$VERUS_SRC/target-verus/release/verus"
 STRATA_DIR="$ROOT_DIR/../Strata"
 VERUS_LEAN="$ROOT_DIR/.lake/build/bin/verus-lean"
 
 verbose=false
+STRATA_SOLVER="cvc5"
+STRATA_SOLVER_TIMEOUT=""
 
 usage() {
   cat <<'EOF'
@@ -23,6 +26,9 @@ Stages:
   --boogie         Run verus-lean on JSONFilesBoogie to generate Core files
   --lean           Run verus-lean on JSONFilesLean to generate LeanFiles
   --verify         Run StrataVerify on Core files
+  --solver <name>  StrataVerify solver (default: cvc5)
+  --solver-timeout <sec>
+                   StrataVerify timeout in seconds
   --verbose        Show full CLI output for external commands
 
 Convenience:
@@ -37,6 +43,7 @@ Target:
     /path/to/LoopSimple.rs
     /path/to/serialized_LoopSimple.json
     /path/to/serialized_LoopSimple.core.st
+
 EOF
 }
 
@@ -92,11 +99,10 @@ run_verus_export() {
   local out_json
   local out_dir
   local label
-  local flags=""
-  local verus_bin
+  local -a flags=()
 
   if [ "$mode" = "boogie" ]; then
-    flags="--export-lean-all"
+    flags+=(--export-lean-all)
     out_dir="$JSON_BOOGIE_DIR"
     label="boogie"
   else
@@ -104,15 +110,9 @@ run_verus_export() {
     label="lean"
   fi
 
-  verus_bin="$VERUS_SRC/target-verus/release/verus"
   out_json="$out_dir/serialized_${base}.json"
-  rm -f "$out_json"
   set +e
-  if [ -n "$flags" ]; then
-    run_cmd_quiet_in_dir "$out_dir" "$verus_bin" $flags "$file"
-  else
-    run_cmd_quiet_in_dir "$out_dir" "$verus_bin" "$file"
-  fi
+  run_cmd_quiet_in_dir "$out_dir" "$VERUS_BIN" "${flags[@]}" "$file"
   rc=$?
   set -e
   if [ $rc -ne 0 ]; then
@@ -146,10 +146,10 @@ run_verus_lean_jsons() {
     cmd+=("boogie")
   fi
 
-  if [ -n "$target_path" ]; then
-    case "$target_path" in
-      *.json) json_files=("$target_path") ;;
-      *) echo "Target is not a .json file: $target_path"; exit 1 ;;
+  if [ -n "$target_json_path" ]; then
+    case "$target_json_path" in
+      *.json) json_files=("$target_json_path") ;;
+      *) echo "Target is not a .json file: $target_json_path"; exit 1 ;;
     esac
   elif [ -n "$target_base" ]; then
     out_base=$(map_output_base "$target_base")
@@ -198,7 +198,9 @@ run_boogie=false
 run_lean=false
 run_verify=false
 target_base=""
-target_path=""
+target_rs_path=""
+target_json_path=""
+target_core_path=""
 
 if [ $# -eq 0 ]; then
   usage
@@ -206,21 +208,56 @@ if [ $# -eq 0 ]; then
 fi
 
 positional=()
-for arg in "$@"; do
-  case "$arg" in
-    --verus) run_verus=true ;;
-    --boogie) run_boogie=true ;;
-    --lean) run_lean=true ;;
-    --verify) run_verify=true ;;
-    --verbose) verbose=true ;;
-    --all) run_verus=true; run_boogie=true; run_verify=true ;;
-    --verus-boogie) run_verus=true; run_boogie=true ;;
-    --boogie-verify) run_boogie=true; run_verify=true ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --verus) run_verus=true; shift ;;
+    --boogie) run_boogie=true; shift ;;
+    --lean) run_lean=true; shift ;;
+    --verify) run_verify=true; shift ;;
+    --solver)
+      if [ $# -lt 2 ]; then
+        echo "Missing value for --solver"
+        usage
+        exit 1
+      fi
+      STRATA_SOLVER="$2"
+      shift 2
+      ;;
+    --solver-timeout)
+      if [ $# -lt 2 ]; then
+        echo "Missing value for --solver-timeout"
+        usage
+        exit 1
+      fi
+      STRATA_SOLVER_TIMEOUT="$2"
+      shift 2
+      ;;
+    --solver=*)
+      STRATA_SOLVER="${1#*=}"
+      shift
+      ;;
+    --solver-timeout=*)
+      STRATA_SOLVER_TIMEOUT="${1#*=}"
+      shift
+      ;;
+    --verbose) verbose=true; shift ;;
+    --all) run_verus=true; run_boogie=true; run_verify=true; shift ;;
+    --verus-boogie) run_verus=true; run_boogie=true; shift ;;
+    --boogie-verify) run_boogie=true; run_verify=true; shift ;;
     -h|--help) usage; exit 0 ;;
-    --*) echo "Unknown option: $arg"; usage; exit 1 ;;
-    *) positional+=("$arg") ;;
+    --) shift; while [ $# -gt 0 ]; do positional+=("$1"); shift; done ;;
+    --*) echo "Unknown option: $1"; usage; exit 1 ;;
+    *) positional+=("$1"); shift ;;
   esac
 done
+
+declare -a STRATA_VERIFY_ARGS=()
+if [ -n "$STRATA_SOLVER" ]; then
+  STRATA_VERIFY_ARGS+=(--solver "$STRATA_SOLVER")
+fi
+if [ -n "$STRATA_SOLVER_TIMEOUT" ]; then
+  STRATA_VERIFY_ARGS+=(--solver-timeout "$STRATA_SOLVER_TIMEOUT")
+fi
 
 if [ ${#positional[@]} -gt 1 ]; then
   echo "Too many targets provided."
@@ -230,7 +267,18 @@ fi
 
 if [ ${#positional[@]} -eq 1 ]; then
   if [ -f "${positional[0]}" ]; then
-    target_path="${positional[0]}"
+    candidate="${positional[0]}"
+    target_base=$(normalize_target_base "$candidate")
+    case "$candidate" in
+      *.rs) target_rs_path="$candidate" ;;
+      *.json) target_json_path="$candidate" ;;
+      *.core.st|*.boogie.st) target_core_path="$candidate" ;;
+      *)
+        echo "Unsupported target file type: $candidate"
+        echo "Expected .rs, .json, or .core.st/.boogie.st"
+        exit 1
+        ;;
+    esac
   else
     target_base=$(normalize_target_base "${positional[0]}")
   fi
@@ -239,21 +287,6 @@ fi
 if ! $run_verus && ! $run_boogie && ! $run_lean && ! $run_verify; then
   usage
   exit 1
-fi
-
-# A concrete file target (.rs/.json/.core.st) is stage-specific.
-# For multi-stage runs, normalize once to a base name so each stage resolves
-# the corresponding artifact in its own format.
-if [ -n "$target_path" ]; then
-  stage_count=0
-  $run_verus && stage_count=$((stage_count + 1))
-  $run_boogie && stage_count=$((stage_count + 1))
-  $run_lean && stage_count=$((stage_count + 1))
-  $run_verify && stage_count=$((stage_count + 1))
-  if [ "$stage_count" -gt 1 ]; then
-    target_base=$(normalize_target_base "$target_path")
-    target_path=""
-  fi
 fi
 
 mkdir -p "$JSON_LEAN_DIR" "$JSON_BOOGIE_DIR" "$BOOGIE_DIR" "$LEAN_DIR"
@@ -282,22 +315,28 @@ if $run_verus; then
     gen_boogie_json=true
   fi
 
-  if $gen_lean_json; then
-    rm -f "$JSON_LEAN_DIR"/serialized_*.json
-  fi
-  if $gen_boogie_json; then
-    rm -f "$JSON_BOOGIE_DIR"/serialized_*.json
+  need_verus_build=false
+  if [ ! -x "$VERUS_BIN" ] || [ "${VERUS_FORCE_BUILD:-0}" = "1" ]; then
+    need_verus_build=true
   fi
 
   (
     cd "$VERUS_SRC"
-    source ../tools/activate
-    vargo build --release --features lean
+    # Avoid rebuilding Verus on every test run. This prevents frequent stalls on
+    # stale cargo/vargo locks while keeping an override for explicit rebuilds.
+    if $need_verus_build; then
+      source ../tools/activate
+      vargo build --release --features lean
+    else
+      if $verbose; then
+        echo "Using existing Verus binary: $VERUS_BIN"
+      fi
+    fi
 
-    if [ -n "$target_path" ]; then
-      case "$target_path" in
-        *.rs) files=("$target_path") ;;
-        *) echo "Target is not a .rs file: $target_path"; exit 1 ;;
+    if [ -n "$target_rs_path" ]; then
+      case "$target_rs_path" in
+        *.rs) files=("$target_rs_path") ;;
+        *) echo "Target is not a .rs file: $target_rs_path"; exit 1 ;;
       esac
     elif [ -n "$target_base" ]; then
       in_base=$(map_input_base "$target_base")
@@ -356,12 +395,12 @@ if $run_verify; then
     echo "Missing Strata repo at $STRATA_DIR"
     exit 1
   fi
-  if [ -n "$target_path" ]; then
-    case "$target_path" in
-      *.core.st) verify_path="$target_path" ;;
-      *) echo "Target is not a .core.st file: $target_path"; exit 1 ;;
+  if [ -n "$target_core_path" ]; then
+    case "$target_core_path" in
+      *.core.st) verify_path="$target_core_path" ;;
+      *) echo "Target is not a .core.st file: $target_core_path"; exit 1 ;;
     esac
-    (cd "$STRATA_DIR" && lake exe StrataVerify "$verify_path")
+    (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$verify_path")
   elif [ -n "$target_base" ]; then
     out_base=$(map_output_base "$target_base")
     file="$BOOGIE_DIR/serialized_${out_base}.core.st"
@@ -373,7 +412,7 @@ if $run_verify; then
       /*) verify_path="$file" ;;
       *) verify_path="$ROOT_DIR/$file" ;;
     esac
-    (cd "$STRATA_DIR" && lake exe StrataVerify "$verify_path")
+    (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$verify_path")
   else
     any=false
     for file in "$BOOGIE_DIR"/serialized_*.core.st; do
@@ -381,10 +420,10 @@ if $run_verify; then
         break
       fi
       any=true
-      (cd "$STRATA_DIR" && lake exe StrataVerify "$file")
+      (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$file")
     done
     if ! $any; then
-      echo "No Boogie files found in $BOOGIE_DIR"
+      echo "No Core files found in $BOOGIE_DIR"
       exit 1
     fi
   fi

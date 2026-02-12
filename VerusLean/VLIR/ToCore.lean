@@ -23,16 +23,43 @@ abbrev BoundEnv := List (String × Typ) -- bound variables introduced by binders
 
 /-! ## Utilities -/
 
--- Check if a character is valid in a Core identifier.
-def isIdentChar (c : Char) : Bool :=
-  c.isAlpha || c.isDigit || c == '_'
-
--- Sanitize an identifier for Core, as VLIR identifiers might contain invalid characters like `%`, `::`, `<`, `>`, etc.
+-- Sanitize an identifier to Strata regular-id rules (DDM parser):
+-- first char: [A-Za-z_], rest chars: [A-Za-z0-9_'.?!]
+-- Characters outside this set are replaced by `_`.
 def sanitizeIdent (s : String) : String :=
-  let mapped := s.map fun c => if isIdentChar c then c else '_'
-  match mapped.toList with
-  | c :: _ => if c.isDigit then "_" ++ mapped else mapped
+  match s.toList with
   | [] => "_"
+  | c :: cs =>
+    let first := if c.isAlpha || c == '_' then c else '_'
+    let rest := cs.map (fun c =>
+      if c.isAlphanum || c == '_' || c == '\'' || c == '.' || c == '?' || c == '!' then c else '_')
+    String.ofList (first :: rest)
+
+-- VLIR parser builds `Ident` from full crate + path segments,
+-- here to Core symbols we drop one leading namespace/file segment
+-- Examples:
+--   `Datatypes.worthless_ctor`      -> `worthless_ctor`
+--   `Datatypes::worthless::size`    -> `worthless::size`
+--   `Datatypes_worthless_ctor`      -> `worthless_ctor`
+-- TODO: projected-name collisions?
+def stripLeadingNamespace (s : String) : String :=
+  let dropFirstSegment (sep : String) : Option String :=
+    match s.splitOn sep with
+    | _ :: rest@(_ :: _) => some (String.intercalate sep rest)
+    | _ => none
+  let dropLeadingModulePrefix : Option String :=
+    match s.splitOn "_" with
+    | p :: rest@(_ :: _) =>
+      let startsUpper := match p.toList.head? with
+        | some c => c.isUpper
+        | none => false
+      let alphaNum := p.toList.all (fun c => c.isAlpha || c.isDigit)
+      if startsUpper && alphaNum then
+        some (String.intercalate "_" rest)
+      else
+        none
+    | _ => none
+  (dropFirstSegment "." <|> dropFirstSegment "::" <|> dropLeadingModulePrefix).getD s
 
 def isVecTypeName (name : Ident) : Bool :=
   let s := name.toString
@@ -62,6 +89,43 @@ def isVecIndexExecName (name : Ident) : Bool :=
 def isViewName (name : Ident) : Bool :=
   name.toString.endsWith ".view"
 
+def datatypeNameOf (dt : Ident) : String :=
+  sanitizeIdent (stripLeadingNamespace dt.toString)
+
+def structCtorNameOf (dt : Ident) : String :=
+  -- Keep a suffix to avoid collisions with the datatype type symbol (e.g. `point_ctor` vs `point`).
+  datatypeNameOf dt ++ "_ctor"
+
+def structCtorIdentOf (dt : Ident) : CoreIdent :=
+  CoreIdent.unres (structCtorNameOf dt)
+
+def enumCtorNameOf (dt : Ident) (variant : String) : String :=
+  -- Keep datatype prefix to avoid collisions across enums that share variant names.
+  datatypeNameOf dt ++ "_" ++ sanitizeIdent variant
+
+def enumCtorIdentOf (dt : Ident) (variant : String) : CoreIdent :=
+  CoreIdent.unres (enumCtorNameOf dt variant)
+
+def fieldAccessorNameOf (field : String) : String :=
+  sanitizeIdent field
+
+def fieldAccessorIdentOf (field : String) : CoreIdent :=
+  CoreIdent.unres (fieldAccessorNameOf field)
+
+def datatypeDestructorNameOf (dt : Ident) (field : String) : String :=
+  s!"{datatypeNameOf dt}..{fieldAccessorNameOf field}"
+
+def datatypeDestructorIdentOf (dt : Ident) (field : String) : CoreIdent :=
+  CoreIdent.unres (datatypeDestructorNameOf dt field)
+
+def enumTesterNameOf (dt : Ident) (variant : String) : String :=
+  let dtName := datatypeNameOf dt
+  let ctorName := enumCtorNameOf dt variant
+  s!"{dtName}..is{ctorName}"
+
+def enumTesterIdentOf (dt : Ident) (variant : String) : CoreIdent :=
+  CoreIdent.unres (enumTesterNameOf dt variant)
+
 def declSentinelName : String := "__verus_decl__"
 
 def declSentinel : CoreExpr :=
@@ -72,7 +136,7 @@ def isDeclSentinel : CoreExpr → Bool
   | _ => false
 
 def identToCore (i : Ident) : CoreIdent :=
-  CoreIdent.unres (sanitizeIdent i.toString)
+  CoreIdent.unres (sanitizeIdent (stripLeadingNamespace i.toString))
 
 def varToCore (s : String) : CoreIdent :=
   CoreIdent.unres (sanitizeIdent s)
@@ -132,8 +196,8 @@ def monoTyOfTyp : Typ → LMonoTy
         -- so this shows up clearly in the generated Core program.
         Core.mapTy (.bitvec 32) (.tcons "MissingVecElem" [])
     else
-      .tcons (sanitizeIdent name.toString) (params.map monoTyOfTyp)
-  | .Enum name params => .tcons (sanitizeIdent name.toString) (params.map monoTyOfTyp)
+      .tcons (datatypeNameOf name) (params.map monoTyOfTyp)
+  | .Enum name params => .tcons (datatypeNameOf name) (params.map monoTyOfTyp)
   | .AirNamed str => .tcons str []
 
 def bitWidthOfTyp : Typ → Option Nat
@@ -326,11 +390,11 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
       return LExpr.fvar () (varToCore x) ty?
   | .Const c => return constToCore expected? c
   | .StructCtor dt fields => do
-    let ctor := LExpr.op () (CoreIdent.unres (sanitizeIdent dt.toString ++ "_ctor")) none
+    let ctor := LExpr.op () (structCtorIdentOf dt) none
     let args ← fields.mapM (fun (_, e) => expToCoreWithBound env bound none e)
     return LExpr.mkApp () ctor args
   | .EnumCtor dt variant data => do
-    let ctor := LExpr.op () (CoreIdent.unres (sanitizeIdent dt.toString ++ "_" ++ sanitizeIdent variant)) none
+    let ctor := LExpr.op () (enumCtorIdentOf dt variant) none
     let args ← data.mapM (fun (_, e) => expToCoreWithBound env bound none e)
     return LExpr.mkApp () ctor args
   | .TupleCtor _ _ => throw "TODO: tuple constructors"
@@ -425,10 +489,11 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     | .Unbox _ => return x
     | .HasType _ => return x
     | .Proj dt _variant field =>
-      let proj := LExpr.op () (CoreIdent.unres (sanitizeIdent dt.toString ++ "_" ++ sanitizeIdent field)) none
+      -- Core field projection uses datatype destructors, e.g. `List..head(x)`.
+      let proj := LExpr.op () (datatypeDestructorIdentOf dt field) none
       return LExpr.mkApp () proj [x]
     | .IsVariant dt variant =>
-      let isFn := LExpr.op () (CoreIdent.unres ("is_" ++ sanitizeIdent dt.toString ++ "_" ++ sanitizeIdent variant)) none
+      let isFn := LExpr.op () (enumTesterIdentOf dt variant) none
       return LExpr.mkApp () isFn [x]
     | .Proj' _ _ => throw "TODO: tuple projections"
     | .BitNot none =>
@@ -540,7 +605,7 @@ abbrev expToCore (env : VarEnv) (expected? : Option Typ) (e : Exp) :
 def isTempName (s : String) : Bool :=
   if s.startsWith "tmp" then
     let tail := s.drop 3
-    tail.length > 0 && tail.all Char.isDigit
+    !tail.isEmpty && tail.all Char.isDigit
   else
     false
 
@@ -584,6 +649,8 @@ def extractLoopGuardFromBody : Stm → Option (Exp × Stm)
   -- Recognize lowered loop heads:
   --   [tmp_i := rhs_i]* ; if (!guard) { break; } ; tail
   -- and recover source-style guard/body by substituting the temporary bindings.
+  -- TODO: continue-based guards, non-empty else branches,
+  -- and guard checks that are not the first non-temp statement.
   | .Block stms =>
     let (subs, rest) := splitTempPrefix stms
     match rest with
@@ -669,7 +736,8 @@ partial def stmToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
   | .Call fn _typArgs args => do
     let args' ← args.mapM (expToCore env none)
     return [Core.Statement.call [] (sanitizeIdent fn.toString) args']
-  | .Assert exp => do
+  | .Assert exp
+  | .AssertLean exp => do
     match exp with
     | .Unary (.HasType _) _ => return []
     | _ =>
@@ -685,9 +753,6 @@ partial def stmToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
   | .AssertCompute exp => do
     let e ← expToCore env (some .Bool) exp
     return [Core.Statement.assert "compute" e]
-  | .AssertLean exp => do
-    let e ← expToCore env (some .Bool) exp
-    return [Core.Statement.assert "lean" e]
   | .Assume exp => do
     let e ← expToCore env (some .Bool) exp
     return [Core.Statement.assume "" e]
@@ -755,27 +820,11 @@ partial def stmToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
 partial def stmListToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
     List Stm → Except String (List Core.Statement)
   | stms =>
+    -- inline temporary assignments first, then preserve the resulting statement sequence in Core
     stmListToCoreAux env retVar? (inlineTemps stms)
 
 partial def stmListToCoreAux (env : VarEnv) (retVar? : Option (String × Typ)) :
     List Stm → Except String (List Core.Statement)
-  -- Verus often lowers `assert e` into:
-  --   tmp := e; assert tmp; assume tmp;
-  -- Collapse this back into one Core assert for readability.
-  | .Assign lhs lhsTy rhs lhsIsInit :: .Assert (.Var v1) :: .Assume (.Var v2) :: rest =>
-    if lhs == v1 && v1 == v2 then
-      do
-        let e ← expToCore env (some lhsTy) rhs
-        let st := Core.Statement.assert "" e
-        let tail ← stmListToCoreAux env retVar? rest
-        return st :: tail
-    else
-      do
-        let s1 ← stmToCore env retVar? (.Assign lhs lhsTy rhs lhsIsInit)
-        let s2 ← stmToCore env retVar? (.Assert (.Var v1))
-        let s3 ← stmToCore env retVar? (.Assume (.Var v2))
-        let tail ← stmListToCoreAux env retVar? rest
-        return s1 ++ s2 ++ s3 ++ tail
   | stm :: rest => do
     let s1 ← stmToCore env retVar? stm
     let s2 ← stmListToCoreAux env retVar? rest
@@ -845,21 +894,39 @@ def specFnToCore (emitBody : Bool) (f : SpecFn) : Except String Core.Function :=
     body := if emitBody then some body else none
   }
 
-def proofFnToCore (f : ProofFn) : Except String Core.Procedure :=
-  -- Placeholder: proof bodies are not emitted yet.
+def proofFnToCore (f : ProofFn) : Except String Core.Procedure := do
+  let inputNames := f.inputs.map Prod.fst
+  let bodyStm? := f.body
+  let initVars :=
+    match bodyStm? with
+    | some body => collectInitVars body
+    | none => []
+  let localsAll := dedupLocals <| f.locals.filter (fun (n, _) =>
+    !(inputNames.any (fun x => x == n))) -- avoid redeclaring inputs as local variables
+  let localsDecls := localsAll.filter (fun (n, _) => !initVars.any (fun x => x == n))
+  let env := envFromDecls (expandVecDecls (f.inputs ++ localsAll))
+  let pre ← mkChecks env "requires_" f.requires
+  let post ← mkChecks env "ensures_" f.ensures
+  let body ←
+    match bodyStm? with
+    | some stm => stmToCore env none stm
+    | none => pure []
+  let localDecls :=
+    localsDecls.map (fun (n, t) =>
+      Core.Statement.init (varToCore n) (.forAll [] (monoTyOfTyp t)) declSentinel)
   return {
     header := {
       name := identToCore f.name
       typeArgs := []
-      inputs := signatureOf f.inputs
+      inputs := signatureOfVec f.inputs
       outputs := []
     }
     spec := {
       modifies := []
-      preconditions := []
-      postconditions := []
+      preconditions := pre
+      postconditions := post
     }
-    body := []
+    body := localDecls ++ body
   }
 
 def execFnToCore (f : ExecFn) : Except String Core.Procedure := do
@@ -935,7 +1002,56 @@ def funcCheckSstToCore (f : FuncCheckSst) : Except String Core.Procedure := do
     body := []
   }
 
--- TODO: struct/enum/tuple/array translations
+def mkTypeArgs (params : List String) : List String :=
+  -- TODO: sanitize and deduplicate
+  params
+
+def structToCoreTypeDecl (s : Struct) : Core.TypeDecl :=
+  let dtName := datatypeNameOf s.name
+  let ctorId := structCtorIdentOf s.name
+  let ctorFields : List (CoreIdent × LMonoTy) :=
+    s.fields.map (fun (field, ty) =>
+      (fieldAccessorIdentOf field, monoTyOfTyp ty))
+  let constr : LConstr Visibility :=
+    { name := ctorId
+      args := ctorFields
+      testerName := s!"{dtName}..is{CoreIdent.toPretty ctorId}" }
+  let d : LDatatype Visibility :=
+    { name := dtName
+      typeArgs := mkTypeArgs s.typeParams
+      constrs := [constr]
+      constrs_ne := by simp }
+  .data [d]
+
+def enumToCoreTypeDecl (e : Enum) : Except String Core.TypeDecl := do
+  let dtName := datatypeNameOf e.name
+  let constrs : List (LConstr Visibility) :=
+    e.fields.map (fun field =>
+      match field with
+      | .labeled variant data =>
+        let ctorId := enumCtorIdentOf e.name variant
+        let args := data.map (fun (fname, ty) =>
+          (fieldAccessorIdentOf fname, monoTyOfTyp ty))
+        { name := ctorId
+          args := args
+          testerName := enumTesterNameOf e.name variant }
+      | .tuple variant ts =>
+        let ctorId := enumCtorIdentOf e.name variant
+        let args := ts.zipIdx.map (fun (ty, i) =>
+          let field := s!"{dtName}_{sanitizeIdent variant}_{i}"
+          (CoreIdent.unres field, monoTyOfTyp ty))
+        { name := ctorId
+          args := args
+          testerName := enumTesterNameOf e.name variant })
+  match constrs with
+  | [] => throw s!"enum {e.name} has no variants"
+  | c :: cs =>
+    let d : LDatatype Visibility :=
+      { name := dtName
+        typeArgs := mkTypeArgs e.typeParams
+        constrs := c :: cs
+        constrs_ne := by simp }
+    return .data [d]
 
 partial def declToCore : Decl → Except String (List Core.Decl)
   | .assertion a => do
@@ -953,8 +1069,11 @@ partial def declToCore : Decl → Except String (List Core.Decl)
   | .func f => do
     let p ← funcCheckSstToCore f
     return [Core.Decl.proc p]
-  | .struct _ => throw "TODO: struct translation not implemented yet"
-  | .enum _ => throw "TODO: enum translation not implemented yet"
+  | .struct s =>
+    return [Core.Decl.type (structToCoreTypeDecl s)]
+  | .enum e => do
+    let dt ← enumToCoreTypeDecl e
+    return [Core.Decl.type dt]
   | .mutualBlock ds => do
     let parts ← ds.mapM (fun d =>
       match d with
@@ -965,9 +1084,116 @@ partial def declToCore : Decl → Except String (List Core.Decl)
     -- TODO: mutual recursion?
     return parts.flatten
 
+/-! ## Impl Arrow Wrapper Pruning
+
+Verus can synthesize helper methods for field access with names like
+`impl&%N::arrow_*` (from enum/struct field-accessor lowering). After identifier
+sanitization in this file, those become `impl__N_arrow_*`.
+
+With `--export-lean-all`, Verus serializes all functions in the current module
+scope before reachability minimization, so these synthesized helpers may appear
+in JSON even when they are unused by translated program bodies.
+
+This pass removes such noise by keeping only wrappers (transitively) reachable
+from non-wrapper declarations.
+
+TODO: if/when Verus export becomes reachability-minimized for `--export-lean-all`,
+this pruning pass can be reduced or removed.
+-/
+
+-- Name-level predicate for synthetic `impl__*_arrow_*` wrapper helpers.
+def isImplArrowWrapperName (s : String) : Bool :=
+  (s.startsWith "impl__") && (s.find? "_arrow_").isSome
+
+private def joinRefs (xss : List (List String)) : List String :=
+  (xss.foldr (· ++ ·) []).eraseDups
+
+-- Collect wrapper function references from a Core expression.
+def exprImplArrowRefs (e : CoreExpr) : List String :=
+  ((Lambda.LExpr.getOps e).map CoreIdent.toPretty |>.filter isImplArrowWrapperName).eraseDups
+
+def collectImplArrowRefsFromChecks (checks : ListMap CoreLabel Core.Procedure.Check) : List String :=
+  joinRefs <| checks.values.map (fun c => exprImplArrowRefs c.expr)
+
+-- Collect wrapper references from imperative statements.
+mutual
+partial def stmtImplArrowRefs : Core.Statement → List String
+  | .cmd (.cmd (.init _ _ e _)) => exprImplArrowRefs e
+  | .cmd (.cmd (.set _ e _)) => exprImplArrowRefs e
+  | .cmd (.cmd (.havoc _ _)) => []
+  | .cmd (.cmd (.assert _ e _)) => exprImplArrowRefs e
+  | .cmd (.cmd (.assume _ e _)) => exprImplArrowRefs e
+  | .cmd (.cmd (.cover _ e _)) => exprImplArrowRefs e
+  | .cmd (.call _ _ args _) => joinRefs <| args.map exprImplArrowRefs
+  | .block _ ss _ => stmtsImplArrowRefs ss
+  | .ite cond t e _ =>
+    joinRefs [exprImplArrowRefs cond, stmtsImplArrowRefs t, stmtsImplArrowRefs e]
+  | .loop guard measure invariant body _ =>
+    let measureRefs := match measure with | some m => exprImplArrowRefs m | none => []
+    let invariantRefs := match invariant with | some i => exprImplArrowRefs i | none => []
+    joinRefs [exprImplArrowRefs guard, measureRefs, invariantRefs, stmtsImplArrowRefs body]
+  | .goto _ _ => []
+  | .funcDecl _ _ => []
+
+partial def stmtsImplArrowRefs (ss : List Core.Statement) : List String :=
+  joinRefs <| ss.map stmtImplArrowRefs
+end
+
+-- Collect wrapper references from a declaration body/spec.
+def declImplArrowRefs : Core.Decl → List String
+  | .func f _ => (f.body.map exprImplArrowRefs).getD []
+  | .proc p _ =>
+    joinRefs [collectImplArrowRefsFromChecks p.spec.preconditions,
+      collectImplArrowRefsFromChecks p.spec.postconditions,
+      stmtsImplArrowRefs p.body]
+  | .var _ _ e _ => exprImplArrowRefs e
+  | .ax a _ => exprImplArrowRefs a.e
+  | .distinct _ es _ => joinRefs <| es.map exprImplArrowRefs
+  | .type _ _ => []
+
+def isImplArrowWrapperDecl : Core.Decl → Bool
+  | .func f _ => isImplArrowWrapperName (CoreIdent.toPretty f.name)
+  | _ => false
+
+def declNameString (d : Core.Decl) : String :=
+  CoreIdent.toPretty d.name
+
+-- Transitive closure over wrapper references.
+-- `seed` is the initially referenced wrapper set from normal (non-wrapper) decls.
+def closeImplArrowRefs (wrapperDecls : List Core.Decl) (seed : List String) : List String :=
+  -- Adjacency list of the wrapper dependency graph:
+  --   wrapper name n ↦ direct wrapper refs in n's body/spec.
+  let wrapperRefs := wrapperDecls.map (fun d => (declNameString d, declImplArrowRefs d))
+  -- `keep` is the currently reachable wrapper set.
+  -- `fuel` is a termination guard to make Lean happy; we usually stop earlier at fixpoint.
+  let rec loop (fuel : Nat) (keep : List String) : List String :=
+    match fuel with
+    | 0 => keep
+    | fuel + 1 =>
+      let expanded :=
+        -- One closure step: for each kept wrapper n, add n's direct refs.
+        wrapperRefs.foldl (init := keep) (fun acc (n, refs) =>
+          if keep.contains n then
+            (acc ++ refs).eraseDups
+          else
+            acc)
+      -- Fixpoint reached: no newly reachable wrappers.
+      if expanded == keep then keep else loop fuel expanded
+  -- Start from deduplicated seed wrappers.
+  loop wrapperDecls.length seed.eraseDups
+
+-- Drop unreferenced wrapper declarations, leaving all non-wrapper declarations untouched.
+def pruneUnreferencedImplArrowWrappers (decls : List Core.Decl) : List Core.Decl :=
+  let (wrapperDecls, nonWrapperDecls) := decls.partition isImplArrowWrapperDecl
+  -- Keep only wrapper functions that are actually referenced by retained declarations.
+  let seed := joinRefs <| nonWrapperDecls.map declImplArrowRefs
+  let keep := closeImplArrowRefs wrapperDecls seed
+  decls.filter (fun d =>
+    if isImplArrowWrapperDecl d then keep.contains (declNameString d) else true)
+
 def declsToProgram (decls : List Decl) : Except String Core.Program := do
   let parts ← decls.mapM declToCore
-  let flat := parts.flatten
+  let flat := pruneUnreferencedImplArrowWrappers parts.flatten
   let typeDecls := flat.filter (fun d => match d with | .type _ _ => true | _ => false)
   let otherDecls := flat.filter (fun d => match d with | .type _ _ => false | _ => true)
   return { decls := typeDecls ++ otherDecls }
@@ -1181,12 +1407,15 @@ partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
     let invLine :=
       match inv with
       | none => []
-      | some i => [s!"{pad}  invariant ({exprToString i});"]
+      | some i => [s!"{pad}  invariant ({exprToString i})"]
     let head := s!"{pad}while ({exprToString guard})"
     let bodyLines := stmtsToLines (indent + 1) body
     [head] ++ invLine ++ [pad ++ "{"] ++ bodyLines ++ [pad ++ "}"]
   | .goto lbl _ =>
     [s!"{pad}goto {lbl};"]
+  | .funcDecl _ _ =>
+    -- Current VLIR→Core lowering path does not emit statement-level function declarations.
+    [s!"{pad}/* unsupported: statement-level function declaration */"]
 end
 
 def typeArgsToString (args : List String) : String :=
@@ -1199,6 +1428,19 @@ def typeParamsToString (num : Nat) : String :=
     let names := (List.range num).map (fun i => s!"T{i}")
     let binds := names.map (fun n => s!"{n}: Type")
     s!" ({String.intercalate ", " binds})"
+
+def datatypeTypeArgsToString (args : List String) : String :=
+  "(" ++ String.intercalate ", " args ++ ")"
+
+def datatypeConstrToString (c : LConstr Visibility) : String :=
+  let fields :=
+    c.args.map (fun (field, ty) =>
+      s!"{CoreIdent.toPretty field}: {tyToString (.forAll [] ty)}")
+  s!"{CoreIdent.toPretty c.name}({String.intercalate ", " fields})"
+
+def datatypeDeclToString (d : LDatatype Visibility) : String :=
+  let ctors := String.intercalate ", " (d.constrs.map datatypeConstrToString)
+  "datatype " ++ d.name ++ " " ++ datatypeTypeArgsToString d.typeArgs ++ " { " ++ ctors ++ " };"
 
 def procToString (p : Core.Procedure) : String :=
   let inputs := sigToString p.header.inputs
@@ -1240,7 +1482,7 @@ def declToString (d : Core.Decl) : String :=
     match t with
     | .con c => s!"type {c.name}{typeParamsToString c.numargs};"
     | .syn s => s!"type {s.name} := {tyToString (.forAll [] s.type)};"
-    | .data _ => "type /*data*/;"
+    | .data ds => String.intercalate "\n" (ds.map datatypeDeclToString)
   | .ax a _ => s!"axiom {CoreIdent.toPretty a.name}: {exprToString a.e};"
   | .var name ty e _ => s!"var {CoreIdent.toPretty name} : {tyToString ty} := {exprToString e};"
   | .distinct lbl es _ =>
