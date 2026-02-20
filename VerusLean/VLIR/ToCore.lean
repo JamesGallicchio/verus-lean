@@ -65,6 +65,8 @@ def isVecTypeName (name : Ident) : Bool :=
   let s := name.toString
   s.endsWith "Vec" || s.endsWith "vec"
 
+def usizeBitWidth : Nat := 64
+
 def vecLenName (base : String) : String :=
   s!"{base}_len"
 
@@ -213,11 +215,11 @@ def monoTyOfTyp : Typ → LMonoTy
   | .Struct name params =>
     if isVecTypeName name then
       match params with
-      | t :: _ => Core.mapTy (.bitvec 32) (monoTyOfTyp t)
+      | t :: _ => Core.mapTy (.bitvec usizeBitWidth) (monoTyOfTyp t)
       | [] =>
         -- Unexpected: Vec without a type parameter. Use a placeholder element type
         -- so this shows up clearly in the generated Core program.
-        Core.mapTy (.bitvec 32) (.tcons "MissingVecElem" [])
+        Core.mapTy (.bitvec usizeBitWidth) (.tcons "MissingVecElem" [])
     else
       .tcons (datatypeNameOf name) (params.map monoTyOfTyp)
   | .Enum name params => .tcons (datatypeNameOf name) (params.map monoTyOfTyp)
@@ -295,11 +297,11 @@ def vecElemTyp? : Typ → Option Typ
   | _ => none
 
 -- Core has no dedicated Vec primitive yet. Encode each Vec local as
--- the index -> element map + `*_len : bv32`.
+-- the index -> element map + `*_len : bv64`.
 def expandVecDecls (decls : List (String × Typ)) : List (String × Typ) :=
   decls.flatMap (fun (n, t) =>
     match vecElemTyp? t with
-    | some _ => [(n, t), (vecLenName n, Typ.UInt 32)]
+    | some _ => [(n, t), (vecLenName n, Typ.UInt usizeBitWidth)]
     | none => [(n, t)])
 
 /-! ## Expression Translation -/
@@ -388,7 +390,7 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
     (boundType? bound x <|> env.get? x) |>.bind bitInfoOfTyp
   | .Call (.Fun name) _ args =>
     if isVecLenSpecName name || isVecLenExecName name then
-      some (32, false)
+      some (usizeBitWidth, false)
     else if isVecIndexSpecName name || isVecIndexExecName name then
       match args with
       | vArg :: _ =>
@@ -689,10 +691,10 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
           match vecVarFromExp vArg with
           | some base =>
             if (env.get? base |>.bind vecElemTyp? |>.isSome) then
-              some (Typ.UInt 32)
+              some (Typ.UInt usizeBitWidth)
             else
               none
-          | none => some (Typ.UInt 32)
+          | none => some (Typ.UInt usizeBitWidth)
         let i ← expToCoreWithBound env bound idxTy? iArg
         return LExpr.mkApp () Core.mapSelectOp [v, i]
       | _ => mkFallback
@@ -791,7 +793,32 @@ def splitTempPrefix (stms : List Stm) : List (String × Exp) × List Stm :=
     | [] => (subsRev.reverse, [])
   go [] stms
 
+def assignFromPrefix : Stm → Option (String × Exp)
+  -- In `cond = some (prefixStm, guardExpr)`, `prefixStm` may define temps via
+  -- init assignments, and `guardExpr` can reference those temps.
+  | s =>
+    match stripSingletonBlocks s with
+    | .Assign lhs _ rhs true => some (lhs, rhs)
+    | _ => none
+
+def splitAssignPrefix (stms : List Stm) : List (String × Exp) × List Stm :=
+  let rec go (subsRev : List (String × Exp)) (rest : List Stm) :
+      List (String × Exp) × List Stm :=
+    match rest with
+    | s :: tail =>
+      match assignFromPrefix s with
+      | some sub => go (sub :: subsRev) tail
+      | none => (subsRev.reverse, rest)
+    | [] => (subsRev.reverse, [])
+  go [] stms
+
 def extractLoopGuardFromBody : Stm → Option (Exp × Stm)
+  -- Recognize lowered loop heads used when `loop_isolation(false)`:
+  --   Loop.cond = none
+  --   body      = [tmp-prefix]* ; if (!guard) { break; } ; tail
+  --
+  -- This recovers `(guard, tail)` from the body prefix.
+  --
   -- Recognize lowered loop heads:
   --   [tmp_i := rhs_i]* ; if (!guard) { break; } ; tail
   -- and recover source-style guard/body by substituting the temporary bindings.
@@ -837,7 +864,9 @@ partial def inlineTempsInStm : Stm → Stm
   | .DeadEnd stm => .DeadEnd (inlineTempsInStm stm)
   | .If cond b1 b2 => .If cond (inlineTempsInStm b1) (b2.map inlineTempsInStm)
   | .Loop isFor label cond body invs =>
-    let cond' := cond.map (fun (s, e) => (inlineTempsInStm s, e))
+    -- Keep `prefixStm` (the first component of `cond`) intact so loop lowering
+    -- can substitute its temp assignments into `guardExpr`.
+    let cond' := cond
     let body' :=
       match body with
       | .Block stms => .Block (inlineTemps stms)
@@ -1018,16 +1047,40 @@ mutual
       | none => pure []
     return [Imperative.Stmt.ite c thenStms elseStms]
   | .Loop _isForLoop label cond body invs => do
+    -- Verus emits SST guard shapes depending on `loop_isolation` (default is `true`):
+    --   1) `loop_isolation(false)`: `cond = none`, guard appears in body prefix
+    --      as `if (!guard) { break; }`.
+    --   2) `loop_isolation(true)`: `cond = some (prefixStm, guardExpr)`, where
+    --      `guardExpr` may reference temps defined in `prefixStm`.
+    -- We support both by:
+    --   - using `cond` directly when it is present, and
+    --   - when `cond = none`, computing `guardFromBody?` via
+    --     `extractLoopGuardFromBody` and using that in the `condExpr` branch below.
     let (guardFromBody?, body') :=
       match extractLoopGuardFromBody body with
       | some (g, b') => (some g, b')
       | none => (none, body)
+    -- With `loop_isolation(true)`, `cond = some (prefixStm, guardExpr)`,
+    -- where `guardExpr` may reference temps defined by `prefixStm`.
+    -- We substitute those temp-prefix bindings into the guard expression so
+    -- subsequent temp-inlining of `prefixStm` cannot leave a dangling temp var.
+    let condTempSubsts : List (String × Exp) :=
+      match cond with
+      | some (Stm.Block stms, _) => (splitAssignPrefix stms).fst
+      | some (s, _) =>
+        match assignFromPrefix s with
+        | some sub => [sub]
+        | none => []
+      | none => []
     let condExpr ←
-      match guardFromBody? with
-      | some g => expToCore env (some .Bool) g
+      match cond with
+      | some (_, e) => expToCore env (some .Bool) (substExps condTempSubsts e)
       | none =>
-        match cond with
-        | some (_, e) => expToCore env (some .Bool) e
+        -- Fallback for `loop_isolation(false)`: when `cond = none`,
+        -- use the guard recovered from the body prefix
+        -- `[tmp-prefix]* ; if (!guard) { break; } ; ...`.
+        match guardFromBody? with
+        | some g => expToCore env (some .Bool) g
         | none => pure (LExpr.boolConst () true : CoreExpr)
     let condStms ← match cond with
       | some (s, _) => stmToCore env retVar? s

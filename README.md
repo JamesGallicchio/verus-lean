@@ -6,6 +6,7 @@ that allows for the export of verus definitions and verification conditions to L
 This repository now supports two main translation paths:
 - `Verus -> Lean`
 - `Verus -> Strata Core` (and `StrataVerify`)
+- `Verus -> Boole` (via Strata Core wrapping)
 
 ## Building
 
@@ -80,9 +81,17 @@ You can also override direct binaries if needed:
 VERUS_BIN=/path/to/verus VERUS_LEAN=/path/to/verus-lean ./tests/run_tests.sh --boogie /path/to/file.json
 ```
 
+Boole output directory can be overridden:
+
+```bash
+BOOLE_DIR=/path/to/boole-output ./tests/run_tests.sh --boole /path/to/file.rs
+```
+
 Stage options:
 - `--verus`: export Verus `.rs` to JSON
 - `--boogie`: translate JSON to Strata Core (`.core.st`)
+- `--boole`: generate Boole `.lean` end-to-end from target
+  (`.rs -> JSON -> Core -> Boole`, `.json -> Core -> Boole`, `.core.st -> Boole`)
 - `--lean`: translate Lean JSON to Lean output
 - `--verify`: run `StrataVerify` on generated Core
 - `--all`: run `--verus --boogie --verify`
@@ -90,12 +99,20 @@ Stage options:
 Other options:
 - `--solver <name>` (default: `cvc5`)
 - `--solver-timeout <sec>`
+- `--out <path>` output file path for single-target runs
+  (supported for exactly one output stage: `--lean`, `--boogie`, or `--boole`)
 - `--verbose`
 
 `target_path` is optional. If provided, it should be a file path:
 - `.rs` for Verus export (and downstream boogie/verify if selected)
 - `.json` for boogie/lean translation
-- `.core.st` for verify
+- `.core.st` (or legacy `.boogie.st`) for verify
+
+`--boole` is end-to-end by target type:
+- `.rs`: runs Verus export + Core translation + Boole wrapping
+- `.json`: runs Core translation + Boole wrapping
+- `.core.st`: runs Boole wrapping only
+- no target: wraps existing Core files under `tests/BoogieFiles/*`
 
 `target_path` may be relative or absolute.
 
@@ -121,6 +138,27 @@ Other options:
 # Verify one generated Core file
 ./tests/run_tests.sh --verify tests/BoogieFiles/vlir-tests/FindMax.core.st
 ```
+
+### Verus -> Boole
+
+```bash
+# End-to-end from Verus source to Boole output
+./tests/run_tests.sh --boole tests/VerusFiles/FindMax.rs
+
+# From existing JSON to Boole output
+./tests/run_tests.sh --boole tests/JSONFilesBoogie/vlir-tests/FindMax/FindMax.json
+
+# Wrap one existing Core file into Boole output
+./tests/run_tests.sh --boole tests/BoogieFiles/vlir-tests/FindMax.core.st
+
+# Write Boole output to a custom file path
+./tests/run_tests.sh --boole tests/VerusFiles/FindMax.rs --out /tmp/FindMax.lean
+```
+
+
+Default Boole output directory:
+- `../cslib/Cslib/Languages/Boole/tests` (if `../cslib` exists)
+- otherwise `tests/BooleFiles`
 
 
 ## Contributors

@@ -226,6 +226,8 @@ open VParser
 
 variable {m : Type → Type} [Monad m] [MonadExceptOf String m]
 
+def archWordBitWidth : Nat := 64
+
 def xJsonFromSpanned (j : Json) : m Json :=
   match j.getObjVal? "x" with
   | .ok v => return v
@@ -234,7 +236,7 @@ def xJsonFromSpanned (j : Json) : m Json :=
 def widthFromJson (j : Json) : m Nat := do
   try
     j.getNatUnderKeyM "Width"
-  catch _ => return 32 -- ArchWordSize, use 32 bit for now
+  catch _ => return archWordBitWidth -- ArchWordSize fallback
 
 def pathedNameFromJson (j : Json) (pathKey : String := "path") : m Ident := do
   let nameObj ← j.getObjValM pathKey
@@ -314,7 +316,7 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       match obj.getStr? with
       | .ok "Int" => return .Int
       | .ok "Nat" => return .Nat
-      | .ok "USize" => return .UInt 32 -- assume 32 bit for now
+      | .ok "USize" => return .UInt archWordBitWidth
       | .ok _ => throw s!"unsupported Int object string: {obj}"
       | .error _ =>
         -- Now check if it is a fixed-width integer

@@ -13,6 +13,14 @@ VERUS_BIN="${VERUS_BIN:-$VERUS_SRC/target-verus/release/verus}"
 STRATA_DIR="${STRATA_DIR:-$ROOT_DIR/../Strata}"
 VERUS_LEAN="${VERUS_LEAN:-$ROOT_DIR/.lake/build/bin/verus-lean}"
 
+if [ -z "${BOOLE_DIR:-}" ]; then
+  if [ -d "$ROOT_DIR/../cslib/Cslib/Languages/Boole" ]; then
+    BOOLE_DIR="$ROOT_DIR/../cslib/Cslib/Languages/Boole/tests"
+  else
+    BOOLE_DIR="$ROOT_DIR/tests/BooleFiles"
+  fi
+fi
+
 JSON_BOOGIE_EXAMPLES_DIR="$JSON_BOOGIE_DIR/verus-examples"
 JSON_BOOGIE_VLIR_DIR="$JSON_BOOGIE_DIR/vlir-tests"
 CORE_EXAMPLES_DIR="$BOOGIE_DIR/verus-examples"
@@ -27,20 +35,28 @@ usage() {
 Usage: tests/run_tests.sh [options] [target]
 
 Stages:
-  --verus          Run Verus on tests/VerusFiles to generate JSONFilesLean/JSONFilesBoogie
+  --verus          Run Verus export on .rs input(s) to generate JSON files
   --boogie         Run verus-lean on JSONFilesBoogie to generate Core files
+  --boole          Generate Boole files (.rs -> JSON -> Core -> Boole, as needed)
   --lean           Run verus-lean on JSONFilesLean to generate LeanFiles
   --verify         Run StrataVerify on Core files
   --all            Run Verus + Boogie + Verify
   --solver <name>  StrataVerify solver (default: cvc5)
   --solver-timeout <sec>
                    StrataVerify timeout in seconds
+  --out <path>     Output file path for single-target runs
+                   (applies to one stage: --lean, --boogie, or --boole)
   --verbose        Show full CLI output for external commands
   -h, --help       Show this help
 
 Target:
   Optional and single-case only.
-  Use a file path target: *.rs, *.json, *.core.st
+  Use a file path target: *.rs, *.json, *.core.st, *.boogie.st
+  With --boole:
+    *.rs      runs Verus export + Core translation + Boole wrapping
+    *.json    runs Core translation + Boole wrapping
+    *.core.st runs Boole wrapping only
+    (no target) wraps existing Core files under tests/BoogieFiles/*
 
 EOF
 }
@@ -170,6 +186,45 @@ resolve_core_file_for_case() {
     return 0
   fi
   return 1
+}
+
+lean_ident_from_base() {
+  local raw="$1"
+  local ident
+  ident="$(printf '%s' "$raw" | sed -E 's/[^A-Za-z0-9_]/_/g')"
+  if [[ ! "$ident" =~ ^[A-Za-z_] ]]; then
+    ident="_$ident"
+  fi
+  echo "$ident"
+}
+
+write_boole_wrapper() {
+  local core_file="$1"
+  local out_file="$2"
+  local base ident
+  base="$(basename "$core_file" .core.st)"
+  ident="$(lean_ident_from_base "$base")"
+  mkdir -p "$(dirname "$out_file")"
+  {
+    echo "import Strata.MetaVerifier"
+    echo "import Smt"
+    echo
+    echo "open Strata"
+    echo
+    echo "def ${ident} : Strata.Program :="
+    echo "#strata"
+    echo "program Boole; // Specify that this is a Boole program."
+    sed '1{/^[[:space:]]*program Core;[[:space:]]*$/d;}' "$core_file"
+    echo "#end"
+    echo
+    echo "-- Approach 1: Using an SMT solver to verify the VCs."
+    echo "#eval Strata.Boole.verify \"cvc5\" ${ident}"
+    echo
+    echo "-- Approach 2: Using Lean tactics to verify the VCs."
+    echo "theorem ${ident}_smtVCsCorrect : Strata.smtVCsCorrect ${ident} := by"
+    echo "  gen_smt_vcs"
+    echo "  all_goals smt"
+  } >"$out_file"
 }
 
 run_cmd_quiet() {
@@ -336,7 +391,9 @@ run_verus_lean_jsons() {
     fi
     any_json=true
     echo "$label: $base"
-    if [ "$mode" = "boogie" ]; then
+    if [ "$custom_out_mode" = "$mode" ]; then
+      out_file="$custom_out_path"
+    elif [ "$mode" = "boogie" ]; then
       suite="$(infer_suite_from_json_path "$f")"
       case_key="$(case_key_from_json_path "$f")"
       out_dir_file="$(boogie_core_dir_for_suite "$suite")"
@@ -348,6 +405,7 @@ run_verus_lean_jsons() {
     set +e
     # Avoid stale-tail artifacts if the translator writes shorter output than
     # an existing file and does not truncate in place.
+    mkdir -p "$(dirname "$out_file")"
     rm -f "$out_file"
     run_cmd_quiet "${cmd[@]}" "$f" "$out_file"
     rc=$?
@@ -380,11 +438,14 @@ run_verus_lean_jsons() {
 
 run_verus=false
 run_boogie=false
+run_boole=false
 run_lean=false
 run_verify=false
 target_rs_path=""
 target_json_path=""
 target_core_path=""
+custom_out_path=""
+custom_out_mode=""
 
 if [ $# -eq 0 ]; then
   usage
@@ -396,6 +457,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --verus) run_verus=true; shift ;;
     --boogie) run_boogie=true; shift ;;
+    --boole) run_boole=true; shift ;;
     --lean) run_lean=true; shift ;;
     --verify) run_verify=true; shift ;;
     --solver)
@@ -422,6 +484,24 @@ while [ $# -gt 0 ]; do
       ;;
     --solver-timeout=*)
       STRATA_SOLVER_TIMEOUT="${1#*=}"
+      shift
+      ;;
+    --out)
+      if [ $# -lt 2 ]; then
+        echo "Missing value for --out"
+        usage
+        exit 1
+      fi
+      custom_out_path="$2"
+      shift 2
+      ;;
+    --out=*)
+      custom_out_path="${1#*=}"
+      if [ -z "$custom_out_path" ]; then
+        echo "Missing value for --out"
+        usage
+        exit 1
+      fi
       shift
       ;;
     --verbose) verbose=true; shift ;;
@@ -467,13 +547,46 @@ if [ ${#positional[@]} -eq 1 ]; then
   esac
 fi
 
-if ! $run_verus && ! $run_boogie && ! $run_lean && ! $run_verify; then
+# `--boole` is an end-to-end target. Infer prerequisite stages from the input:
+#   .rs      => Verus export + Core translation + Boole wrapping
+#   .json    => Core translation + Boole wrapping
+#   .core.st => Boole wrapping only
+if $run_boole; then
+  if [ -n "$target_rs_path" ]; then
+    run_verus=true
+    run_boogie=true
+  elif [ -n "$target_json_path" ]; then
+    run_boogie=true
+  fi
+fi
+
+if [ -n "$custom_out_path" ]; then
+  if [ ${#positional[@]} -ne 1 ]; then
+    echo "--out requires a single target path."
+    exit 1
+  fi
+  if [[ "$custom_out_path" != /* ]]; then
+    custom_out_path="$(pwd -P)/$custom_out_path"
+  fi
+  if $run_boole; then
+    custom_out_mode="boole"
+  elif $run_lean && ! $run_boogie; then
+    custom_out_mode="lean"
+  elif $run_boogie && ! $run_lean; then
+    custom_out_mode="boogie"
+  else
+    echo "--out is supported for exactly one output stage: --lean, --boogie, or --boole."
+    exit 1
+  fi
+fi
+
+if ! $run_verus && ! $run_boogie && ! $run_boole && ! $run_lean && ! $run_verify; then
   usage
   exit 1
 fi
 
 mkdir -p "$JSON_LEAN_DIR" "$JSON_BOOGIE_DIR" "$JSON_BOOGIE_EXAMPLES_DIR" "$JSON_BOOGIE_VLIR_DIR" \
-  "$BOOGIE_DIR" "$CORE_EXAMPLES_DIR" "$CORE_VLIR_DIR" "$LEAN_DIR"
+  "$BOOGIE_DIR" "$CORE_EXAMPLES_DIR" "$CORE_VLIR_DIR" "$BOOLE_DIR" "$LEAN_DIR"
 
 if $run_verus; then
   echo "=== Step 1: Verus -> JSON ==="
@@ -495,7 +608,7 @@ if $run_verus; then
   if $run_lean; then
     gen_lean_json=true
   fi
-  if $run_boogie || $run_verify; then
+  if $run_boogie || $run_boole || $run_verify; then
     gen_boogie_json=true
   fi
   if ! $gen_lean_json && ! $gen_boogie_json; then
@@ -572,6 +685,80 @@ if $run_boogie || $run_lean; then
   fi
 fi
 
+if $run_boole; then
+  echo ""
+  echo "=== Step 2b: Core -> Boole ==="
+  core_files=()
+  if [ -n "$target_core_path" ]; then
+    case "$target_core_path" in
+      *.core.st|*.boogie.st)
+        case "$target_core_path" in
+          /*) core_files=("$target_core_path") ;;
+          *) core_files=("$ROOT_DIR/$target_core_path") ;;
+        esac
+        ;;
+      *) echo "Target is not a .core.st/.boogie.st file: $target_core_path"; exit 1 ;;
+    esac
+  elif [ -n "$target_rs_path" ] || [ -n "$target_json_path" ]; then
+    if [ -n "$target_rs_path" ]; then
+      suite="$(infer_suite_from_rs_path "$target_rs_path")"
+      case_key="$(case_key_from_rs_path "$target_rs_path")"
+      file="$(resolve_core_file_for_case "$suite" "$case_key" || true)"
+    else
+      suite="$(infer_suite_from_json_path "$target_json_path")"
+      case_key="$(case_key_from_json_path "$target_json_path")"
+      file="$(resolve_core_file_for_case "$suite" "$case_key" || true)"
+    fi
+    if [ -z "$file" ]; then
+      echo "Missing Core input for target path."
+      exit 1
+    fi
+    case "$file" in
+      /*) core_files=("$file") ;;
+      *) core_files=("$ROOT_DIR/$file") ;;
+    esac
+  else
+    for scan_dir in "$CORE_VLIR_DIR" "$CORE_EXAMPLES_DIR"; do
+      [ -d "$scan_dir" ] || continue
+      while IFS= read -r f; do
+        core_files+=("$f")
+      done < <(find "$scan_dir" -maxdepth 1 -type f -name '*.core.st' | sort)
+    done
+  fi
+
+  any=false
+  for core in "${core_files[@]}"; do
+    [ -f "$core" ] || continue
+    base="$(basename "$core" .core.st)"
+    if [ -z "$target_core_path" ] && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ]; then
+      if shard_root="$(module_shard_root "$base")"; then
+        parent="$(cd "$(dirname "$core")" && pwd -P)"
+        if [ -f "$parent/${shard_root}.core.st" ]; then
+          continue
+        fi
+      fi
+      if [[ "$base" == serialized_* ]]; then
+        continue
+      fi
+    fi
+    any=true
+    if [ "$custom_out_mode" = "boole" ]; then
+      out_file="$custom_out_path"
+    else
+      case "$core" in
+        "$CORE_VLIR_DIR"/*) out_file="$BOOLE_DIR/vlir-tests/${base}.lean" ;;
+        *) out_file="$BOOLE_DIR/verus-examples/${base}.lean" ;;
+      esac
+    fi
+    echo "Boole: $base"
+    write_boole_wrapper "$core" "$out_file"
+  done
+  if ! $any; then
+    echo "No Core files found to wrap."
+    exit 1
+  fi
+fi
+
 if $run_verify; then
   echo ""
   echo "=== Step 3: StrataVerify ==="
@@ -581,13 +768,13 @@ if $run_verify; then
   fi
   if [ -n "$target_core_path" ]; then
     case "$target_core_path" in
-      *.core.st)
+      *.core.st|*.boogie.st)
         case "$target_core_path" in
           /*) verify_path="$target_core_path" ;;
           *) verify_path="$ROOT_DIR/$target_core_path" ;;
         esac
         ;;
-      *) echo "Target is not a .core.st file: $target_core_path"; exit 1 ;;
+      *) echo "Target is not a .core.st/.boogie.st file: $target_core_path"; exit 1 ;;
     esac
     (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$verify_path")
   elif [ -n "$target_rs_path" ] || [ -n "$target_json_path" ]; then
