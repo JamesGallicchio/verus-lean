@@ -191,6 +191,11 @@ partial def Exp.pp (e : Exp) : String :=
 
 end /- mutual -/
 
+def AssertQueryMode.pp : AssertQueryMode → String
+  | .NonLinear => "NonLinear"
+  | .BitVector => "BitVector"
+  | .Other n => n
+
 partial def Stm.pp (stm : Stm) : String :=
   match stm with
   | .Call fn _ args =>
@@ -199,7 +204,7 @@ partial def Stm.pp (stm : Stm) : String :=
   | .Assert e => s!"assert {Exp.pp e}"
   | .AssertBitVector reqs ens =>
     s!"assertBitVector {reqs.map Exp.pp} {ens.map Exp.pp}"
-  | .AssertQuery stm => s!"assertQuery {Stm.pp stm}"
+  | .AssertQuery mode stm => s!"assertQuery[{AssertQueryMode.pp mode}] {Stm.pp stm}"
   | .AssertLean e => s!"assertLean {Exp.pp e}"
   | .Assume e => s!"assume {Exp.pp e}"
   | .Assign lhs ty rhs _ =>

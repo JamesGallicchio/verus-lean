@@ -337,6 +337,13 @@ structure LoopInvariant where
   body : Exp
 deriving Repr, Inhabited, Hashable
 
+/-- Verus `assert ... by (...)` query modes in SST. -/
+inductive AssertQueryMode where
+  | NonLinear
+  | BitVector
+  | Other (name : String)
+deriving Repr, Inhabited, DecidableEq, Hashable
+
 /--
   Flattened Verus statements.
 
@@ -346,7 +353,7 @@ inductive Stm where
   | Call (fn : Ident) (typArgs : List Typ) (args : List Exp)  -- misisng split, dest
   | Assert (exp : Exp)
   | AssertBitVector (requires ensures : List Exp)
-  | AssertQuery (body : Stm) -- missing mode, typ_inv_exps, typ_inv_vars
+  | AssertQuery (mode : AssertQueryMode) (body : Stm) -- missing typ_inv_exps, typ_inv_vars
   | AssertCompute (exp : Exp) -- should never occur (removed by elaborate_function2() in verus)
   | AssertLean (exp : Exp)
   | Assume (exp : Exp)  -- we could treat these as axioms, or just "by verus"?

@@ -186,6 +186,14 @@ def addDecl (d : Decl) : VParser Unit :=
 def getDecl? (i : Ident) : VParser (Option Decl) :=
   do let st ← get; return st.defs.get? i
 
+-- Lookup in both declaration maps: first `defs`, then `thms`.
+-- Used where calls may target proof/theorem declarations as well as normal defs.
+def getDeclAny? (i : Ident) : VParser (Option Decl) := do
+  let st ← get
+  match st.defs.get? i with
+  | some d => return some d
+  | none => return st.thms.get? i
+
 def getDefs : VParser (List Decl) := do
   let st ← get
   return st.defsInRevOrder.foldl (init := []) (fun acc i =>
@@ -233,6 +241,10 @@ def pathedNameFromJson (j : Json) (pathKey : String := "path") : m Ident := do
   let krate ← nameObj.getStrUnderKeyM "krate"
   let krate := String.capitalize krate
   let ident := Lean.Name.str .anonymous krate
+  -- Verus path segments may include capitalization and internal markers
+  -- (notably in vstd) that are not stable as user-facing names. Normalize
+  -- here so parsed identifiers are deterministic across exports.
+  -- TODO: retain both raw and normalized names in VLIR.
   let isVstd := krate = VstdStr -- skip capitalized namespace if vstd
   let pathed ← nameObj.getArrUnderKeyM "segments"
   let name ← pathed.foldlM (init := ident) (fun acc i => do
@@ -278,7 +290,7 @@ partial def Typ.fromJson (j : Json) : m Typ := do
   | .ok "Bool" => return .Bool
   | .ok _ => throw "unsupported primitive type"
   | .error _ =>
-    match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam"] with
+    match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam", "Projection"] with
     | ("Primitive", obj) =>
       let t ← obj.getArrM
       match t[0]? with
@@ -377,6 +389,17 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       return .SpecFn params.toList ret
 
     | ("TypParam", obj) => return .TypParam <| ← obj.getStrM
+    | ("Projection", obj) =>
+      -- Encode `<T as Trait>::Assoc` as a nominal type constructor
+      -- `Trait.Assoc<T...>` in VLIR.
+      -- TODO: introduce a dedicated associated-type node in `Typ` instead of
+      -- reusing `Struct`, so downstream passes can distinguish the forms.
+      let traitPath ← pathedNameFromJson obj "trait_path"
+      let assocName ← obj.getStrUnderKeyM "name"
+      let argsJson ← obj.getObjValM "trait_typ_args"
+      let argsArr ← argsJson.getArrM
+      let args ← argsArr.mapM Typ.fromJson
+      return .Struct (.str traitPath assocName) args.toList
 
     | _ => throw "unsupported primitive type"
 
@@ -390,7 +413,8 @@ def fromJsonSpanned {α : Type} (j : Json) (fj : Json → VParser α) : VParser 
   -- CC (4/15/25) some expressions are commands, and don't have types(?)
   match j.getObjVal? "typ" with
   | .ok typObj => setTyp <| ← Typ.fromJson typObj
-  | _ => setTyp (← getTyp) -- no-op
+  | _ => setTyp (← getTyp) -- no-op: keep current expected type when absent
+  -- TODO: move expected-type threading to explicit parameters to avoid hidden state coupling.
   fj <| ← xJsonFromSpanned j
 
 --------------------------------------------------------------------------------
@@ -401,6 +425,12 @@ def Mode.fromJson (j : Json) : m Mode := do
   | "Proof" => return .Proof
   | "Exec"  => return .Exec
   | str => throw s!"[Mode.fromJson?]: Expected one of \{ Spec, Proof, Exec }, got {str}"
+
+def AssertQueryMode.fromJson (j : Json) : m AssertQueryMode := do
+  match ← j.getStrM with
+  | "NonLinear" => return .NonLinear
+  | "BitVector" => return .BitVector
+  | other => return .Other other
 
 def IntRange.fromJson (j : Json) : m IntRange := do
   match j.getStr? with
@@ -501,7 +531,7 @@ def UnaryOp.fromJson (j : Json) : m UnaryOp := do
   | .ok "BitNot" => throw "BitNot not yet implemented"
   | .ok s => throw s!"[UnaryOp.fromJson?]: Expected one of \{ Not, BitNot, Clip }, got {s}"
   | .error _ =>
-    match ← j["BitNot", "Trigger", "Clip"] with
+    match ← j["BitNot", "Trigger", "Clip", "InferSpecForLoopIter"] with
     | ("BitNot", obj) => -- Try seeing if "BitNot" has a width
       let width ← widthFromJson obj
       return .BitNot width
@@ -510,6 +540,10 @@ def UnaryOp.fromJson (j : Json) : m UnaryOp := do
       let range ← IntRange.fromJson <| ← obj.getObjValM "range"
       let truncate ← obj.getBoolUnderKeyM "truncate"
       return .Clip range truncate
+    | ("InferSpecForLoopIter", _) =>
+      -- Verus hint wrapper used around expressions in some loop contexts.
+      -- It does not change expression semantics for our translation.
+      return .Trigger
     | _ => throw s!"[UnaryOp.fromJson?]: Expected one of \{ BitNot, Trigger }, got {j}"
 
 /--
@@ -524,7 +558,7 @@ def UnaryOp.fromJson (j : Json) : m UnaryOp := do
   -- TODO: Require the parser state to refer to data types?
 -/
 def UnaryOp.oprFromJson (j : Json) : m UnaryOp := do
-  match ← j["Field", "IsVariant", "Box", "Unbox", "HasType"] with
+  match ← j["Field", "IsVariant", "Box", "Unbox", "HasType", "CustomErr"] with
   | ("Field", obj) =>
     try
       let dt ← pathedNameFromJson (pathKey := "Path") <| ← obj.getObjValM "datatype"
@@ -564,6 +598,9 @@ def UnaryOp.oprFromJson (j : Json) : m UnaryOp := do
   | ("HasType", obj) =>
     let typ ← Typ.fromJson obj
     return .HasType typ
+  | ("CustomErr", _) =>
+    -- Error payload wrapper; no semantic effect on the expression itself.
+    return .Trigger
   | _ => throw s!"unsupported unaryop: {j}"
 
 def BinaryOp.fromJson (j : Json) : m BinaryOp :=
@@ -577,7 +614,7 @@ def BinaryOp.fromJson (j : Json) : m BinaryOp :=
   | .ok s => throw s!"[BinaryOp.fromJson?]: Expected one of \{ And, Or, Xor, Implies, Ne }, got {s}"
   | .error _ => do
     -- Try one of the object ops instead
-    match ← j["Eq", "Inequality", "Bitwise", "Arith"] with
+    match ← j["Eq", "Inequality", "Bitwise", "Arith", "HeightCompare"] with
     | ("Eq", obj)         => return .Eq (← Mode.fromJson obj)
     | ("Inequality", obj) => return .Inequality (← InequalityOp.fromJson obj)
     | ("Bitwise", obj) =>
@@ -592,6 +629,9 @@ def BinaryOp.fromJson (j : Json) : m BinaryOp :=
       let op ← ArithOp.fromJson arr[0]
       let mode ← Mode.fromJson arr[1]
       return .Arith op mode
+    | ("HeightCompare", obj) =>
+      let strictlyLt ← obj.getBoolUnderKeyM "strictly_lt"
+      return .Inequality (if strictlyLt then .Lt else .Le)
     | _ => throw s!"unsupported binary op: {j}"
 
 def Quant.fromJson (j : Json) : m Quant := do
@@ -643,6 +683,10 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
     let binders ← VarBinder.typBindersFromJson arr[1]
     return .Quant q binders
   | ("Let", obj) =>
+    -- Most `Let` handling is done in `Exp.fromJson` where we desugar
+    -- multi-binder lets into nested `Bind (Let ...)` nodes.
+    -- This branch is only a compatibility fallback for single-binder lets.
+    -- TODO: centralize all `Let` parsing in one place and remove this fallback.
     /-
       The type of the expression is hidden in the `SpannedTyped<ExpX>`,
       so we need to parse the type carefully/separately.
@@ -656,11 +700,11 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
       let typ ← Typ.fromJson <| ← expObj.getObjValM "typ"
       let exp ← fromJsonSpanned expObj Exp.fromJson
       return (name, typ, exp))
-    -- TODO: Expand `Let` to include any number. For now, assume only 1
     if hb : binders.size ≥ 1 then
       let (name, typ, exp) := binders[0]
       if binders.size > 1 then
-        dbg_trace "TODO: expand Let to include any number of binders, got {binders}"
+        -- Avoid silently dropping binders in this fallback path.
+        throw s!"Bind.fromJson fallback received multi-binder let; expected single binder"
       return .Let name typ exp
     else
       throw s!"Expected at least one binder"
@@ -671,13 +715,17 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
     return .Lambda binders
     -- throw "not yet implemented Bind.Lambda"
 
-  | ("Choose", _) => throw "not yet implemented Bind.Choose"
+  | ("Choose", obj) =>
+    let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 1
+    let binders ← VarBinder.typBindersFromJson arr[0]
+    -- We currently erase choose predicates/triggers and keep binder information.
+    return .Lambda binders
 
   | s => throw s!"unexpected: {s}"
 
 partial def Exp.fromJson (j : Json) : VParser Exp := do
   -- Expect that exactly one of the enumerated options will be true
-  match ← j["Const", "Var", "VarLoc", "Call", "CallLambda", "Ctor", "Unary", "UnaryOpr", "Binary", "BinaryOpr", "If", "Bind", "ArrayLiteral", "MatchBlock"] with
+  match ← j["Const", "Var", "VarLoc", "VarAt", "StaticVar", "Loc", "Call", "CallLambda", "Ctor", "Unary", "UnaryOpr", "Binary", "BinaryOpr", "If", "Bind", "WithTriggers", "ArrayLiteral", "MatchBlock"] with
   | ("Const", obj) =>
     return .Const <| ← Const.fromJson obj
 
@@ -690,6 +738,25 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     let ident ← Var.fromJson obj
     addLocVar ident
     return .Var ident
+
+  | ("VarAt", obj) =>
+    -- `VarAt` carries the variable and a snapshot marker (e.g. `Pre`).
+    -- For now, parse it as the underlying variable.
+    let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 1
+    let ident ← Var.fromJson arr[0]
+    addFreeVarIfNotBound ident
+    return .Var ident
+
+  | ("StaticVar", obj) =>
+    -- Global/static variable reference.
+    let ident := (← pathedNameFromJson obj (pathKey := "path")).toString
+    addFreeVarIfNotBound ident
+    return .Var ident
+
+  | ("Loc", obj) =>
+    -- Newer Verus exports may wrap an expression in `Loc`.
+    -- Semantically this is just a location-tagged expression; we unwrap.
+    fromJsonSpanned obj Exp.fromJson
 
   | ("Call", obj) =>
     -- Should be an object with a function name and arguments
@@ -772,7 +839,16 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     return .Binary op data₁ data₂
 
   | ("BinaryOpr", obj) =>
-    throw "BinaryOpr not yet implemented"
+    -- Complex binary operators (currently observed: `ExtEq`).
+    let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 3
+    let lhs ← fromJsonSpanned arr[1] Exp.fromJson
+    let rhs ← fromJsonSpanned arr[2] Exp.fromJson
+    match ← Lean.Json.getFirstValM arr[0] ["ExtEq"] with
+    | ("ExtEq", _extEqInfo) =>
+      -- Lower extensional equality into equality for now.
+      return .Binary (.Eq .Spec) lhs rhs
+    | _ =>
+      throw s!"unsupported BinaryOpr: {arr[0]}"
 
   | ("If", obj) =>
     -- Should be an array with three expressions
@@ -785,9 +861,45 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
   | ("Bind", obj) =>
     -- Should be an array with a bind and an expression
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
-    let bind ← Bind.fromJson arr[0]
-    let exp ← withBoundVars bind.idents (fromJsonSpanned arr[1] Exp.fromJson)
-    return .Bind bind exp
+    let bindObj ← xJsonFromSpanned arr[0]
+    match ← bindObj["Quant", "Let", "Lambda", "Choose"] with
+    | ("Let", letObj) =>
+      /-
+        Verus uses `BndX::Let(VarBinders<Exp>)`, where one `Let` can have
+        multiple binders. VLIR `Bind.Let` stores a single binder, so we
+        expand:
+
+          let x := e1, y := e2 in body
+
+        into nested binds:
+
+          Bind (Let x e1) (Bind (Let y e2) body)
+      -/
+      -- TODO: if VLIR grows a multi-binder `Let` node, remove this desugaring.
+      let ⟨binderArr, _⟩ ← letObj.getArrWithSizeGeM 1
+      let mut parsed : List (String × Typ × Exp) := []
+      let mut seen : List (String × Typ) := []
+      for v in binderArr.toList do
+        let ⟨nameArr, _⟩ ← v.getArrUnderKeyWithSizeGeM "name" 1
+        let name ← nameArr[0].getStrM
+        let expObj ← v.getObjValM "a"
+        let typ ← Typ.fromJson <| ← expObj.getObjValM "typ"
+        -- Later let-binders may reference earlier ones.
+        let exp ← withBoundVars seen (fromJsonSpanned expObj Exp.fromJson)
+        parsed := parsed ++ [(name, typ, exp)]
+        seen := seen ++ [(name, typ)]
+      let body ← withBoundVars seen (fromJsonSpanned arr[1] Exp.fromJson)
+      return parsed.foldr (fun (name, typ, exp) acc => .Bind (.Let name typ exp) acc) body
+    | _ =>
+      let bind ← Bind.fromJson arr[0]
+      let exp ← withBoundVars bind.idents (fromJsonSpanned arr[1] Exp.fromJson)
+      return .Bind bind exp
+
+  | ("WithTriggers", obj) =>
+    -- Keep the underlying expression and ignore explicit trigger payloads for now.
+    -- TODO: preserve trigger payloads once solver-facing pipeline consumes them.
+    let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
+    fromJsonSpanned arr[1] Exp.fromJson
 
   | ("ArrayLiteral", obj) =>
     -- `obj` should be an array with the exact elements
@@ -824,12 +936,33 @@ end /- mutual -/
 
   TODO: Dropped type information?
 -/
+partial def destNameFromExp : Exp → Option String
+  | .Var i => some i
+  | .Unary (.Proj dt variant field) e =>
+    -- VLIR assignment destinations are strings, so projected l-values are
+    -- flattened into deterministic synthetic names.
+    -- TODO: switch assignment destinations to a structured l-value AST.
+    destNameFromExp e |>.map (fun base =>
+      s!"{base}__proj__{dt.toString}__{variant}__{field}")
+  | .Unary (.Proj' size field) e =>
+    destNameFromExp e |>.map (fun base =>
+      s!"{base}__proj_tuple__{size}_{field}")
+  | .Unary (.Box _) e
+  | .Unary (.Unbox _) e
+  | .Unary (.Clip _ _) e
+  | .Unary .Trigger e
+  | .Unary (.HasType _) e => destNameFromExp e
+  | _ => none
+
 def Dest.fromJson (j : Json) : VParser (String × Typ) := do
   let e ← fromJsonSpanned j Exp.fromJson
   let ty ← getTyp
-  match e with
-  | .Var i => return (i, ty)
-  | _ => throw s!"Expected a variable expression, got {e}"
+  -- Verus may serialize assign-destinations as l-values like `self.field`.
+  -- VLIR assignment currently stores a string lhs, so we encode projected
+  -- destinations as deterministic synthetic names.
+  match destNameFromExp e with
+  | some lhs => return (lhs, ty)
+  | none => throw s!"Expected a variable expression, got {e}"
 
 def LoopInvariant.fromJson (j : Json) : VParser LoopInvariant := do
   let atEntry ← j.getBoolUnderKeyM "at_entry"
@@ -840,6 +973,32 @@ def LoopInvariant.fromJson (j : Json) : VParser LoopInvariant := do
 
 
 partial def Stm.fromJson (j : Json) : VParser Stm := do
+  let declInputArity? : Decl → Option Nat
+    | .specFn f => some f.inputs.length
+    | .proofFn f => some f.inputs.length
+    | .execFn f => some f.inputs.length
+    | .assertion a => some a.decls.length
+    | .func f => some f.decls.length
+    | _ => none
+  let isSyntheticNoParamArg : Exp → Bool
+    | .Const (.Int i) => i == 0
+    | _ => false
+  let coerceIntConstArgByTyp (argJson : Json) (e : Exp) : VParser Exp := do
+    -- Verus can serialize literal call arguments as mathematical ints even when
+    -- the expected parameter type is fixed-width. Re-attach width/sign via
+    -- `Clip` using the argument's `typ` metadata.
+    -- TODO: move literal-normalization to a shared post-parse pass.
+    match e with
+    | .Const (.Int _) =>
+      match Lean.Json.getObjValByPath argJson ["typ"] with
+      | .ok typJson =>
+        let ty ← Typ.fromJson typJson
+        match ty with
+        | .UInt w => pure <| .Unary (.Clip (.U (UInt32.ofNat w)) true) e
+        | .SInt w => pure <| .Unary (.Clip (.I (UInt32.ofNat w)) true) e
+        | _ => pure e
+      | .error _ => pure e
+    | _ => pure e
   match ← j["Call", "Assert", "AssertBitVector", "AssertQuery", "AssertCompute", "AssertLean",
     "Assume", "Assign", "DeadEnd", "Return", "BreakOrContinue", "If", "Loop",
     "OpenInvariant", "ClosureInner", "Block", "Fuel", "RevealString", "Air"] with
@@ -854,15 +1013,33 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
       | .ok v => Typ.fromJson v
       | .error _ => Typ.fromJson tj)
     let argsArr ← obj.getArrUnderKeyM "args"
-    let args ← argsArr.mapM (fromJsonSpanned · Exp.fromJson)
+    let argsParsed ← argsArr.mapM (fun arg => do
+      let e ← fromJsonSpanned arg Exp.fromJson
+      coerceIntConstArgByTyp arg e)
+    let args ←
+      match ← getDeclAny? fnName with
+      | some d =>
+        match declInputArity? d, argsParsed.toList with
+        | some 0, [arg] =>
+          -- Verus may emit a synthetic `0` argument for no-parameter calls.
+          -- If we know the callee has arity 0, drop that placeholder.
+          -- TODO: replace this heuristic with an explicit export-side marker.
+          if isSyntheticNoParamArg arg then
+            pure []
+          else
+            pure argsParsed.toList
+        | _, _ => pure argsParsed.toList
+      | none => pure argsParsed.toList
     match obj.getObjVal? "dest" with
+    | .ok .null =>
+      return .Call fnName typArgs.toList args
     | .ok destObj =>
       let (lhs, lhsTy) ← Dest.fromJson <| ← destObj.getObjValM "dest"
       let lhsIsInit ← destObj.getBoolUnderKeyM "is_init"
-      let rhs := Exp.Call (.Fun fnName) typArgs.toList args.toList
+      let rhs := Exp.Call (.Fun fnName) typArgs.toList args
       return .Assign lhs lhsTy rhs lhsIsInit
     | .error _ =>
-      return .Call fnName typArgs.toList args.toList
+      return .Call fnName typArgs.toList args
 
   | ("Assert", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 3
@@ -878,9 +1055,10 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     return .AssertBitVector requires.toList ensures.toList
 
   | ("AssertQuery", obj) =>
+    let mode ← AssertQueryMode.fromJson <| ← obj.getObjValM "mode"
     let bodyObj ← obj.getObjValM "body"
     let stm ← fromJsonSpanned bodyObj Stm.fromJson
-    return .AssertQuery stm
+    return .AssertQuery mode stm
 
   | ("AssertCompute", obj) =>
     let e ← fromJsonSpanned obj Exp.fromJson
@@ -1043,9 +1221,12 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
   let returnType ← Typ.fromJson <| ← j.getObjValByPathM ["ret", "x", "typ"]
   setTyp returnType
 
-  -- Parse the body as an expression
-  -- For spec functions, this expression is stored in the axioms
-  let bodyObj ← j.getObjValByPath ["axioms", "spec_axioms", "body_exp"]
+  -- Uninterpreted spec functions can have `spec_axioms = null`; skip them for now.
+  let bodyObj ←
+    match Lean.Json.getObjValByPath j ["axioms", "spec_axioms", "body_exp"] with
+    | .ok v => pure v
+    | .error _ => return none
+  -- Parse the body as an expression (stored under spec axioms).
   let bodyExp ← fromJsonSpanned bodyObj Exp.fromJson
 
   try
@@ -1080,6 +1261,13 @@ def localDeclsFromJson (j : Json) : VParser (List (String × Typ)) := do
 def ProofFn.fromJson (j : Json) : VParser ProofFn := do
   let name ← pathedNameFromNameJson j
   let args ← fnParseArgs j
+  match Lean.Json.getObjValByPath j ["exec_proof_check"] with
+  | .ok .null =>
+    return ProofFn.mk name args [] [] none []
+  | .error _ =>
+    return ProofFn.mk name args [] [] none []
+  | .ok _ =>
+    pure ()
 
   let requiresObj ← j.getArrByPathM ["exec_proof_check", "reqs"]
   let requires ← requiresObj.mapM (fromJsonSpanned · Exp.fromJson)
@@ -1106,22 +1294,56 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
 def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
   let name ← pathedNameFromNameJson j
   if isVstdName name then return none else
-  -- Skip exec fns without a body (e.g. external std/alloc helpers).
-  match Lean.Json.getObjValByPath j ["exec_proof_check", "body", "x"] with
-  | .ok (Json.obj _) => pure ()
-  | .ok _ => return none
-  | .error _ => return none
   let args ← fnParseArgs j
   let retBinder ← VarBinder.fromJson <| ← j.getObjValByPathM ["ret", "x"]
   let (retName, returnType) := retBinder
-  let requiresObj ← j.getArrByPathM ["exec_proof_check", "reqs"]
+  let requiresObj ←
+    match j.getArrByPath? ["exec_proof_check", "reqs"] with
+    | .ok arr => pure arr
+    | .error _ => j.getArrByPathM ["decl", "reqs"]
   let requires ← requiresObj.mapM (fromJsonSpanned · Exp.fromJson)
-  let ensuresObj ← j.getArrByPathM ["exec_proof_check", "post_condition", "ens_exps"]
-  let ensures ← ensuresObj.mapM (fromJsonSpanned · Exp.fromJson)
-  let bodyObj ← j.getObjValByPathM ["exec_proof_check", "body", "x"]
-  let bodyStm ← Stm.fromJson bodyObj
-  let locals ← localDeclsFromJson j
-  return some <| ExecFn.mk name args retName returnType requires.toList ensures.toList bodyStm locals
+  let ensures ←
+    match j.getArrByPath? ["exec_proof_check", "post_condition", "ens_exps"] with
+    | .ok ensuresObj =>
+      let ensures ← ensuresObj.mapM (fromJsonSpanned · Exp.fromJson)
+      pure ensures.toList
+    | .error _ =>
+      let mut acc : List Exp := []
+      match j.getArrByPath? ["decl", "enss"] with
+      | .ok ensGroups =>
+        for g in ensGroups do
+          match g.getArr? with
+          | .ok group =>
+            let parsed ← group.mapM (fromJsonSpanned · Exp.fromJson)
+            acc := acc ++ parsed.toList
+          | .error _ => pure ()
+        pure acc
+      | .error _ => pure []
+  let (bodyStm, hasExecProofBody) ←
+    match Lean.Json.getObjValByPath j ["exec_proof_check", "body", "x"] with
+    | .ok bodyObj =>
+      match bodyObj with
+      | .obj _ =>
+        let bodyStm ← Stm.fromJson bodyObj
+        pure (bodyStm, true)
+      | _ => return none
+    | .error _ =>
+      let isExternalBody :=
+        match Lean.Json.getObjValByPath j ["attrs", "is_external_body"] with
+        | .ok b => b.getBool?.toOption.getD false
+        | .error _ => false
+      if isExternalBody then
+        -- External-body exec functions have declared contracts but no executable body.
+        pure (Stm.Block [], false)
+      else
+        -- Skip exec fns without bodies (e.g. unresolved external helpers).
+        return none
+  let locals ←
+    if hasExecProofBody then
+      localDeclsFromJson j
+    else
+      pure []
+  return some <| ExecFn.mk name args retName returnType requires.toList ensures bodyStm locals
 
 
 def typeParamsFromJson (j : Json) : m (List String) := do

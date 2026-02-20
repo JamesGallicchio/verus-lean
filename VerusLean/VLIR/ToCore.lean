@@ -23,8 +23,8 @@ abbrev BoundEnv := List (String × Typ) -- bound variables introduced by binders
 
 /-! ## Utilities -/
 
--- Sanitize an identifier to Strata regular-id rules (DDM parser):
--- first char: [A-Za-z_], rest chars: [A-Za-z0-9_'.?!]
+-- Sanitize an identifier for Core emission:
+-- first char: [A-Za-z_], rest chars: [A-Za-z0-9_'?!]
 -- Characters outside this set are replaced by `_`.
 def sanitizeIdent (s : String) : String :=
   match s.toList with
@@ -32,7 +32,7 @@ def sanitizeIdent (s : String) : String :=
   | c :: cs =>
     let first := if c.isAlpha || c == '_' then c else '_'
     let rest := cs.map (fun c =>
-      if c.isAlphanum || c == '_' || c == '\'' || c == '.' || c == '?' || c == '!' then c else '_')
+      if c.isAlphanum || c == '_' || c == '\'' || c == '?' || c == '!' then c else '_')
     String.ofList (first :: rest)
 
 -- VLIR parser builds `Ident` from full crate + path segments,
@@ -126,6 +126,26 @@ def enumTesterNameOf (dt : Ident) (variant : String) : String :=
 def enumTesterIdentOf (dt : Ident) (variant : String) : CoreIdent :=
   CoreIdent.unres (enumTesterNameOf dt variant)
 
+def projFieldNameOf (dt : Ident) (variant field : String) : String :=
+  if field == "_" then
+    -- Unnamed single-field variant projection: align with tuple-style selector
+    -- naming emitted in `enumToCoreTypeDecl` (`..._{i}`), using slot 0.
+    -- TODO: confirm current Verus JSON still emits `"field": "_"`; drop this
+    -- case if exports consistently use numeric field names instead.
+    s!"{datatypeNameOf dt}_{sanitizeIdent variant}_0"
+  else
+    match field.toNat? with
+    | some i => s!"{datatypeNameOf dt}_{sanitizeIdent variant}_{i}"
+    | none =>
+      let dtName := datatypeNameOf dt
+      let variantName := sanitizeIdent variant
+      -- For enums, variant-qualified field selectors avoid duplicate names across
+      -- constructors (e.g. Mammal.legs vs Arthropod.legs).
+      if variantName.toLower == dtName.toLower then
+        field
+      else
+        s!"{dtName}_{variantName}_{sanitizeIdent field}"
+
 def declSentinelName : String := "__verus_decl__"
 
 def declSentinel : CoreExpr :=
@@ -157,6 +177,9 @@ def boundType? (bound : BoundEnv) (name : String) : Option Typ :=
 def isFuelVar : Exp → Bool
   | .Var name => name.startsWith "fuel%" || name.startsWith "fuel_"
   | _ => false
+
+def normalizeCallArgs (args : List Exp) : List Exp :=
+  args.filter (fun e => !isFuelVar e)
 
 partial def vecVarFromExp : Exp → Option String
   | .Var x => some x
@@ -211,6 +234,54 @@ def bitInfoOfTyp : Typ → Option (Nat × Bool)
   | .SInt w => some (w, true)
   | .Decorated _ ty => bitInfoOfTyp ty
   | _ => none
+
+def isIntLikeTyp : Typ → Bool
+  | .Int | .Nat => true
+  | .Decorated _ ty => isIntLikeTyp ty
+  | _ => false
+
+def bitTypOfInfo (w : Nat) (signed : Bool) : Typ :=
+  if signed then Typ.SInt w else Typ.UInt w
+
+def isNumericConst : Exp → Bool
+  | .Const (.Int _) => true
+  | _ => false
+
+def chooseBitArgTyForCmp
+    (lhs rhs : Exp) (lhsInfo? rhsInfo? : Option (Nat × Bool)) : Option Typ :=
+  match lhsInfo?, rhsInfo? with
+  | some (w1, s1), some (w2, s2) =>
+    if w1 == w2 && s1 == s2 then
+      some (bitTypOfInfo w1 s1)
+    else
+      none
+  | some (w, s), none =>
+    if isNumericConst rhs then some (bitTypOfInfo w s) else none
+  | none, some (w, s) =>
+    if isNumericConst lhs then some (bitTypOfInfo w s) else none
+  | none, none => none
+
+def bvToIntCastName (w : Nat) (signed : Bool) : String :=
+  if signed then s!"bv{w}_to_int_s" else s!"bv{w}_to_int_u"
+
+def isBvToIntCastName (s : String) : Bool :=
+  s.endsWith "_to_int_u" || s.endsWith "_to_int_s"
+
+def bvToIntCastOp (w : Nat) (signed : Bool) : CoreExpr :=
+  LExpr.op () (CoreIdent.unres (bvToIntCastName w signed)) none
+
+def isBvToIntCastExpr : CoreExpr → Bool
+  | .app _ (.op _ id _) _ => isBvToIntCastName (CoreIdent.toPretty id)
+  | _ => false
+
+def castExprToIntIfBitInfo (info? : Option (Nat × Bool)) (e : CoreExpr) : CoreExpr :=
+  match info? with
+  | some (w, signed) =>
+    if isBvToIntCastExpr e then
+      e
+    else
+      LExpr.mkApp () (bvToIntCastOp w signed) [e]
+  | none => e
 
 def vecElemTyp? : Typ → Option Typ
   | .Struct name params =>
@@ -383,11 +454,22 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     (expected? : Option Typ) :
     Exp → Except String CoreExpr
   | .Var x =>
+    let actualTy? := boundType? bound x <|> env.get? x
+    let asInt := expected?.map isIntLikeTyp |>.getD false
     match boundIndex? bound x with
-    | some idx => return LExpr.bvar () idx
+    | some idx =>
+      let e := LExpr.bvar () idx
+      if asInt then
+        return castExprToIntIfBitInfo (actualTy?.bind bitInfoOfTyp) e
+      else
+        return e
     | none =>
-      let ty? := env.get? x |>.map monoTyOfTyp
-      return LExpr.fvar () (varToCore x) ty?
+      let ty? := actualTy?.map monoTyOfTyp
+      let e := LExpr.fvar () (varToCore x) ty?
+      if asInt then
+        return castExprToIntIfBitInfo (actualTy?.bind bitInfoOfTyp) e
+      else
+        return e
   | .Const c => return constToCore expected? c
   | .StructCtor dt fields => do
     let ctor := LExpr.op () (structCtorIdentOf dt) none
@@ -397,27 +479,73 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     let ctor := LExpr.op () (enumCtorIdentOf dt variant) none
     let args ← data.mapM (fun (_, e) => expToCoreWithBound env bound none e)
     return LExpr.mkApp () ctor args
-  | .TupleCtor _ _ => throw "TODO: tuple constructors"
+  | .TupleCtor size data => do
+    let ctor := LExpr.op () (CoreIdent.unres s!"Tuple_ctor_{size}") none
+    let args ← data.mapM (expToCoreWithBound env bound none)
+    return LExpr.mkApp () ctor args
   | .Binary (.Eq _) lhs rhs => do
-    let info? := inferBitInfo env bound lhs <|> inferBitInfo env bound rhs
-    let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
-    let l ← expToCoreWithBound env bound argTy? lhs
-    let r ← expToCoreWithBound env bound argTy? rhs
+    let lhsInfo? := inferBitInfo env bound lhs
+    let rhsInfo? := inferBitInfo env bound rhs
+    let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
+    let mixedIntMode := argTy?.isNone && (lhsInfo?.isSome || rhsInfo?.isSome)
+    let sideTy? := if mixedIntMode then some Typ.Int else argTy?
+    let l0 ← expToCoreWithBound env bound sideTy? lhs
+    let r0 ← expToCoreWithBound env bound sideTy? rhs
+    let l := if mixedIntMode then castExprToIntIfBitInfo lhsInfo? l0 else l0
+    let r := if mixedIntMode then castExprToIntIfBitInfo rhsInfo? r0 else r0
     return LExpr.eq () l r
   | .Binary .Ne lhs rhs => do
-    let info? := inferBitInfo env bound lhs <|> inferBitInfo env bound rhs
-    let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
-    let l ← expToCoreWithBound env bound argTy? lhs
-    let r ← expToCoreWithBound env bound argTy? rhs
+    let lhsInfo? := inferBitInfo env bound lhs
+    let rhsInfo? := inferBitInfo env bound rhs
+    let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
+    let mixedIntMode := argTy?.isNone && (lhsInfo?.isSome || rhsInfo?.isSome)
+    let sideTy? := if mixedIntMode then some Typ.Int else argTy?
+    let l0 ← expToCoreWithBound env bound sideTy? lhs
+    let r0 ← expToCoreWithBound env bound sideTy? rhs
+    let l := if mixedIntMode then castExprToIntIfBitInfo lhsInfo? l0 else l0
+    let r := if mixedIntMode then castExprToIntIfBitInfo rhsInfo? r0 else r0
     let eq := LExpr.eq () l r
     return LExpr.mkApp () Core.boolNotOp [eq]
   | .Binary .Xor lhs rhs => do
-    let info? := inferBitInfo env bound lhs <|> inferBitInfo env bound rhs
-    let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
-    let l ← expToCoreWithBound env bound argTy? lhs
-    let r ← expToCoreWithBound env bound argTy? rhs
+    let lhsInfo? := inferBitInfo env bound lhs
+    let rhsInfo? := inferBitInfo env bound rhs
+    let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
+    let mixedIntMode := argTy?.isNone && (lhsInfo?.isSome || rhsInfo?.isSome)
+    let sideTy? := if mixedIntMode then some Typ.Int else argTy?
+    let l0 ← expToCoreWithBound env bound sideTy? lhs
+    let r0 ← expToCoreWithBound env bound sideTy? rhs
+    let l := if mixedIntMode then castExprToIntIfBitInfo lhsInfo? l0 else l0
+    let r := if mixedIntMode then castExprToIntIfBitInfo rhsInfo? r0 else r0
     let eq := LExpr.mkApp () Core.boolEquivOp [l, r]
     return LExpr.mkApp () Core.boolNotOp [eq]
+  | .Binary (.Inequality cmp) lhs rhs => do
+    let lhsInfo? := inferBitInfo env bound lhs
+    let rhsInfo? := inferBitInfo env bound rhs
+    let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
+    let mixedIntMode := argTy?.isNone && (lhsInfo?.isSome || rhsInfo?.isSome)
+    let sideTy? := if mixedIntMode then some Typ.Int else argTy?
+    let l0 ← expToCoreWithBound env bound sideTy? lhs
+    let r0 ← expToCoreWithBound env bound sideTy? rhs
+    let l := if mixedIntMode then castExprToIntIfBitInfo lhsInfo? l0 else l0
+    let r := if mixedIntMode then castExprToIntIfBitInfo rhsInfo? r0 else r0
+    match argTy? with
+    | some ty =>
+      match bitInfoOfTyp ty with
+      | some (w, signed) =>
+        let opName := match cmp with
+          | .Le => if signed then "SLe" else "ULe"
+          | .Lt => if signed then "SLt" else "ULt"
+          | .Ge => if signed then "SGe" else "UGe"
+          | .Gt => if signed then "SGt" else "UGt"
+        match bvCmpOp w opName with
+        | some bop => return LExpr.mkApp () bop [l, r]
+        | none => throw s!"unsupported bitvector width {w} for op {opName}"
+      | none =>
+        throw s!"internal error: expected bitvector comparison type, got {repr ty}"
+    | none =>
+      match binaryOpToCore (.Inequality cmp) with
+      | some bop => return LExpr.mkApp () bop [l, r]
+      | none => throw s!"unsupported inequality op: {repr cmp}"
   | .Binary op lhs rhs => do
     let info? :=
       inferBitInfo env bound lhs
@@ -481,21 +609,28 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
       | some bop => return LExpr.mkApp () bop [l, r]
       | none => throw s!"unsupported binary op: {repr op}"
   | .Unary op e => do
-    let x ← expToCoreWithBound env bound expected? e
+    let x ←
+      match op with
+      | .Clip (.U w) _ => expToCoreWithBound env bound (some (.UInt w.toNat)) e
+      | .Clip (.I w) _ => expToCoreWithBound env bound (some (.SInt w.toNat)) e
+      | _ => expToCoreWithBound env bound expected? e
     match op with
     | .Clip _ _ => return x
     | .Trigger => return x
     | .Box _ => return x
     | .Unbox _ => return x
     | .HasType _ => return x
-    | .Proj dt _variant field =>
+    | .Proj dt variant field =>
       -- Core field projection uses datatype destructors, e.g. `List..head(x)`.
-      let proj := LExpr.op () (datatypeDestructorIdentOf dt field) none
+      let projField := projFieldNameOf dt variant field
+      let proj := LExpr.op () (datatypeDestructorIdentOf dt projField) none
       return LExpr.mkApp () proj [x]
     | .IsVariant dt variant =>
       let isFn := LExpr.op () (enumTesterIdentOf dt variant) none
       return LExpr.mkApp () isFn [x]
-    | .Proj' _ _ => throw "TODO: tuple projections"
+    | .Proj' size field =>
+      let proj := LExpr.op () (CoreIdent.unres s!"Tuple_{size}_{field}") none
+      return LExpr.mkApp () proj [x]
     | .BitNot none =>
       let w? :=
         (expected?.bind bitInfoOfTyp |>.map Prod.fst)
@@ -518,9 +653,14 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
   | .Call fn _typs args => do
     let fname := match fn with
       | .Fun name => name
-    let argsFiltered := args.filter (fun e => !isFuelVar e)
+    let argsFiltered := normalizeCallArgs args
     let mkFallback := do
-      let args' ← argsFiltered.mapM (expToCoreWithBound env bound none)
+      let argExpected? :=
+        match expected? with
+        | some ty =>
+          if isIntLikeTyp ty then some Typ.Int else none
+        | none => none
+      let args' ← argsFiltered.mapM (expToCoreWithBound env bound argExpected?)
       let f := LExpr.op () (identToCore fname) none
       return LExpr.mkApp () f args'
     if isViewName fname then
@@ -588,11 +728,17 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
       let wrap := fun (_v, ty) acc =>
         LExpr.quant () qk (some (monoTyOfTyp ty)) (LExpr.noTrigger ()) acc
       return vars'.foldr wrap bodyExpr
-    | .Lambda _vars =>
-      throw "TODO: lambda expressions"
+    | .Lambda vars => do
+      let boundVars := vars.reverse ++ bound
+      let bodyExpr ← expToCoreWithBound env boundVars none body
+      let wrap := fun (_v, ty) acc => LExpr.abs () (some (monoTyOfTyp ty)) acc
+      return vars.foldr wrap bodyExpr
   | .MatchBlock _scrut body =>
     expToCoreWithBound env bound expected? body
-  | .ArrayLiteral _ => throw "TODO: array literals"
+  | .ArrayLiteral elems => do
+    let args ← elems.mapM (expToCoreWithBound env bound none)
+    let lit := LExpr.op () (CoreIdent.unres s!"Array_literal_{elems.length}") none
+    return LExpr.mkApp () lit args
 
 abbrev expToCore (env : VarEnv) (expected? : Option Typ) (e : Exp) :
     Except String CoreExpr :=
@@ -666,7 +812,7 @@ partial def substStm (name : String) (rhs : Exp) : Stm → Stm
   | .Assert e => .Assert (substExp name rhs e)
   | .AssertBitVector reqs ens =>
     .AssertBitVector (reqs.map (substExp name rhs)) (ens.map (substExp name rhs))
-  | .AssertQuery body => .AssertQuery (substStm name rhs body)
+  | .AssertQuery mode body => .AssertQuery mode (substStm name rhs body)
   | .AssertCompute e => .AssertCompute (substExp name rhs e)
   | .AssertLean e => .AssertLean (substExp name rhs e)
   | .Assume e => .Assume (substExp name rhs e)
@@ -687,7 +833,7 @@ partial def substStm (name : String) (rhs : Exp) : Stm → Stm
 
 mutual
 partial def inlineTempsInStm : Stm → Stm
-  | .AssertQuery body => .AssertQuery (inlineTempsInStm body)
+  | .AssertQuery mode body => .AssertQuery mode (inlineTempsInStm body)
   | .DeadEnd stm => .DeadEnd (inlineTempsInStm stm)
   | .If cond b1 b2 => .If cond (inlineTempsInStm b1) (b2.map inlineTempsInStm)
   | .Loop isFor label cond body invs =>
@@ -730,26 +876,83 @@ def loopInvariantToCore (env : VarEnv) (invs : List LoopInvariant) :
       | e :: rest => rest.foldl (init := e) (fun acc x => LExpr.mkApp () Core.boolAndOp [acc, x])
     return some invExpr
 
+def andExprs (es : List CoreExpr) : CoreExpr :=
+  match es with
+  | [] => LExpr.boolConst () true
+  | e :: rest => rest.foldl (init := e) (fun acc x => LExpr.mkApp () Core.boolAndOp [acc, x])
+
+def mkQueryObligationExpr (reqs ensures : List CoreExpr) : CoreExpr :=
+  LExpr.mkApp () Core.boolImpliesOp [andExprs reqs, andExprs ensures]
+
+def assertQueryModeLabel : AssertQueryMode → String
+  | .NonLinear => "nonlinear_query"
+  | .BitVector => "bitvector_query"
+  | .Other _ => "assert_query"
+
+def queryBodyStms : Stm → List Stm
+  | .Block [s] => queryBodyStms s
+  | .Block stms => stms
+  | s => [s]
+
+def takeLeadingAssumes : List Stm → List Exp × List Stm
+  | (.Assume e) :: rest =>
+    let (reqs, tail) := takeLeadingAssumes rest
+    (e :: reqs, tail)
+  | stms => ([], stms)
+
+def takeLeadingEnsuresRev : List Stm → List Exp × List Stm
+  | (.Assert e) :: rest =>
+    let (ens, tail) := takeLeadingEnsuresRev rest
+    (e :: ens, tail)
+  | (.AssertLean e) :: rest =>
+    let (ens, tail) := takeLeadingEnsuresRev rest
+    (e :: ens, tail)
+  | stms => ([], stms)
+
+-- Verus lowers `assert ... by (...)` query bodies to a shape with
+-- leading assumptions (query requires) and trailing assertions (query ensures).
+-- We recover that boundary here and encode the query as one implication goal.
+def queryReqEnsFromBody (body : Stm) : Option (List Exp × List Exp) :=
+  let stms := (queryBodyStms body).map stripSingletonBlocks
+  let (reqs, rest) := takeLeadingAssumes stms
+  let (ensRev, _) := takeLeadingEnsuresRev rest.reverse
+  let ens := ensRev.reverse
+  if ens.isEmpty then none else some (reqs, ens)
+
+def mkQueryObligation (env : VarEnv) (label : String) (requires ensures : List Exp) :
+    Except String (List Core.Statement) := do
+  let reqs ← requires.mapM (expToCore env (some .Bool))
+  let enss ← ensures.mapM (expToCore env (some .Bool))
+  return [Core.Statement.assert label (mkQueryObligationExpr reqs enss)]
+
 mutual
-partial def stmToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
+  partial def stmToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
     Stm → Except String (List Core.Statement)
   | .Call fn _typArgs args => do
-    let args' ← args.mapM (expToCore env none)
-    return [Core.Statement.call [] (sanitizeIdent fn.toString) args']
+    let argsFiltered := normalizeCallArgs args
+    let args' ← argsFiltered.mapM (expToCore env none)
+    return [Core.Statement.call [] (CoreIdent.toPretty (identToCore fn)) args']
   | .Assert exp
   | .AssertLean exp => do
     match exp with
-    | .Unary (.HasType _) _ => return []
+    | .Unary (.HasType _) _ =>
+      -- Verus emits HasType wrapper asserts for arithmetic checks in SST.
+      -- We intentionally skip these here unless/until HasType semantics are
+      -- modeled explicitly in Core.
+      return []
     | _ =>
       let e ← expToCore env (some .Bool) exp
       return [Core.Statement.assert "" e]
-  | .AssertBitVector requires ensures => do
-    let reqs ← requires.mapM (expToCore env (some .Bool))
-    let enss ← ensures.mapM (expToCore env (some .Bool))
-    let reqStms := reqs.map (Core.Statement.assert "bv_requires") -- intended to be checked, placeholder
-    let ensStms := enss.map (Core.Statement.assert "bv_ensures")
-    return reqStms ++ ensStms
-  | .AssertQuery body => stmToCore env retVar? body
+  | .AssertBitVector requires ensures =>
+    -- Keep one VC for the bitvector query itself: requires ==> ensures.
+    mkQueryObligation env "bitvector_query" requires ensures
+  | .AssertQuery mode body =>
+    match queryReqEnsFromBody body with
+    | some (reqs, enss) =>
+      mkQueryObligation env (assertQueryModeLabel mode) reqs enss
+    | none =>
+      -- Fallback for unexpected query-body shapes.
+      stmToCore env retVar? body
   | .AssertCompute exp => do
     let e ← expToCore env (some .Bool) exp
     return [Core.Statement.assert "compute" e]
@@ -757,12 +960,39 @@ partial def stmToCore (env : VarEnv) (retVar? : Option (String × Typ)) :
     let e ← expToCore env (some .Bool) exp
     return [Core.Statement.assume "" e]
   | .Assign lhs lhsTy rhs lhsIsInit => do
-    let rhs' ← expToCore env (some lhsTy) rhs
-    let name := varToCore lhs
-    if lhsIsInit then
-      return [Core.Statement.init name (.forAll [] (monoTyOfTyp lhsTy)) rhs']
-    else
-      return [Core.Statement.set name rhs']
+    let isRetVar :=
+      match retVar? with
+      | some (retName, _) => retName == lhs
+      | none => false
+    let needsDecl := lhsIsInit && !isRetVar
+    match rhs with
+    | .Call (.Fun fn) _typArgs args => do
+      if isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
+          || isVecIndexSpecName fn || isVecIndexExecName fn then
+        let rhs' ← expToCore env (some lhsTy) rhs
+        let name := varToCore lhs
+        if needsDecl then
+          return [Core.Statement.init name (.forAll [] (monoTyOfTyp lhsTy)) rhs']
+        else
+          return [Core.Statement.set name rhs']
+      else
+        let name := varToCore lhs
+        let decl :=
+          if needsDecl then
+            [Core.Statement.init name (.forAll [] (monoTyOfTyp lhsTy)) declSentinel]
+          else
+            []
+        let argsFiltered := normalizeCallArgs args
+        let args' ← argsFiltered.mapM (expToCore env none)
+        let callStmt := Core.Statement.call [name] (CoreIdent.toPretty (identToCore fn)) args'
+        return decl ++ [callStmt]
+    | _ => do
+      let rhs' ← expToCore env (some lhsTy) rhs
+      let name := varToCore lhs
+      if needsDecl then
+        return [Core.Statement.init name (.forAll [] (monoTyOfTyp lhsTy)) rhs']
+      else
+        return [Core.Statement.set name rhs']
   | .DeadEnd stm =>
     stmToCore env retVar? stm
   | .Return exp => do
@@ -841,7 +1071,7 @@ partial def collectInitVars : Stm → List String
   -- Variables created by `lhsIsInit` are emitted at the assignment site
   -- don't emit them again in the declaration-only local prelude.
   | .Assign lhs _ _ lhsIsInit => if lhsIsInit then [lhs] else []
-  | .AssertQuery body => collectInitVars body
+  | .AssertQuery _ body => collectInitVars body
   | .DeadEnd stm => collectInitVars stm
   | .If _cond b1 b2 =>
     collectInitVars b1 ++ (b2.map collectInitVars).getD []
@@ -860,6 +1090,30 @@ partial def collectInitVarsList : List Stm → List String
   | [] => []
 end
 
+mutual
+partial def collectSetVars : Stm → List (String × Typ)
+  -- Track non-init assignments. This is used to predeclare synthetic
+  -- l-values (e.g. projected destinations) that are emitted as plain lhs names.
+  | .Assign lhs lhsTy _rhs lhsIsInit => if lhsIsInit then [] else [(lhs, lhsTy)]
+  | .AssertQuery _ body => collectSetVars body
+  | .DeadEnd stm => collectSetVars stm
+  | .If _cond b1 b2 =>
+    collectSetVars b1 ++ (b2.map collectSetVars).getD []
+  | .Loop _isForLoop _label cond body _invs =>
+    let condVars := match cond with
+      | some (s, _) => collectSetVars s
+      | none => []
+    condVars ++ collectSetVars body
+  | .OpenInvariant stm => collectSetVars stm
+  | .ClosureInner body => collectSetVars body
+  | .Block stms => collectSetVarsList stms
+  | _ => []
+
+partial def collectSetVarsList : List Stm → List (String × Typ)
+  | stm :: rest => collectSetVars stm ++ collectSetVarsList rest
+  | [] => []
+end
+
 /-! ## Declaration Translation -/
 
 def signatureOf (decls : List (String × Typ)) :
@@ -869,6 +1123,22 @@ def signatureOf (decls : List (String × Typ)) :
 def signatureOfVec (decls : List (String × Typ)) :
     @Lambda.LMonoTySignature Visibility :=
   signatureOf (expandVecDecls decls)
+
+partial def typTypeVars : Typ → List String
+  | .TypParam n => [sanitizeIdent n]
+  | .Tuple t1 t2 => (typTypeVars t1 ++ typTypeVars t2).eraseDups
+  | .Array t => typTypeVars t
+  | .SpecFn ps ret => ((ps.flatMap typTypeVars) ++ typTypeVars ret).eraseDups
+  | .Decorated _ t => typTypeVars t
+  | .Struct _ ps => (ps.flatMap typTypeVars).eraseDups
+  | .Enum _ ps => (ps.flatMap typTypeVars).eraseDups
+  | _ => []
+
+def typeArgsFromTyps (tys : List Typ) : List String :=
+  (tys.flatMap typTypeVars).eraseDups
+
+def typeArgsFromDecls (decls : List (String × Typ)) : List String :=
+  typeArgsFromTyps (decls.map Prod.snd)
 
 def mkChecks (env : VarEnv) (checkPrefix : String) (exps : List Exp) :
     Except String (ListMap CoreLabel Procedure.Check) := do
@@ -881,6 +1151,7 @@ def mkChecks (env : VarEnv) (checkPrefix : String) (exps : List Exp) :
 
 def specFnToCore (emitBody : Bool) (f : SpecFn) : Except String Core.Function := do
   let env := envFromDecls f.inputs
+  let typeArgs := (typeArgsFromDecls f.inputs ++ typeArgsFromTyps [f.returnType]).eraseDups
   let body ←
     if emitBody then
       expToCore env (some f.returnType) f.body
@@ -888,7 +1159,7 @@ def specFnToCore (emitBody : Bool) (f : SpecFn) : Except String Core.Function :=
       pure (LExpr.boolConst () true : CoreExpr)
   return {
     name := identToCore f.name
-    typeArgs := []
+    typeArgs := typeArgs
     inputs := signatureOf f.inputs
     output := monoTyOfTyp f.returnType
     body := if emitBody then some body else none
@@ -901,10 +1172,18 @@ def proofFnToCore (f : ProofFn) : Except String Core.Procedure := do
     match bodyStm? with
     | some body => collectInitVars body
     | none => []
-  let localsAll := dedupLocals <| f.locals.filter (fun (n, _) =>
-    !(inputNames.any (fun x => x == n))) -- avoid redeclaring inputs as local variables
+  let setVars :=
+    match bodyStm? with
+    | some body => collectSetVars body
+    | none => []
+  let declaredInInputsOrLocals := fun (n : String) =>
+    inputNames.any (fun x => x == n) || f.locals.any (fun (ln, _) => ln == n)
+  let implicitSetLocals := dedupLocals <| setVars.filter (fun (n, _) => !declaredInInputsOrLocals n)
+  let localsAll := dedupLocals <| (f.locals.filter (fun (n, _) =>
+    !(inputNames.any (fun x => x == n))) ++ implicitSetLocals) -- avoid redeclaring inputs as local variables
   let localsDecls := localsAll.filter (fun (n, _) => !initVars.any (fun x => x == n))
   let env := envFromDecls (expandVecDecls (f.inputs ++ localsAll))
+  let typeArgs := typeArgsFromDecls (f.inputs ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" f.ensures
   let body ←
@@ -917,7 +1196,7 @@ def proofFnToCore (f : ProofFn) : Except String Core.Procedure := do
   return {
     header := {
       name := identToCore f.name
-      typeArgs := []
+      typeArgs := typeArgs
       inputs := signatureOfVec f.inputs
       outputs := []
     }
@@ -938,10 +1217,17 @@ def execFnToCore (f : ExecFn) : Except String Core.Procedure := do
   let inputNames := f.inputs.map Prod.fst
   let retNames := if hasRet then [f.retName] else []
   let initVars := collectInitVars f.body
-  let localsAll := dedupLocals <| f.locals.filter (fun (n, _) =>
-    !(inputNames.any (fun x => x == n) || retNames.any (fun x => x == n)))
+  let setVars := collectSetVars f.body
+  let declaredInInputsRetOrLocals := fun (n : String) =>
+    inputNames.any (fun x => x == n) ||
+    retNames.any (fun x => x == n) ||
+    f.locals.any (fun (ln, _) => ln == n)
+  let implicitSetLocals := dedupLocals <| setVars.filter (fun (n, _) => !declaredInInputsRetOrLocals n)
+  let localsAll := dedupLocals <| (f.locals.filter (fun (n, _) =>
+    !(inputNames.any (fun x => x == n) || retNames.any (fun x => x == n))) ++ implicitSetLocals)
   let localsDecls := localsAll.filter (fun (n, _) => !initVars.any (fun x => x == n))
   let env := envFromDecls (expandVecDecls (f.inputs ++ retDecls ++ localsAll))
+  let typeArgs := typeArgsFromDecls (f.inputs ++ retDecls ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" f.ensures
   let retVar? := if hasRet then some (f.retName, f.returnType) else none
@@ -953,7 +1239,7 @@ def execFnToCore (f : ExecFn) : Except String Core.Procedure := do
   return {
     header := {
       name := identToCore f.name
-      typeArgs := []
+      typeArgs := typeArgs
       inputs := signatureOfVec f.inputs
       outputs := signatureOfVec retDecls
     }
@@ -965,8 +1251,9 @@ def execFnToCore (f : ExecFn) : Except String Core.Procedure := do
     body := localDecls ++ body
   }
 
-def assertionToCore (a : Assertion) : Except String Core.Procedure :=
-  -- Placeholder: assertion bodies are not emitted yet.
+def assertionToCore (a : Assertion) : Except String Core.Procedure := do
+  let env := envFromDecls a.decls
+  let bodyExpr ← expToCore env (some .Bool) a.body
   return {
     header := {
       name := identToCore a.name
@@ -979,7 +1266,7 @@ def assertionToCore (a : Assertion) : Except String Core.Procedure :=
       preconditions := []
       postconditions := []
     }
-    body := []
+    body := [Core.Statement.assert "" bodyExpr]
   }
 
 -- TODO
@@ -1002,9 +1289,19 @@ def funcCheckSstToCore (f : FuncCheckSst) : Except String Core.Procedure := do
     body := []
   }
 
-def mkTypeArgs (params : List String) : List String :=
-  -- TODO: sanitize and deduplicate
-  params
+partial def monoTyTypeVars : LMonoTy → List String
+  | .ftvar n => [sanitizeIdent n]
+  | .tcons _ args => (args.flatMap monoTyTypeVars).eraseDups
+  | _ => []
+
+def normalizeTypeParams (params : List String) : List String :=
+  let ps := (params.map sanitizeIdent).filter (fun p => !p.isEmpty && p != "implementMePlease")
+  ps.eraseDups
+
+def chooseTypeArgs (declParams fromFields : List String) : List String :=
+  let ps := normalizeTypeParams declParams
+  let fs := (fromFields.map sanitizeIdent).filter (fun p => !p.isEmpty) |>.eraseDups
+  if ps.isEmpty then fs else ps
 
 def structToCoreTypeDecl (s : Struct) : Core.TypeDecl :=
   let dtName := datatypeNameOf s.name
@@ -1012,13 +1309,14 @@ def structToCoreTypeDecl (s : Struct) : Core.TypeDecl :=
   let ctorFields : List (CoreIdent × LMonoTy) :=
     s.fields.map (fun (field, ty) =>
       (fieldAccessorIdentOf field, monoTyOfTyp ty))
+  let inferredTypeArgs := (ctorFields.map Prod.snd).flatMap monoTyTypeVars |>.eraseDups
   let constr : LConstr Visibility :=
     { name := ctorId
       args := ctorFields
       testerName := s!"{dtName}..is{CoreIdent.toPretty ctorId}" }
   let d : LDatatype Visibility :=
     { name := dtName
-      typeArgs := mkTypeArgs s.typeParams
+      typeArgs := chooseTypeArgs s.typeParams inferredTypeArgs
       constrs := [constr]
       constrs_ne := by simp }
   .data [d]
@@ -1031,7 +1329,7 @@ def enumToCoreTypeDecl (e : Enum) : Except String Core.TypeDecl := do
       | .labeled variant data =>
         let ctorId := enumCtorIdentOf e.name variant
         let args := data.map (fun (fname, ty) =>
-          (fieldAccessorIdentOf fname, monoTyOfTyp ty))
+          (fieldAccessorIdentOf (projFieldNameOf e.name variant fname), monoTyOfTyp ty))
         { name := ctorId
           args := args
           testerName := enumTesterNameOf e.name variant }
@@ -1043,20 +1341,23 @@ def enumToCoreTypeDecl (e : Enum) : Except String Core.TypeDecl := do
         { name := ctorId
           args := args
           testerName := enumTesterNameOf e.name variant })
+  let inferredTypeArgs := (constrs.flatMap (fun c => c.args.map Prod.snd)).flatMap monoTyTypeVars |>.eraseDups
   match constrs with
   | [] => throw s!"enum {e.name} has no variants"
   | c :: cs =>
     let d : LDatatype Visibility :=
       { name := dtName
-        typeArgs := mkTypeArgs e.typeParams
+        typeArgs := chooseTypeArgs e.typeParams inferredTypeArgs
         constrs := c :: cs
         constrs_ne := by simp }
     return .data [d]
 
 partial def declToCore : Decl → Except String (List Core.Decl)
-  | .assertion a => do
-    let p ← assertionToCore a
-    return [Core.Decl.proc p]
+  | .assertion _ =>
+    -- Drop top-level `DeclType: Assert` wrappers for Core emission.
+    -- Their obligations already appear in enclosing function/procedure bodies.
+    -- (These declarations remain useful in the Verus->Lean pipeline.)
+    return []
   | .specFn f => do
     let fn ← specFnToCore true f
     return [Core.Decl.func fn]
@@ -1101,9 +1402,14 @@ TODO: if/when Verus export becomes reachability-minimized for `--export-lean-all
 this pruning pass can be reduced or removed.
 -/
 
--- Name-level predicate for synthetic `impl__*_arrow_*` wrapper helpers.
+-- Name-level predicate for synthetic `impl&%N::arrow_*` wrappers after
+-- sanitization/projection. Seen forms include `impl__N_arrow_*` and
+-- `Impl__N.arrow_*`.
 def isImplArrowWrapperName (s : String) : Bool :=
-  (s.startsWith "impl__") && (s.find? "_arrow_").isSome
+  let hasImplPrefix := s.startsWith "impl__" || s.startsWith "Impl__"
+  let hasArrowMarker :=
+    (s.find? "_arrow_").isSome || (s.find? ".arrow_").isSome || (s.find? "::arrow_").isSome
+  hasImplPrefix && hasArrowMarker
 
 private def joinRefs (xss : List (List String)) : List String :=
   (xss.foldr (· ++ ·) []).eraseDups
@@ -1191,9 +1497,111 @@ def pruneUnreferencedImplArrowWrappers (decls : List Core.Decl) : List Core.Decl
   decls.filter (fun d =>
     if isImplArrowWrapperDecl d then keep.contains (declNameString d) else true)
 
+private def coreDeclTag : Core.Decl → Nat
+  -- Defensive: dedup keys include decl kind to avoid collapsing declarations
+  -- that share a name but are different kinds (`func` vs `proc`, etc.).
+  -- TODO: if Verus/Core guarantee global name uniqueness across kinds, simplify
+  -- dedup to name-only keys.
+  | .func _ _ => 0
+  | .proc _ _ => 1
+  | .type _ _ => 2
+  | .var _ _ _ _ => 3
+  | .ax _ _ => 4
+  | .distinct _ _ _ => 5
+
+private def coreDeclScore : Core.Decl → Nat
+  | .func f _ => if f.body.isSome then 2 else 1
+  | .proc p _ =>
+    let bodyScore := if p.body.isEmpty then 0 else 2
+    let specScore := if p.spec.preconditions.isEmpty && p.spec.postconditions.isEmpty then 0 else 1
+    bodyScore + specScore
+  | _ => 1
+
+private def sameCoreDeclKey (a b : Core.Decl) : Bool :=
+  coreDeclTag a == coreDeclTag b && declNameString a == declNameString b
+
+private def insertCoreDeclDedup (d : Core.Decl) : List Core.Decl → List Core.Decl
+  | [] => [d]
+  | x :: xs =>
+    if sameCoreDeclKey x d then
+      if coreDeclScore d > coreDeclScore x then
+        d :: xs
+      else
+        x :: xs
+    else
+      x :: insertCoreDeclDedup d xs
+
+-- Module shards can repeat imported declarations (often without bodies).
+-- Keep one declaration per (kind, name), preferring the richer variant.
+def dedupCoreDecls (decls : List Core.Decl) : List Core.Decl :=
+  decls.foldl (fun acc d => insertCoreDeclDedup d acc) []
+
+def mkBvToIntCastDecl (w : Nat) (signed : Bool) : Core.Decl :=
+  let f : Core.Function :=
+    { name := CoreIdent.unres (bvToIntCastName w signed)
+      typeArgs := []
+      inputs := [(CoreIdent.unres "x", .bitvec w)]
+      output := .int
+      body := none }
+  Core.Decl.func f
+
+def bvToIntCastDecls : List Core.Decl :=
+  [1, 8, 16, 32, 64].flatMap (fun w =>
+    [mkBvToIntCastDecl w false, mkBvToIntCastDecl w true])
+
+private def exprBvToIntCastRefs (e : CoreExpr) : List String :=
+  ((Lambda.LExpr.getOps e).map CoreIdent.toPretty |>.filter isBvToIntCastName).eraseDups
+
+private def collectBvToIntCastRefsFromChecks
+    (checks : ListMap CoreLabel Core.Procedure.Check) : List String :=
+  joinRefs <| checks.values.map (fun c => exprBvToIntCastRefs c.expr)
+
+mutual
+private partial def stmtBvToIntCastRefs : Core.Statement → List String
+  | .cmd (.cmd (.init _ _ e _)) => exprBvToIntCastRefs e
+  | .cmd (.cmd (.set _ e _)) => exprBvToIntCastRefs e
+  | .cmd (.cmd (.havoc _ _)) => []
+  | .cmd (.cmd (.assert _ e _)) => exprBvToIntCastRefs e
+  | .cmd (.cmd (.assume _ e _)) => exprBvToIntCastRefs e
+  | .cmd (.cmd (.cover _ e _)) => exprBvToIntCastRefs e
+  | .cmd (.call _ _ args _) => joinRefs <| args.map exprBvToIntCastRefs
+  | .block _ ss _ => stmtsBvToIntCastRefs ss
+  | .ite cond t e _ =>
+    joinRefs [exprBvToIntCastRefs cond, stmtsBvToIntCastRefs t, stmtsBvToIntCastRefs e]
+  | .loop guard measure invariant body _ =>
+    let measureRefs := match measure with | some m => exprBvToIntCastRefs m | none => []
+    let invariantRefs := match invariant with | some i => exprBvToIntCastRefs i | none => []
+    joinRefs [exprBvToIntCastRefs guard, measureRefs, invariantRefs, stmtsBvToIntCastRefs body]
+  | .goto _ _ => []
+  | .funcDecl _ _ => []
+
+private partial def stmtsBvToIntCastRefs (ss : List Core.Statement) : List String :=
+  joinRefs <| ss.map stmtBvToIntCastRefs
+end
+
+private def declBvToIntCastRefs : Core.Decl → List String
+  | .func f _ => (f.body.map exprBvToIntCastRefs).getD []
+  | .proc p _ =>
+    joinRefs [collectBvToIntCastRefsFromChecks p.spec.preconditions,
+      collectBvToIntCastRefsFromChecks p.spec.postconditions,
+      stmtsBvToIntCastRefs p.body]
+  | .var _ _ e _ => exprBvToIntCastRefs e
+  | .ax a _ => exprBvToIntCastRefs a.e
+  | .distinct _ es _ => joinRefs <| es.map exprBvToIntCastRefs
+  | .type _ _ => []
+
+-- Keep cast stubs only when the translated program actually references them.
+-- This avoids cluttering Core files that never mix bitvectors and integers.
+private def neededBvToIntCastDecls (decls : List Core.Decl) : List Core.Decl :=
+  let needed := joinRefs <| decls.map declBvToIntCastRefs
+  bvToIntCastDecls.filter (fun d => needed.contains (declNameString d))
+
 def declsToProgram (decls : List Decl) : Except String Core.Program := do
   let parts ← decls.mapM declToCore
-  let flat := pruneUnreferencedImplArrowWrappers parts.flatten
+  let translated := pruneUnreferencedImplArrowWrappers parts.flatten
+  let castDecls := neededBvToIntCastDecls translated
+  let flat :=
+    dedupCoreDecls <| castDecls ++ translated
   let typeDecls := flat.filter (fun d => match d with | .type _ _ => true | _ => false)
   let otherDecls := flat.filter (fun d => match d with | .type _ _ => false | _ => true)
   return { decls := typeDecls ++ otherDecls }
@@ -1430,7 +1838,11 @@ def typeParamsToString (num : Nat) : String :=
     s!" ({String.intercalate ", " binds})"
 
 def datatypeTypeArgsToString (args : List String) : String :=
-  "(" ++ String.intercalate ", " args ++ ")"
+  if args.isEmpty then
+    "()"
+  else
+    let binds := args.map (fun n => s!"{sanitizeIdent n}: Type")
+    "(" ++ String.intercalate ", " binds ++ ")"
 
 def datatypeConstrToString (c : LConstr Visibility) : String :=
   let fields :=

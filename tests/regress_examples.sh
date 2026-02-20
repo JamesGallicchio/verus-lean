@@ -14,15 +14,6 @@ JSON_BOOGIE_DIR="${JSON_BOOGIE_DIR:-$ROOT_DIR/tests/JSONFilesBoogie}"
 CORE_DIR="${CORE_DIR:-$ROOT_DIR/tests/BoogieFiles}"
 REGRESSION_LOGS_DIR="${REGRESSION_LOGS_DIR:-$ROOT_DIR/tests/RegressionLogs}"
 
-STARTER_EXAMPLES=(
-  "test.rs"
-  "assertions.rs"
-  "basic_failure.rs"
-  "datatypes.rs"
-  "adts_eq.rs"
-  "structural.rs"
-)
-
 verbose=false
 run_all_suites=false
 declare -a selected_suites=()
@@ -32,7 +23,7 @@ STRATA_SOLVER_TIMEOUT=""
 
 usage() {
   cat <<'EOF'
-Usage: tests/regress_examples.sh [options] [example ...]
+Usage: tests/regress_examples.sh [options] [target.rs ...]
 
 Runs regression across 3 stages for each Verus example:
   1) Verus export (--export-lean-all)
@@ -46,29 +37,16 @@ Options:
   --solver <name>   StrataVerify solver (default: cvc5)
   --solver-timeout <sec>
                     StrataVerify timeout in seconds
-  --list            Print starter examples and available suites, then exit
   -h, --help        Show this help
 
 Examples:
-  tests/regress_examples.sh
-  tests/regress_examples.sh datatypes
   tests/regress_examples.sh /abs/path/to/verus/examples/assertions.rs
+  tests/regress_examples.sh tests/VerusFiles/FindMax.rs
   tests/regress_examples.sh --suite verus-examples
   tests/regress_examples.sh --suite vlir-tests
   tests/regress_examples.sh --all-suites
 
 EOF
-}
-
-show_starter_list() {
-  echo "Starter examples:"
-  for ex in "${STARTER_EXAMPLES[@]}"; do
-    echo "  $VERUS_EXAMPLES_DIR/$ex"
-  done
-  echo ""
-  echo "Suites:"
-  echo "  vlir-tests          -> $VLIR_TESTS_DIR/*.rs"
-  echo "  verus-examples      -> $VERUS_EXAMPLES_DIR/*.rs + $VERUS_EXAMPLES_DIR/guide/**/*.rs"
 }
 
 is_known_suite() {
@@ -132,48 +110,31 @@ add_case() {
 
 resolve_example_arg() {
   local arg="$1"
-  if [ -f "$arg" ]; then
-    local abs_dir
-    local abs_path
-    abs_dir="$(cd "$(dirname "$arg")" && pwd -P)"
-    abs_path="$abs_dir/$(basename "$arg")"
-    echo "$(infer_suite_from_path "$abs_path")|$abs_path"
-    return
+  if [ ! -f "$arg" ]; then
+    echo "ERROR: example path not found: $arg" >&2
+    exit 1
   fi
 
-  local base
+  case "$arg" in
+    *.rs) ;;
+    *)
+      echo "ERROR: expected a .rs file path, got: $arg" >&2
+      exit 1
+      ;;
+  esac
+
+  local abs_dir
+  local abs_path
+  abs_dir="$(cd "$(dirname "$arg")" && pwd -P)"
+  abs_path="$abs_dir/$(basename "$arg")"
+
   local suite
-  local dir
-  local candidate
-  local search_suites=()
-  local matches=()
-  base=$(basename "$arg")
-  base=${base%.rs}
-
-  if [ ${#selected_suites[@]} -gt 0 ]; then
-    search_suites=("${selected_suites[@]}")
-  else
-    search_suites=("vlir-tests" "verus-examples")
-  fi
-
-  for suite in "${search_suites[@]}"; do
-    dir="$(suite_dir_of "$suite")"
-    candidate="$dir/$base.rs"
-    if [ -f "$candidate" ]; then
-      matches+=("$suite|$candidate")
-    fi
-  done
-
-  if [ ${#matches[@]} -eq 0 ]; then
-    echo "ERROR: example not found: $arg" >&2
+  suite="$(infer_suite_from_path "$abs_path")"
+  if [ "$suite" = "external" ]; then
+    echo "ERROR: file must be under tests/VerusFiles or verus/examples: $abs_path" >&2
     exit 1
   fi
-  if [ ${#matches[@]} -gt 1 ]; then
-    echo "ERROR: ambiguous example name '$arg'; use a full path." >&2
-    printf '%s\n' "${matches[@]}" >&2
-    exit 1
-  fi
-  echo "${matches[0]}"
+  echo "$suite|$abs_path"
 }
 
 add_suite_files() {
@@ -238,6 +199,20 @@ run_logged() {
   return "$rc"
 }
 
+is_strata_parse_failure_log() {
+  local logfile="$1"
+  rg -q \
+    "expected token|unexpected token|unexpected end of input|parse error|parser error|invalid syntax" \
+    "$logfile"
+}
+
+is_strata_type_failure_log() {
+  local logfile="$1"
+  rg -q \
+    "Type checking error|Expression has type|Encountered .* expected|Undeclared type or category|Unknown variable|Unknown expr identifier|Unknown identifier|Arity mismatch|Expected category|modifies variables it is not allowed to|Unexpected argument|Unexpected arguments" \
+    "$logfile"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --verbose) verbose=true; shift ;;
@@ -281,7 +256,6 @@ while [ $# -gt 0 ]; do
       STRATA_SOLVER_TIMEOUT="${1#*=}"
       shift
       ;;
-    --list) show_starter_list; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; while [ $# -gt 0 ]; do requested_examples+=("$1"); shift; done ;;
     --*) echo "Unknown option: $1"; usage; exit 1 ;;
@@ -353,9 +327,10 @@ elif [ ${#selected_suites[@]} -gt 0 ]; then
     add_suite_files "$suite"
   done
 else
-  for starter in "${STARTER_EXAMPLES[@]}"; do
-    add_case "verus-examples" "$VERUS_EXAMPLES_DIR/$starter"
-  done
+  echo "No cases selected."
+  echo "Provide .rs paths, or use --suite/--all-suites."
+  usage
+  exit 1
 fi
 
 if [ ${#cases[@]} -eq 0 ]; then
@@ -371,6 +346,7 @@ declare -a export_failures=()
 declare -a expected_empty_exports=()
 declare -a translation_failures=()
 declare -a strata_parse_failures=()
+declare -a strata_type_failures=()
 declare -a verify_failures=()
 declare -a ok_cases=()
 declare -a mismatch_verus_pass_strata_fail=()
@@ -408,8 +384,8 @@ for case_entry in "${cases[@]}"; do
   suite_json_dir="$JSON_BOOGIE_DIR/$suite/$case_key"
   suite_core_dir="$CORE_DIR/$suite"
   mkdir -p "$suite_json_dir" "$suite_core_dir"
-  json="$suite_json_dir/serialized_${base}.json"
-  core="$suite_core_dir/serialized_${case_key}.core.st"
+  json="$suite_json_dir/${base}.json"
+  core="$suite_core_dir/${case_key}.core.st"
   log_safe="${suite//-/_}__${case_key}"
 
   log_export="$run_log_dir/${log_safe}.verus.log"
@@ -420,48 +396,49 @@ for case_entry in "${cases[@]}"; do
   # 1) stale JSON from a previous run (treat as export-missing), and
   # 2) JSON produced during this run, even when Verus exits non-zero.
   json_base_norm="${base//-/_}"
-  json_alt1=""
+  gen_json="$suite_json_dir/${base}.json"
+  gen_json_alt1=""
   if [ "$json_base_norm" != "$base" ]; then
-    json_alt1="$suite_json_dir/serialized_${json_base_norm}.json"
+    gen_json_alt1="$suite_json_dir/${json_base_norm}.json"
   fi
-  json_alt2=""
+  gen_json_alt2=""
   if [ "$base" = "recursion" ]; then
-    json_alt2="$suite_json_dir/serialized_recursion_M.json"
+    gen_json_alt2="$suite_json_dir/recursion_M.json"
   fi
-  json_alt3="$suite_json_dir/serialized_${json_base_norm}_lib.json"
+  gen_json_alt3="$suite_json_dir/${json_base_norm}_lib.json"
 
-  old_json="$suite_json_dir/.serialized_${base}.json.prev.$$"
-  had_old_json=false
-  if [ -f "$json" ]; then
-    had_old_json=true
-    mv -f "$json" "$old_json"
+  old_gen_json="$suite_json_dir/.${base}.json.prev.$$"
+  had_old_gen_json=false
+  if [ -f "$gen_json" ]; then
+    had_old_gen_json=true
+    mv -f "$gen_json" "$old_gen_json"
   fi
 
-  old_json_alt1=""
-  had_old_json_alt1=false
-  if [ -n "$json_alt1" ]; then
-    old_json_alt1="$suite_json_dir/.serialized_${base//-/_}.json.prev.$$"
-    if [ -f "$json_alt1" ]; then
-      had_old_json_alt1=true
-      mv -f "$json_alt1" "$old_json_alt1"
+  old_gen_json_alt1=""
+  had_old_gen_json_alt1=false
+  if [ -n "$gen_json_alt1" ]; then
+    old_gen_json_alt1="$suite_json_dir/.${base//-/_}.json.prev.$$"
+    if [ -f "$gen_json_alt1" ]; then
+      had_old_gen_json_alt1=true
+      mv -f "$gen_json_alt1" "$old_gen_json_alt1"
     fi
   fi
 
-  old_json_alt2=""
-  had_old_json_alt2=false
-  if [ -n "$json_alt2" ]; then
-    old_json_alt2="$suite_json_dir/.serialized_recursion_M.json.prev.$$"
-    if [ -f "$json_alt2" ]; then
-      had_old_json_alt2=true
-      mv -f "$json_alt2" "$old_json_alt2"
+  old_gen_json_alt2=""
+  had_old_gen_json_alt2=false
+  if [ -n "$gen_json_alt2" ]; then
+    old_gen_json_alt2="$suite_json_dir/.recursion_M.json.prev.$$"
+    if [ -f "$gen_json_alt2" ]; then
+      had_old_gen_json_alt2=true
+      mv -f "$gen_json_alt2" "$old_gen_json_alt2"
     fi
   fi
 
-  old_json_alt3="$suite_json_dir/.serialized_${json_base_norm}_lib.json.prev.$$"
-  had_old_json_alt3=false
-  if [ -f "$json_alt3" ]; then
-    had_old_json_alt3=true
-    mv -f "$json_alt3" "$old_json_alt3"
+  old_gen_json_alt3="$suite_json_dir/.${json_base_norm}_lib.json.prev.$$"
+  had_old_gen_json_alt3=false
+  if [ -f "$gen_json_alt3" ]; then
+    had_old_gen_json_alt3=true
+    mv -f "$gen_json_alt3" "$old_gen_json_alt3"
   fi
 
   set +e
@@ -474,37 +451,46 @@ for case_entry in "${cases[@]}"; do
   set -e
 
   json_fresh="no"
-  if [ -f "$json" ]; then
+  if [ -f "$gen_json" ]; then
+    if [ "$gen_json" != "$json" ]; then
+      mv -f "$gen_json" "$json"
+    fi
     json_fresh="yes"
-  elif [ -n "$json_alt1" ] && [ -f "$json_alt1" ]; then
-    mv -f "$json_alt1" "$json"
+  elif [ -n "$gen_json_alt1" ] && [ -f "$gen_json_alt1" ]; then
+    if [ "$gen_json_alt1" != "$json" ]; then
+      mv -f "$gen_json_alt1" "$json"
+    fi
     json_fresh="yes"
-  elif [ -n "$json_alt2" ] && [ -f "$json_alt2" ]; then
-    mv -f "$json_alt2" "$json"
+  elif [ -n "$gen_json_alt2" ] && [ -f "$gen_json_alt2" ]; then
+    if [ "$gen_json_alt2" != "$json" ]; then
+      mv -f "$gen_json_alt2" "$json"
+    fi
     json_fresh="yes"
-  elif [ -f "$json_alt3" ]; then
-    mv -f "$json_alt3" "$json"
+  elif [ -f "$gen_json_alt3" ]; then
+    if [ "$gen_json_alt3" != "$json" ]; then
+      mv -f "$gen_json_alt3" "$json"
+    fi
     json_fresh="yes"
   fi
 
   if [ "$json_fresh" = "yes" ]; then
-    [ -f "$old_json" ] && rm -f "$old_json"
-    [ -n "$old_json_alt1" ] && [ -f "$old_json_alt1" ] && rm -f "$old_json_alt1"
-    [ -n "$old_json_alt2" ] && [ -f "$old_json_alt2" ] && rm -f "$old_json_alt2"
-    [ -f "$old_json_alt3" ] && rm -f "$old_json_alt3"
+    [ -f "$old_gen_json" ] && rm -f "$old_gen_json"
+    [ -n "$old_gen_json_alt1" ] && [ -f "$old_gen_json_alt1" ] && rm -f "$old_gen_json_alt1"
+    [ -n "$old_gen_json_alt2" ] && [ -f "$old_gen_json_alt2" ] && rm -f "$old_gen_json_alt2"
+    [ -f "$old_gen_json_alt3" ] && rm -f "$old_gen_json_alt3"
   else
-    if $had_old_json; then
+    if $had_old_gen_json; then
       # Restore prior artifact so local state is preserved for manual inspection.
-      mv -f "$old_json" "$json"
+      mv -f "$old_gen_json" "$gen_json"
     fi
-    if $had_old_json_alt1 && [ -n "$old_json_alt1" ]; then
-      mv -f "$old_json_alt1" "$json_alt1"
+    if $had_old_gen_json_alt1 && [ -n "$old_gen_json_alt1" ]; then
+      mv -f "$old_gen_json_alt1" "$gen_json_alt1"
     fi
-    if $had_old_json_alt2 && [ -n "$old_json_alt2" ]; then
-      mv -f "$old_json_alt2" "$json_alt2"
+    if $had_old_gen_json_alt2 && [ -n "$old_gen_json_alt2" ]; then
+      mv -f "$old_gen_json_alt2" "$gen_json_alt2"
     fi
-    if $had_old_json_alt3; then
-      mv -f "$old_json_alt3" "$json_alt3"
+    if $had_old_gen_json_alt3; then
+      mv -f "$old_gen_json_alt3" "$gen_json_alt3"
     fi
   fi
 
@@ -525,7 +511,7 @@ for case_entry in "${cases[@]}"; do
       classification="export-missing"
     fi
   else
-    tmp_core="$suite_core_dir/.serialized_${base}.core.st.tmp.$$"
+    tmp_core="$suite_core_dir/.${base}.core.st.tmp.$$"
     set +e
     run_logged "$log_translate" "$VERUS_LEAN" boogie "$json" "$tmp_core"
     core_rc=$?
@@ -546,6 +532,12 @@ for case_entry in "${cases[@]}"; do
         if grep -q "Successfully parsed\\." "$log_verify"; then
           verify_failures+=("$case_name")
           classification="verify-failed"
+        elif is_strata_parse_failure_log "$log_verify"; then
+          strata_parse_failures+=("$case_name")
+          classification="strata-parse-failed"
+        elif is_strata_type_failure_log "$log_verify"; then
+          strata_type_failures+=("$case_name")
+          classification="strata-type-failed"
         else
           strata_parse_failures+=("$case_name")
           classification="strata-parse-failed"
@@ -584,6 +576,7 @@ echo "  export failures: ${#export_failures[@]}"
 echo "  expected empty exports: ${#expected_empty_exports[@]}"
 echo "  translate failures: ${#translation_failures[@]}"
 echo "  strata parse failures: ${#strata_parse_failures[@]}"
+echo "  strata type failures: ${#strata_type_failures[@]}"
 echo "  verify failures: ${#verify_failures[@]}"
 echo "  mismatch (Verus pass, Strata fail): ${#mismatch_verus_pass_strata_fail[@]}"
 echo "  mismatch (Verus fail, Strata pass): ${#mismatch_verus_fail_strata_pass[@]}"
@@ -602,6 +595,10 @@ if [ ${#expected_empty_exports[@]} -gt 0 ]; then
 fi
 if [ ${#strata_parse_failures[@]} -gt 0 ]; then
   echo "  strata parse failures list: ${strata_parse_failures[*]}"
+  echo ""
+fi
+if [ ${#strata_type_failures[@]} -gt 0 ]; then
+  echo "  strata type failures list: ${strata_type_failures[*]}"
   echo ""
 fi
 if [ ${#verify_failures[@]} -gt 0 ]; then

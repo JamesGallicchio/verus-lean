@@ -86,14 +86,42 @@ unsafe def genFromFile (path : String) (printFn : String → IO Unit) : IO Unit 
     | .error e => IO.println s!"Error: {e}"
   | .error e => IO.println e
 
+private def collectJsonBundleFiles (target : System.FilePath) : IO (List System.FilePath) := do
+  match target.fileStem, target.extension with
+  | some stem, some "json" => do
+    let dir := target.parent.getD (System.FilePath.mk ".")
+    let shardPrefix := s!"{stem}_"
+    let entries ← dir.readDir
+    let shards :=
+      entries.foldl (init := ([] : List System.FilePath)) (fun acc entry =>
+        if entry.fileName.startsWith shardPrefix && entry.fileName.endsWith ".json" then
+          entry.path :: acc
+        else
+          acc)
+    let sortedShards := (shards.toArray.qsort (fun a b => a.toString < b.toString)).toList
+    -- Translate the requested JSON plus same-stem module shards (`base_*.json`).
+    pure (target :: sortedShards)
+  | _, _ => pure [target]
+
 unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit) : IO Unit := do
-  match ← Decls.fromFile? path with
-  | .ok (_ns, defs, thms) =>
-    let allDecls := defs ++ thms
-    match ToCore.declsToCoreString allDecls with
-    | .ok str => printFn str
-    | .error e => IO.println s!"Error: {e}"
-  | .error e => IO.println e
+  let target := System.FilePath.mk path
+  let bundleFiles ← collectJsonBundleFiles target
+  let mut allDecls : List Decl := []
+  for f in bundleFiles do
+    match ← Decls.fromFile? f.toString with
+    | .ok (_ns, defs, thms) =>
+      allDecls := allDecls ++ defs ++ thms
+    | .error e =>
+      if f == target then
+        -- Primary file failure is fatal.
+        IO.println e
+        return ()
+      else
+        -- Keep translating other shards so one unsupported module does not block output.
+        IO.eprintln s!"warning: skipping shard {f}: {e}"
+  match ToCore.declsToCoreString allDecls with
+  | .ok str => printFn str
+  | .error e => IO.println s!"Error: {e}"
 
 unsafe def main : List String → IO Unit
   | [path] => genFromFile path IO.println
