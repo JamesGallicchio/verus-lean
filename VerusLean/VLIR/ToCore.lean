@@ -1477,7 +1477,7 @@ def collectImplArrowRefsFromChecks (checks : ListMap CoreLabel Core.Procedure.Ch
 -- Collect wrapper references from imperative statements.
 mutual
 partial def stmtImplArrowRefs : Core.Statement → List String
-  | .cmd (.cmd (.init _ _ e _)) => exprImplArrowRefs e
+  | .cmd (.cmd (.init _ _ e _)) => (e.map exprImplArrowRefs).getD []
   | .cmd (.cmd (.set _ e _)) => exprImplArrowRefs e
   | .cmd (.cmd (.havoc _ _)) => []
   | .cmd (.cmd (.assert _ e _)) => exprImplArrowRefs e
@@ -1505,7 +1505,7 @@ def declImplArrowRefs : Core.Decl → List String
     joinRefs [collectImplArrowRefsFromChecks p.spec.preconditions,
       collectImplArrowRefsFromChecks p.spec.postconditions,
       stmtsImplArrowRefs p.body]
-  | .var _ _ e _ => exprImplArrowRefs e
+  | .var _ _ e _ => (e.map exprImplArrowRefs).getD []
   | .ax a _ => exprImplArrowRefs a.e
   | .distinct _ es _ => joinRefs <| es.map exprImplArrowRefs
   | .type _ _ => []
@@ -1611,7 +1611,7 @@ private def collectBvToIntCastRefsFromChecks
 
 mutual
 private partial def stmtBvToIntCastRefs : Core.Statement → List String
-  | .cmd (.cmd (.init _ _ e _)) => exprBvToIntCastRefs e
+  | .cmd (.cmd (.init _ _ e _)) => (e.map exprBvToIntCastRefs).getD []
   | .cmd (.cmd (.set _ e _)) => exprBvToIntCastRefs e
   | .cmd (.cmd (.havoc _ _)) => []
   | .cmd (.cmd (.assert _ e _)) => exprBvToIntCastRefs e
@@ -1638,7 +1638,7 @@ private def declBvToIntCastRefs : Core.Decl → List String
     joinRefs [collectBvToIntCastRefsFromChecks p.spec.preconditions,
       collectBvToIntCastRefsFromChecks p.spec.postconditions,
       stmtsBvToIntCastRefs p.body]
-  | .var _ _ e _ => exprBvToIntCastRefs e
+  | .var _ _ e _ => (e.map exprBvToIntCastRefs).getD []
   | .ax a _ => exprBvToIntCastRefs a.e
   | .distinct _ es _ => joinRefs <| es.map exprBvToIntCastRefs
   | .type _ _ => []
@@ -1827,10 +1827,14 @@ partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
   match s with
   | .cmd (.cmd (.init name ty e _)) =>
     let n := CoreIdent.toPretty name
-    if isDeclSentinel e then
+    match e with
+    | none =>
       [s!"{pad}var {n} : {tyToString ty};"]
-    else
-      [s!"{pad}var {n} : {tyToString ty} := {exprToString e};"]
+    | some rhs =>
+      if isDeclSentinel rhs then
+        [s!"{pad}var {n} : {tyToString ty};"]
+      else
+        [s!"{pad}var {n} : {tyToString ty} := {exprToString rhs};"]
   | .cmd (.cmd (.set name e _)) =>
     [s!"{pad}{CoreIdent.toPretty name} := {exprToString e};"]
   | .cmd (.cmd (.havoc name _)) =>
@@ -1949,7 +1953,10 @@ def declToString (d : Core.Decl) : String :=
     | .syn s => s!"type {s.name} := {tyToString (.forAll [] s.type)};"
     | .data ds => String.intercalate "\n" (ds.map datatypeDeclToString)
   | .ax a _ => s!"axiom {CoreIdent.toPretty a.name}: {exprToString a.e};"
-  | .var name ty e _ => s!"var {CoreIdent.toPretty name} : {tyToString ty} := {exprToString e};"
+  | .var name ty e _ =>
+    match e with
+    | some rhs => s!"var {CoreIdent.toPretty name} : {tyToString ty} := {exprToString rhs};"
+    | none => s!"var {CoreIdent.toPretty name} : {tyToString ty};"
   | .distinct lbl es _ =>
     let esStr := String.intercalate ", " (es.map exprToString)
     s!"distinct [{lbl}] {esStr};"
