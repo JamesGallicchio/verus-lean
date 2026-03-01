@@ -239,8 +239,28 @@ def widthFromJson (j : Json) : m Nat := do
   catch _ => return archWordBitWidth -- ArchWordSize fallback
 
 def pathedNameFromJson (j : Json) (pathKey : String := "path") : m Ident := do
-  let nameObj ← j.getObjValM pathKey
-  let krate ← nameObj.getStrUnderKeyM "krate"
+  let pathVal ← j.getObjValM pathKey
+  let (krate, segments) ←
+    match pathVal with
+    | .obj _ =>
+      -- Some Verus-generated names (notably anonymous closures) encode
+      -- `krate: null`. Keep parsing by assigning a stable pseudo-namespace.
+      let krate ←
+        match pathVal.getObjVal? "krate" with
+        | .ok (.str s) => pure s
+        | .ok .null => pure "anonymous"
+        | .ok other => throw s!"expected string or null `krate`, got {other}"
+        | .error _ => pure "anonymous"
+      let segsJson ← pathVal.getArrUnderKeyM "segments"
+      let segs ← segsJson.mapM Json.getStrM
+      pure (krate, segs.toList)
+    | .str s =>
+      -- Some exports encode paths as strings like `simple_pptr::PPtr`.
+      -- Treat the first segment as a pseudo-crate and the rest as path segments.
+      match (s.splitOn "::").filter (fun p => !p.isEmpty) with
+      | kr :: segs => pure (kr, segs)
+      | [] => throw s!"expected non-empty path string under key `{pathKey}`, got {s}"
+    | _ => throw s!"expected object or string path under key `{pathKey}`, got {pathVal}"
   let krate := String.capitalize krate
   let ident := Lean.Name.str .anonymous krate
   -- Verus path segments may include capitalization and internal markers
@@ -248,15 +268,13 @@ def pathedNameFromJson (j : Json) (pathKey : String := "path") : m Ident := do
   -- here so parsed identifiers are deterministic across exports.
   -- TODO: retain both raw and normalized names in VLIR.
   let isVstd := krate = VstdStr -- skip capitalized namespace if vstd
-  let pathed ← nameObj.getArrUnderKeyM "segments"
-  let name ← pathed.foldlM (init := ident) (fun acc i => do
-    let name ← i.getStrM
+  let name := segments.foldl (init := ident) (fun acc name =>
     let nameCap := name.capitalize
     -- skip the middle capitalized name segment if we have a Vstd name
     if isVstd && (name = nameCap || name.contains '%') then
-      return acc
+      acc
     else
-      return Lean.Name.str acc nameCap)
+      Lean.Name.str acc nameCap)
 
   -- De-capitalize most functions (unless it's `Vstd.X`)
   if isVstd && Ident.numSegments name ≤ 2 then
@@ -290,15 +308,27 @@ def TypDecoration.fromJson (j : Json) (ty : Typ) : m Typ := do
 partial def Typ.fromJson (j : Json) : m Typ := do
   match j.getStr? with
   | .ok "Bool" => return .Bool
-  | .ok _ => throw "unsupported primitive type"
+  | .ok "Int" => return .Int
+  | .ok "Nat" => return .Nat
+  | .ok "Char" => return .Char
+  | .ok "USize" => return .UInt archWordBitWidth
+  | .ok "ISize" => return .SInt archWordBitWidth
+  | .ok _ => throw s!"unsupported primitive type string: {j}"
   | .error _ =>
-    match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam", "Projection"] with
+    match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam", "Projection", "FnDef"] with
     | ("Primitive", obj) =>
       let t ← obj.getArrM
       match t[0]? with
       | some j =>
         match j.getStr? with
         | .ok "StrSlice" => return .StrSlice
+        | .ok "Slice" =>
+          let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
+          let elemTys ← arr[1].getArrM
+          if h : elemTys.size ≥ 1 then
+            return .Array (← Typ.fromJson elemTys[0])
+          else
+            throw s!"slice primitive missing element type: {obj}"
         | .ok "Global" => return .AirNamed "Global"
         | .ok "Array" =>
           -- In Verus, arrays are specified by their type and length
@@ -316,6 +346,7 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       match obj.getStr? with
       | .ok "Int" => return .Int
       | .ok "Nat" => return .Nat
+      | .ok "Char" => return .Char
       | .ok "USize" => return .UInt archWordBitWidth
       | .ok _ => throw s!"unsupported Int object string: {obj}"
       | .error _ =>
@@ -331,6 +362,13 @@ partial def Typ.fromJson (j : Json) : m Typ := do
           | .ok width => return Typ.SInt width
           | .error e => throw s!"[Typ.fromJson?]: {e}"
         | .ok _ => throw s!"unsupported Int object: {obj}"
+
+    | ("ConstInt", _obj) =>
+      -- Type-level integer constants (e.g. const generics) are not first-class
+      -- types in VLIR. Preserve an explicit placeholder instead of silently
+      -- coercing to `Int`.
+      -- TODO: add explicit const-generic support in VLIR `Typ`.
+      return .AirNamed "Unsupported.ConstInt"
 
     | ("Datatype", obj) =>
       /-
@@ -348,7 +386,11 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       | .ok arity =>
         match arity with
         | 0 => return .Unit
-        | 1 => throw "Tuples should not have a single type"
+        | 1 =>
+          -- Verus occasionally emits unary tuple carriers in type positions.
+          -- Preserve the payload type directly.
+          let ⟨typArray, _⟩ ← arr[1].getArrWithSizeGeM 1
+          Typ.fromJson typArray[0]
         | a + 2 =>
           let ⟨typArray, _⟩ ← arr[1].getArrWithSizeGeM (a + 2)
           let typeParams ← typArray.mapM Typ.fromJson
@@ -391,6 +433,7 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       return .SpecFn params.toList ret
 
     | ("TypParam", obj) => return .TypParam <| ← obj.getStrM
+    | ("Bool", _) => return .Bool
     | ("Projection", obj) =>
       -- Encode `<T as Trait>::Assoc` as a nominal type constructor
       -- `Trait.Assoc<T...>` in VLIR.
@@ -402,8 +445,15 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       let argsArr ← argsJson.getArrM
       let args ← argsArr.mapM Typ.fromJson
       return .Struct (.str traitPath assocName) args.toList
+    | ("FnDef", obj) =>
+      -- Function-item types (e.g., trait method items) are represented as
+      -- explicit placeholder types, preserving path information for debugging.
+      -- TODO: add a dedicated VLIR `Typ.FnDef` node when downstream uses it.
+      let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
+      let fnPath ← pathedNameFromJson arr[0]
+      return .AirNamed s!"Unsupported.FnDef.{fnPath}"
 
-    | _ => throw "unsupported primitive type"
+    | _ => throw s!"unsupported primitive type object: {j}"
 
 /--
   Parses a "span" object and forwards the underlying data to a given function `fj`.
@@ -465,7 +515,17 @@ def Const.fromJson (j : Json) : m Const := do
     let ⟨arr, _⟩ ← v.getArrWithSizeGeM 2
     let s := arr[0]
     let n := arr[1]
-    match ← s.getNatM with
+    let sign : _root_.Int ←
+      match s with
+      | .num num =>
+        if num.exponent == 0 then
+          pure num.mantissa
+        else
+          throw s!"[Const.fromJson?]: unexpected non-integer sign encoding: {s}"
+      | _ => throw s!"[Const.fromJson?]: expected integer sign encoding, got {s}"
+    -- Verus bigint sign encoding has varied across snapshots:
+    -- keep both legacy (`2`) and explicit-negative (`-1`) forms.
+    match sign with
     | 0 =>
       -- no sign
       -- CZ: according to bigint.rs, 0 is minus, 1 is no sign, 2 is plus?
@@ -477,16 +537,24 @@ def Const.fromJson (j : Json) : m Const := do
       let nArr ← n.getArrM
       let n := nArr.getD 0 (Json.num <| JsonNumber.fromNat 0)
       return Const.Int <| Int.ofNat <| ← n.getNatM
-    | 2 =>
+    | 2 | -1 =>
       -- negative number
       -- TODO: Need some computation for the big int
       -- For now, take the first entry and move on
       let nArr ← n.getArrM
       let n := nArr.getD 0 (Json.num <| JsonNumber.fromNat 0)
       return Const.Int <| -(Int.ofNat <| ← n.getNatM)
-    | _ => throw "[Const.fromJson?]: Expected an Int sign of 0, 1, or 2"
-  | ("StrSlice", _) => throw "StrSlice not yet implemented"
-  | ("Char", _) => throw "Char not yet implemented"
+    | _ => throw "[Const.fromJson?]: Expected an Int sign of -1, 0, 1, or 2"
+  | ("StrSlice", v) => return .StrSlice <| ← v.getStrM
+  | ("Char", v) =>
+    match v.getStr? with
+    | .ok s =>
+      match s.toList with
+      | [c] => return .Char c
+      | _ => throw s!"expected char literal as one-character string, got {s}"
+    | .error _ =>
+      -- Fallback for exports that encode chars as numeric code points.
+      return .Char (Char.ofNat (← v.getNatM))
   | _ => throw "[Const.fromJson?]: Unexpected match"
 
 def Bitwise.fromJson (j : Json) : m BitwiseOp :=
@@ -548,6 +616,13 @@ def UnaryOp.fromJson (j : Json) : m UnaryOp := do
       return .Trigger
     | _ => throw s!"[UnaryOp.fromJson?]: Expected one of \{ BitNot, Trigger }, got {j}"
 
+/-- Parse Verus field-projection check metadata. -/
+def VariantCheck.fromJson (j : Json) : m VariantCheck := do
+  match ← j.getStrM with
+  | "None" => return .None
+  | "Yes" => return .Yes
+  | s => throw s!"[VariantCheck.fromJson?]: expected one of None/Yes, got {s}"
+
 /--
   Parses a unary operation under the "UnaryOpr" key.
 
@@ -566,13 +641,23 @@ def UnaryOp.oprFromJson (j : Json) : m UnaryOp := do
       let dt ← pathedNameFromJson (pathKey := "Path") <| ← obj.getObjValM "datatype"
       let variant ← obj.getStrUnderKeyM "variant"
       let field ← obj.getStrUnderKeyM "field"
+      let getVariant :=
+        match obj.getBoolUnderKey? "get_variant" with
+        | .ok b => b
+        | .error _ => false
+      let check ←
+        match obj.getObjVal? "check" with
+        | .ok checkJson => VariantCheck.fromJson checkJson
+        | .error _ => pure .None
       -- dbg_trace s!"[Elab.lean]: Proj: {dt} {variant} {field}"
-      return .Proj dt variant field
+      return .Proj dt variant field getVariant check
     catch _ => -- see if it's a tuple
       try
         let dt ← obj.getObjValM "datatype"
         let size ← dt.getNatUnderKeyM "Tuple"
-        let field := (← obj.getStrUnderKeyM "field").toNat!
+        let fieldStr ← obj.getStrUnderKeyM "field"
+        let some field := fieldStr.toNat?
+          | throw s!"[UnaryOp.oprFromJson?]: expected numeric tuple field, got {fieldStr}"
         return .Proj' size field
       catch _ =>
         throw s!"[UnaryOp.oprFromJson?]: Encounter Field, neither Path nor Tuple is found, got {obj}"
@@ -585,9 +670,16 @@ def UnaryOp.oprFromJson (j : Json) : m UnaryOp := do
       try
         let dt ← obj.getObjValM "datatype"
         let size ← dt.getNatUnderKeyM "Tuple"
-        let field := match (← obj.getStrUnderKeyM "variant").splitOn.reverse with
-          | x :: _ => x.toNat!
-          | _ => 0
+        let variantStr ← obj.getStrUnderKeyM "variant"
+        let fieldFromDot := (variantStr.splitOn ".").getLast?.bind String.toNat?
+        let fieldFromTuplePct :=
+          if variantStr.startsWith "tuple%" then
+            (variantStr.drop 6).toNat?
+          else
+            none
+        let fieldFromPctTail := (variantStr.splitOn "%").getLast?.bind String.toNat?
+        let some field := fieldFromDot <|> fieldFromTuplePct <|> fieldFromPctTail
+          | throw s!"[UnaryOp.oprFromJson?]: expected tuple variant suffix to end with a number, got {variantStr}"
         return .Proj' size field
       catch _ =>
         throw s!"[UnaryOp.oprFromJson?]: Encounter IsVariant, neither Path nor Tuple is found, got {obj}"
@@ -671,6 +763,12 @@ def Var.fromJson (j : Json) : m String := do
   let ident ← arr[0].getStrM
   match ident with
   | "tmp%" => return s!"tmp{← arr[1].getNatUnderKeyM "VirTemp"}"
+  | "tmp%%" =>
+    -- Renumbered temps appear in some exports as `tmp%%` with `VirRenumbered`.
+    match arr[1].getObjVal? "VirRenumbered" with
+    | .ok renObj =>
+      return s!"tmp_ren{← renObj.getNatUnderKeyM "id"}"
+    | .error _ => return "tmp_ren"
   | _ => return ident
 
 
@@ -727,7 +825,7 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
 
 partial def Exp.fromJson (j : Json) : VParser Exp := do
   -- Expect that exactly one of the enumerated options will be true
-  match ← j["Const", "Var", "VarLoc", "VarAt", "StaticVar", "Loc", "Call", "CallLambda", "Ctor", "Unary", "UnaryOpr", "Binary", "BinaryOpr", "If", "Bind", "WithTriggers", "ArrayLiteral", "MatchBlock"] with
+  match ← j["Const", "Var", "VarLoc", "VarAt", "StaticVar", "Loc", "Call", "CallLambda", "ExecFnByName", "Ctor", "Unary", "UnaryOpr", "Binary", "BinaryOpr", "If", "Bind", "WithTriggers", "ArrayLiteral", "MatchBlock"] with
   | ("Const", obj) =>
     return .Const <| ← Const.fromJson obj
 
@@ -776,40 +874,50 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     let exps : Array Exp ← expsJson.mapM (fromJsonSpanned · Exp.fromJson)
     return .CallLambda body exps.toList
 
+  | ("ExecFnByName", obj) =>
+    -- Function item value used as a first-class closure-like argument.
+    -- We model it as a variable-like symbolic reference.
+    let ident := (← pathedNameFromJson obj).toString
+    addFreeVarIfNotBound ident
+    return .Var ident
+
   | ("Ctor", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 3
-    let mut dt : Ident := (.str .anonymous "")
-    -- let mut variant := ""
-    try
-      dt ← pathedNameFromJson arr[0] "Path" -- if this fails, see if it is a tuple
-      let variant ← arr[1].getStrM
-
-      -- According to Verus, the order of the fields within a `Ctor` node
-      -- is unspecified, so parsing should not rely on field order.
-      let fields ← arr[2].getArrM
-
-      -- For each field, parse a field name and its expression
-      let parsedFields ← fields.mapM (fun fObj => do
-        let name ← Json.getStrUnderKeyM fObj "name"
-        -- The expression lies under two `Spanned` objects
-        let a ← Json.getObjValM fObj "a"
-        let exp ← fromJsonSpanned a Exp.fromJson
-        return (name, exp))
-
-      match ← getDecl? dt with
-      | none => throw s!"[ExpX.fromJson]: Could not find datatype {dt}"
-      | some (Decl.struct _) => return .StructCtor dt parsedFields.toList
-      | some (Decl.enum _) => return .EnumCtor dt variant parsedFields.toList
-      | _ => throw s!"[ExpX.fromJson]: Encountered an unexpected decl with name {dt}"
-
-    catch e =>
-      let size ← (← arr[0].getObjValM "Tuple") |>.getNatM
+    -- Tuples are encoded under `Ctor` with a `Tuple` tag in slot 0.
+    match arr[0].getObjVal? "Tuple" with
+    | .ok tupleObj =>
+      let size ← tupleObj.getNatM
       let items ← arr[2].getArrM
       let parsedItems ← items.mapM (fun fObj => do
         let a ← Json.getObjValM fObj "a"
         let exp ← fromJsonSpanned a Exp.fromJson
         return exp)
       return .TupleCtor size parsedItems.toList -- TODO: handle tuples properly
+    | .error _ =>
+      let dt ← pathedNameFromJson arr[0] "Path"
+      let variant ← arr[1].getStrM
+
+      -- According to Verus, the order of fields within a `Ctor` node
+      -- is unspecified, so parsing should not rely on field order.
+      let fields ← arr[2].getArrM
+      let parsedFields ← fields.mapM (fun fObj => do
+        let name ← Json.getStrUnderKeyM fObj "name"
+        let a ← Json.getObjValM fObj "a"
+        let exp ← fromJsonSpanned a Exp.fromJson
+        return (name, exp))
+
+      match ← getDecl? dt with
+      | some (Decl.struct _) => return .StructCtor dt parsedFields.toList
+      | some (Decl.enum _) => return .EnumCtor dt variant parsedFields.toList
+      | some _ => throw s!"[ExpX.fromJson]: Encountered an unexpected decl with name {dt}"
+      | none =>
+        -- Some imported datatypes are not declared in the current shard.
+        -- Keep constructor structure by falling back to a name-based guess.
+        let dtTail := (dt.toString.splitOn ".").getLastD dt.toString
+        if variant.toLower == dtTail.toLower then
+          return .StructCtor dt parsedFields.toList
+        else
+          return .EnumCtor dt variant parsedFields.toList
 
   | ("Unary", obj) =>
     -- A unary object should be an array with an op and a data element
@@ -928,43 +1036,35 @@ end /- mutual -/
 
 /--
   Parses a `Dest` expression, but with the expectation that the result
-  is an identifier. Mainly used to build `Assign`s.
+  is an l-value. Mainly used to build `Assign`s.
 
   In Verus, there are several ways to store a variable identifier in an
   expression (an `Exp`): `Var`, `VarLoc`, `VarAt`, `Loc`, etc.
 
-  This function will parse the underlying `Exp` under the "dest", but
-  will throw an error if the expression is not a variable identifier.
-
-  TODO: Dropped type information?
+  This function parses the underlying `Exp` under the "dest", preserving
+  projection structure instead of flattening to a synthetic name.
 -/
-partial def destNameFromExp : Exp → Option String
-  | .Var i => some i
-  | .Unary (.Proj dt variant field) e =>
-    -- VLIR assignment destinations are strings, so projected l-values are
-    -- flattened into deterministic synthetic names.
-    -- TODO: switch assignment destinations to a structured l-value AST.
-    destNameFromExp e |>.map (fun base =>
-      s!"{base}__proj__{dt.toString}__{variant}__{field}")
+partial def lvalueFromExp : Exp → Option LValue
+  | .Var i => some (.Var i)
+  | .Unary (.Proj dt variant field getVariant check) e =>
+    lvalueFromExp e |>.map (fun base =>
+      .Proj base dt variant field getVariant check)
   | .Unary (.Proj' size field) e =>
-    destNameFromExp e |>.map (fun base =>
-      s!"{base}__proj_tuple__{size}_{field}")
+    lvalueFromExp e |>.map (fun base =>
+      .Proj' base size field)
   | .Unary (.Box _) e
   | .Unary (.Unbox _) e
   | .Unary (.Clip _ _) e
   | .Unary .Trigger e
-  | .Unary (.HasType _) e => destNameFromExp e
+  | .Unary (.HasType _) e => lvalueFromExp e
   | _ => none
 
-def Dest.fromJson (j : Json) : VParser (String × Typ) := do
+def Dest.fromJson (j : Json) : VParser (LValue × Typ) := do
   let e ← fromJsonSpanned j Exp.fromJson
   let ty ← getTyp
-  -- Verus may serialize assign-destinations as l-values like `self.field`.
-  -- VLIR assignment currently stores a string lhs, so we encode projected
-  -- destinations as deterministic synthetic names.
-  match destNameFromExp e with
+  match lvalueFromExp e with
   | some lhs => return (lhs, ty)
-  | none => throw s!"Expected a variable expression, got {e}"
+  | none => throw s!"Expected an l-value expression, got {e}"
 
 def LoopInvariant.fromJson (j : Json) : VParser LoopInvariant := do
   let atEntry ← j.getBoolUnderKeyM "at_entry"
@@ -1149,7 +1249,8 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     return .OpenInvariant stm
 
   | ("ClosureInner", obj) =>
-    let stm ← fromJsonSpanned obj Stm.fromJson
+    -- Closure bodies are wrapped under `body`; metadata (`typ_inv_vars`) is ignored for now.
+    let stm ← fromJsonSpanned (← obj.getObjValM "body") Stm.fromJson
     return .ClosureInner stm
 
   | ("Block", obj) =>
@@ -1247,12 +1348,14 @@ def localDeclsFromJson (j : Json) : VParser (List (String × Typ)) := do
     let mut locals : List (String × Typ) := []
     for decl in arr do
       let kindObj? := decl.getObjVal? "kind"
-      let isStmtLet := match kindObj? with
-        | .ok kind => match kind.getObjVal? "StmtLet" with | .ok _ => true | .error _ => false
+      -- Keep all non-parameter locals so later lowering has complete type info
+      -- (e.g. `AssertByVar` locals used by bitvector assertions).
+      let isParamOrReturn := match kindObj? with
+        | .ok kind =>
+          (match kind.getObjVal? "Param" with | .ok _ => true | .error _ => false) ||
+          (match kind.getObjVal? "Return" with | .ok _ => true | .error _ => false)
         | .error _ => false
-      if isStmtLet then
-        pure ()
-      else
+      if isParamOrReturn then
         continue
       let name ← Var.fromJson <| ← decl.getObjValM "ident"
       let typ ← Typ.fromJson <| ← decl.getObjValM "typ"
@@ -1328,18 +1431,14 @@ def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
       | .obj _ =>
         let bodyStm ← Stm.fromJson bodyObj
         pure (bodyStm, true)
-      | _ => return none
-    | .error _ =>
-      let isExternalBody :=
-        match Lean.Json.getObjValByPath j ["attrs", "is_external_body"] with
-        | .ok b => b.getBool?.toOption.getD false
-        | .error _ => false
-      if isExternalBody then
-        -- External-body exec functions have declared contracts but no executable body.
+      | _ =>
+        -- Declaration-only exec fns (common for trait methods/helpers) can still
+        -- be called from translated bodies. Keep them as empty-body stubs.
         pure (Stm.Block [], false)
-      else
-        -- Skip exec fns without bodies (e.g. unresolved external helpers).
-        return none
+    | .error _ =>
+      -- Missing `exec_proof_check.body` is also treated as declaration-only.
+      -- We intentionally preserve these declarations so calls resolve in Core.
+      pure (Stm.Block [], false)
   let locals ←
     if hasExecProofBody then
       localDeclsFromJson j
@@ -1383,10 +1482,19 @@ def Struct.fromJson (j : Json) : VParser (Option Struct) := do
       is exactly one variant in the array (of the same base name as the struct),
       with its fields stored in `fields` under the 0th entry of the outer array.
     -/
-    let ⟨fieldsArr, _⟩ ← j.getArrUnderKeyWithSizeGeM "variants" 1
-    let fieldsArr ← fieldsArr[0].getArrUnderKeyM "fields"
-    let fields ← fieldsArr.mapM dataFieldsForVariantFromJson
-    return some <| Struct.mk name typeParams fields.toList
+    -- Opaque structs can appear with `variants: []` in shards.
+    -- Model them as field-less structs so translation can proceed.
+    let variants ← j.getArrUnderKeyM "variants"
+    if variants.isEmpty then
+      return some <| Struct.mk name typeParams []
+    else
+      match variants[0]? with
+      | some v =>
+        let fieldsArr ← v.getArrUnderKeyM "fields"
+        let fields ← fieldsArr.mapM dataFieldsForVariantFromJson
+        return some <| Struct.mk name typeParams fields.toList
+      | none =>
+        return some <| Struct.mk name typeParams []
 
 
 def EnumField.fromJson (j : Json) : m EnumField := do
@@ -1409,10 +1517,11 @@ def Enum.fromJson (j : Json) : VParser Enum := do
 
   /-
     The variants of an enum are stored directly in the `variants` field.
-    We enforce that there should be at least one field.
+    Some opaque/imported shards serialize as empty enums (`[]`), so we allow
+    the empty case and let lowering choose a suitable Core representation.
   -/
-  let ⟨fields, _⟩ ← j.getArrUnderKeyWithSizeGeM "variants" 1
-  let fields ← fields.mapM EnumField.fromJson
+  let fieldsObj ← j.getArrUnderKeyM "variants"
+  let fields ← fieldsObj.mapM EnumField.fromJson
   return Enum.mk name typeParams fields.toList
 
 
@@ -1430,6 +1539,12 @@ def datatypeFromJson (j : Json) : VParser (Option Decl) := do
   | "Struct" =>
     let struct ← Struct.fromJson j
     return struct.map (Decl.struct ·)
+  | "Closure" =>
+    -- Verus may emit closure datatypes with empty variants and `krate: null`.
+    -- Keep them as empty struct-like declarations so typed references parse.
+    let name ← pathedNameFromNameJson j (pathKey := "Path")
+    let typeParams ← typeParamsFromJson j
+    return some <| Decl.struct <| Struct.mk name typeParams []
   | "External" =>
     return none
   | _ => throw s!"Unsupported datatype: {dtType}"

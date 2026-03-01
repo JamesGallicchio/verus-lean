@@ -101,7 +101,7 @@ def UnaryOp.pp (op : UnaryOp) : String :=
   match op with
   | .Not => "!"
   | .BitNot _ => "!"
-  | .Proj dt variant field => s!"{dt}.{field} of {variant}"
+  | .Proj dt variant field _ _ => s!"{dt}.{field} of {variant}"
   | .IsVariant dt variant => s!"is {dt}.{variant}: "
   | .Box t => t.pp
   | .Unbox t => t.pp
@@ -208,9 +208,15 @@ partial def Stm.pp (stm : Stm) : String :=
   | .AssertLean e => s!"assertLean {Exp.pp e}"
   | .Assume e => s!"assume {Exp.pp e}"
   | .Assign lhs ty rhs _ =>
+    let rec lvaluePP : LValue → String
+      | .Var n => n
+      | .Proj base dt variant field _ _ =>
+        s!"{lvaluePP base}.{dt}.{variant}.{field}"
+      | .Proj' base size field =>
+        s!"{lvaluePP base}.tuple{size}.{field}"
     let tyStr := Typ.pp ty
     let rhs := Exp.pp rhs
-    s!"let {lhs} : {tyStr} := {rhs}"
+    s!"let {lvaluePP lhs} : {tyStr} := {rhs}"
   | .DeadEnd stm => s!"deadEnd {Stm.pp stm}"
   | .Return e =>
     match e with

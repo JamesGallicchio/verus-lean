@@ -36,17 +36,17 @@ verus! {
 
   proof fn req_ens(s: Sport)
   {
-    assert(sport_nat(s) >= 0) by (lean_proof as a1);
+    assert(sport_nat(s) >= 0);
   }
 
   proof fn box_test(b : NatBox)
   {
-    assert(get_data_in_box(b) >= 0) by (lean_proof as a1);
+    assert(get_data_in_box(b) >= 0);
   }
 
   proof fn test_is_operator(s: Sport)
   {
-    assert(s is Soccer) by (lean_proof as a1);
+    assert(s is Soccer);
   }
 
 /* Example to demonstrate an issue with enum field access when translated to Lean */
@@ -64,7 +64,7 @@ verus! {
   proof fn is_insect_proof()
   {
     let l = Life::Mammal { legs: 0, has_pocket: true };
-    assert(is_insect(l) == 6) by (lean_proof as a1);
+    assert(is_insect(l) == 6);
   }
 
   fn main() 

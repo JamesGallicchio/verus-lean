@@ -179,6 +179,15 @@ inductive InequalityOp
   | Gt
 deriving Repr, Inhabited, DecidableEq, Hashable
 
+/--
+  Metadata on Verus field-projection operations indicating whether an explicit
+  variant-membership check should be enforced before projection.
+-/
+inductive VariantCheck where
+  | None
+  | Yes
+deriving Repr, Inhabited, DecidableEq, Hashable
+
 /-- Primitive unary operations
  (not arbitrary user-defined functions -- these are represented by Expr::Call) -/
 inductive UnaryOp where
@@ -213,6 +222,7 @@ inductive UnaryOp where
     In Verus, this is called a `Field`, and is defined under `UnaryOpr`.
   -/
   | Proj (dt : Ident) (variant : String) (field : String)
+      (getVariant : Bool) (check : VariantCheck)
   /-
     A projection out of a tuple. For example `t.2.1`
 
@@ -345,6 +355,24 @@ inductive AssertQueryMode where
 deriving Repr, Inhabited, DecidableEq, Hashable
 
 /--
+  Assignment destination (Verus `Dest`), preserving l-value structure.
+
+  This keeps projected destinations explicit instead of flattening them into
+  synthetic variable-name strings.
+-/
+inductive LValue where
+  | Var (name : String)
+  | Proj (base : LValue) (dt : Ident) (variant : String) (field : String)
+      (getVariant : Bool) (check : VariantCheck)
+  | Proj' (base : LValue) (size : Nat) (field : Nat)
+deriving Repr, Inhabited, DecidableEq, Hashable
+
+def LValue.baseVar? : LValue → Option String
+  | .Var name => some name
+  | .Proj base _ _ _ _ _ => base.baseVar?
+  | .Proj' base _ _ => base.baseVar?
+
+/--
   Flattened Verus statements.
 
   Statements don't have return values.
@@ -357,7 +385,7 @@ inductive Stm where
   | AssertCompute (exp : Exp) -- should never occur (removed by elaborate_function2() in verus)
   | AssertLean (exp : Exp)
   | Assume (exp : Exp)  -- we could treat these as axioms, or just "by verus"?
-  | Assign (lhs : String) (lhsTy : Typ) (rhs : Exp) (lhsIsInit : Bool) -- CC: In verus, LHS is a Dest, but we take a shortcut
+  | Assign (lhs : LValue) (lhsTy : Typ) (rhs : Exp) (lhsIsInit : Bool)
   | DeadEnd (stm : Stm)
   | Return (exp : Option Exp)
   | BreakOrContinue (label : Option String) (isBreak : Bool)

@@ -207,7 +207,7 @@ def UnaryOp.toTerm (u : UnaryOp) (e : Term) : CoreM Term := do
     | .Char => let charIdent := mkIdent `Char; `(($e : $charIdent))
     | _ => `($e)
   | .Trigger => `($e) -- Ignore trigger information when constructing terms
-  | .Proj dt variant field =>
+  | .Proj dt variant field _ _ =>
     dbg_trace s!"[Elab.lean]: UnaryOp.Proj: {dt} {variant} {field}"
     -- UnaryOp.Proj: Matching.life Arthropod legs
     let _dt ← dt.toIdent
@@ -375,7 +375,7 @@ partial def collectMatchArmsFromIfChain (exp : Exp) : CoreM (Array (Term × Term
 
       let variantIdent : Option Lean.Ident := match current with
         | .MatchBlock _ body => match body with
-          | .Bind (.Let _ _ (.Unary (.Proj _ variant _) _)) _ =>
+          | .Bind (.Let _ _ (.Unary (.Proj _ variant _ _ _) _)) _ =>
             -- Convert string to Name then to Ident
             some (mkIdent (Name.mkSimple variant))
           | _ => none
@@ -578,10 +578,15 @@ partial def Stm.toTerm (stm : Stm) : CoreM Term := do
     `(term| skip)
 
   | .Assign lhs lhsTy rhs _ =>
-    let _lhs ← lhs.toIdent
-    let _lhsTy ← lhsTy.toTerm
     let rhs ← rhs.toTerm
-    `(term| $rhs)
+    match lhs.baseVar? with
+    | some lhsName =>
+      let _lhs ← lhsName.toIdent
+      let _lhsTy ← lhsTy.toTerm
+      `(term| $rhs)
+    | none =>
+      -- Lean elaboration currently handles assignment only for variable l-values.
+      `(term| $rhs)
 
   | .DeadEnd stm => stm.toTerm
 
@@ -648,10 +653,15 @@ partial def Stm.toTactic (stm : Stm) : CoreM (TSyntax `tactic) := do
     `(tactic| have : $e := by auto? )
 
   | .Assign lhs lhsTy rhs _ =>
-    let lhs ← lhs.toIdent
-    let lhsTy ← lhsTy.toTerm
-    let rhs ← rhs.toTerm
-    `(tactic| let $lhs : $lhsTy := $rhs)
+    match lhs.baseVar? with
+    | some lhsName =>
+      let lhs ← lhsName.toIdent
+      let lhsTy ← lhsTy.toTerm
+      let rhs ← rhs.toTerm
+      `(tactic| let $lhs : $lhsTy := $rhs)
+    | none =>
+      -- Lean elaboration currently handles assignment only for variable l-values.
+      `(tactic| skip)
 
   | .DeadEnd stm => stm.toTactic
 
