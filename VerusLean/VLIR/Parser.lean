@@ -841,11 +841,22 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
 
   | ("VarAt", obj) =>
     -- `VarAt` carries the variable and a snapshot marker (e.g. `Pre`).
-    -- For now, parse it as the underlying variable.
+    -- Preserve `Pre` as `.Unary .Old` so later renaming passes do not rewrite
+    -- `old(x)` into post-state output names.
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 1
     let ident ← Var.fromJson arr[0]
     addFreeVarIfNotBound ident
-    return .Var ident
+    let isPre :=
+      match arr.toList with
+      | _ :: marker :: _ =>
+        match marker.getStr? with
+        | .ok s => s == "Pre"
+        | .error _ => false
+      | _ => false
+    if isPre then
+      return .Unary .Old (.Var ident)
+    else
+      return .Var ident
 
   | ("StaticVar", obj) =>
     -- Global/static variable reference.
@@ -1055,6 +1066,7 @@ partial def lvalueFromExp : Exp → Option LValue
   | .Unary (.Box _) e
   | .Unary (.Unbox _) e
   | .Unary (.Clip _ _) e
+  | .Unary .Old e
   | .Unary .Trigger e
   | .Unary (.HasType _) e => lvalueFromExp e
   | _ => none
@@ -1308,11 +1320,35 @@ def fnParseArgs (j : Json) : VParser (List (String × Typ)) := do
     | _ => true)
 
   let vars ← restoreCurrentBoundVarsAfter <| varsJson.mapM (fun v => do
-    let ⟨i, ty⟩ ← VarBinder.fromJson <| ← xJsonFromSpanned v
+    let xJson ← xJsonFromSpanned v
+    let ⟨i, ty⟩ ← VarBinder.fromJson xJson
     -- We build up the bound variables as we go (in case of dependent typing)
     pushBoundVar i ty
     return (i, ty))
   return vars.toList
+
+private def mutRefParamNamesFromDecl (j : Json) : VParser (List String) := do
+  -- In recent Verus exports, mutability for exec parameters is encoded in
+  -- `decl.ens_pars[*].purpose = MutPost` rather than in `pars[*].typ`.
+  -- Recover those names here so `ExecFn.fromJson` can re-attach `.MutRef`.
+  match j.getArrByPath? ["decl", "ens_pars"] with
+  | .error _ => pure []
+  | .ok ensPars =>
+    let mut names : List String := []
+    for spanned in ensPars do
+      let xJson ← xJsonFromSpanned spanned
+      let isMutPost :=
+        match xJson.getObjVal? "purpose" with
+        | .ok purposeJson =>
+          match purposeJson.getStr? with
+          | .ok s => s == "MutPost"
+          | .error _ => false
+        | .error _ => false
+      if isMutPost then
+        let ⟨arr, _⟩ ← xJson.getArrUnderKeyWithSizeGeM "name" 1
+        let name ← arr[0].getStrM
+        names := name :: names
+    pure names.eraseDups
 
 
 def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
@@ -1399,7 +1435,18 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
 def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
   let name ← pathedNameFromNameJson j
   if isVstdName name then return none else
-  let args ← fnParseArgs j
+  let mutRefNames ← mutRefParamNamesFromDecl j
+  let argsRaw ← fnParseArgs j
+  -- Reconstruct mutable-reference typing for parameters discovered from
+  -- `decl.ens_pars` metadata.
+  let args :=
+    argsRaw.map (fun (n, t) =>
+      if mutRefNames.contains n then
+        match t with
+        | .Decorated .MutRef _ => (n, t)
+        | _ => (n, .Decorated .MutRef t)
+      else
+        (n, t))
   let retBinder ← VarBinder.fromJson <| ← j.getObjValByPathM ["ret", "x"]
   let (retName, returnType) := retBinder
   let requiresObj ←
@@ -1449,12 +1496,19 @@ def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
 
 def typeParamsFromJson (j : Json) : m (List String) := do
   let typeParamsArr ← j.getArrUnderKeyM "typ_params"
-  -- dbg_trace s!"typeParamsFromJson: {typeParamsArr}"
-  return Array.toList <| ← typeParamsArr.mapM (fun _ => do
-    -- TODO: These are going to be tuples, which probably get serialized as an array
-    -- CZ: not sure about the above comment
-    let ident := "implementMePlease"
-    return ident)
+  -- Verus serializes type params as entries like `["T", "..."]`.
+  -- Keep the first component (the param name) and fall back only when malformed.
+  return Array.toList <| ← typeParamsArr.mapM (fun entry => do
+    match entry with
+    | .str s => pure s
+    | .arr elems =>
+      match elems[0]? with
+      | some first =>
+        match first with
+        | .str s => pure s
+        | _ => pure "implementMePlease"
+      | _ => pure "implementMePlease"
+    | _ => pure "implementMePlease")
 
 
 def dataFieldsForVariantFromJson (j : Json) : m (String × Typ) := do

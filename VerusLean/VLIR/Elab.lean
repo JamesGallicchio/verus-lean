@@ -207,6 +207,7 @@ def UnaryOp.toTerm (u : UnaryOp) (e : Term) : CoreM Term := do
     | .Char => let charIdent := mkIdent `Char; `(($e : $charIdent))
     | _ => `($e)
   | .Trigger => `($e) -- Ignore trigger information when constructing terms
+  | .Old => `($e) -- Pre-state marker is erased in Lean term elaboration
   | .Proj dt variant field _ _ =>
     dbg_trace s!"[Elab.lean]: UnaryOp.Proj: {dt} {variant} {field}"
     -- UnaryOp.Proj: Matching.life Arthropod legs
@@ -561,6 +562,11 @@ def addToTacticOption (acc : Option (TSyntax `tactic)) (tac : TSyntax `tactic) :
   | none => return tac
   | some acc => `(tactic| ($acc:tactic; $tac:tactic))
 
+private def assignBaseVarIdent? (lhs : LValue) : CoreM (Option (TSyntax `ident)) := do
+  match lhs.baseVar? with
+  | some lhsName => return some (← lhsName.toIdent)
+  | none => return none
+
 partial def Stm.toTerm (stm : Stm) : CoreM Term := do
   match stm with
   | .Assert _ =>
@@ -577,16 +583,9 @@ partial def Stm.toTerm (stm : Stm) : CoreM Term := do
     let _e ← e.toTerm
     `(term| skip)
 
-  | .Assign lhs lhsTy rhs _ =>
+  | .Assign _lhs _lhsTy rhs _ =>
     let rhs ← rhs.toTerm
-    match lhs.baseVar? with
-    | some lhsName =>
-      let _lhs ← lhsName.toIdent
-      let _lhsTy ← lhsTy.toTerm
-      `(term| $rhs)
-    | none =>
-      -- Lean elaboration currently handles assignment only for variable l-values.
-      `(term| $rhs)
+    `(term| $rhs)
 
   | .DeadEnd stm => stm.toTerm
 
@@ -653,9 +652,8 @@ partial def Stm.toTactic (stm : Stm) : CoreM (TSyntax `tactic) := do
     `(tactic| have : $e := by auto? )
 
   | .Assign lhs lhsTy rhs _ =>
-    match lhs.baseVar? with
-    | some lhsName =>
-      let lhs ← lhsName.toIdent
+    match (← assignBaseVarIdent? lhs) with
+    | some lhs =>
       let lhsTy ← lhsTy.toTerm
       let rhs ← rhs.toTerm
       `(tactic| let $lhs : $lhsTy := $rhs)

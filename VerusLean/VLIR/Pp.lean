@@ -101,6 +101,7 @@ def UnaryOp.pp (op : UnaryOp) : String :=
   match op with
   | .Not => "!"
   | .BitNot _ => "!"
+  | .Old => "old "
   | .Proj dt variant field _ _ => s!"{dt}.{field} of {variant}"
   | .IsVariant dt variant => s!"is {dt}.{variant}: "
   | .Box t => t.pp
@@ -191,6 +192,13 @@ partial def Exp.pp (e : Exp) : String :=
 
 end /- mutual -/
 
+partial def LValue.pp : LValue → String
+  | .Var n => n
+  | .Proj base dt variant field _ _ =>
+    s!"{LValue.pp base}.{dt}.{variant}.{field}"
+  | .Proj' base size field =>
+    s!"{LValue.pp base}.tuple{size}.{field}"
+
 def AssertQueryMode.pp : AssertQueryMode → String
   | .NonLinear => "NonLinear"
   | .BitVector => "BitVector"
@@ -208,15 +216,9 @@ partial def Stm.pp (stm : Stm) : String :=
   | .AssertLean e => s!"assertLean {Exp.pp e}"
   | .Assume e => s!"assume {Exp.pp e}"
   | .Assign lhs ty rhs _ =>
-    let rec lvaluePP : LValue → String
-      | .Var n => n
-      | .Proj base dt variant field _ _ =>
-        s!"{lvaluePP base}.{dt}.{variant}.{field}"
-      | .Proj' base size field =>
-        s!"{lvaluePP base}.tuple{size}.{field}"
     let tyStr := Typ.pp ty
     let rhs := Exp.pp rhs
-    s!"let {lvaluePP lhs} : {tyStr} := {rhs}"
+    s!"let {LValue.pp lhs} : {tyStr} := {rhs}"
   | .DeadEnd stm => s!"deadEnd {Stm.pp stm}"
   | .Return e =>
     match e with
@@ -246,6 +248,7 @@ instance BinaryOp.toString : ToString BinaryOp := ⟨BinaryOp.pp⟩
 instance Quant.toString : ToString Quant := ⟨Quant.pp⟩
 instance Bind.toString : ToString Bind := ⟨Bind.pp⟩
 instance Exp.toString : ToString Exp := ⟨Exp.pp⟩
+instance LValue.toString : ToString LValue := ⟨LValue.pp⟩
 instance Stm.toString : ToString Stm := ⟨Stm.pp⟩
 
 def Assertion.pp (a : Assertion) : String :=

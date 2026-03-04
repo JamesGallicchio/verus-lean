@@ -25,9 +25,23 @@ STRATA_SOLVER="cvc5"
 STRATA_SOLVER_TIMEOUT=""
 declare -a rvt_expected_err_keys=()
 declare -a rvt_expected_rust_compile_error_keys=()
+# Bash 3 on macOS has no associative arrays; store deduped keys in temp files
+# for fast membership checks via `grep -Fx`.
+rvt_expected_err_keys_index=""
+rvt_expected_rust_compile_error_keys_index=""
 have_rvt_expected_rust_compile_errors=false
 skipped_expected_err_cases=0
 skipped_rust_compile_error_cases=0
+
+cleanup_regress_temp_files() {
+  if [ -n "${rvt_expected_err_keys_index:-}" ] && [ -f "$rvt_expected_err_keys_index" ]; then
+    rm -f "$rvt_expected_err_keys_index"
+  fi
+  if [ -n "${rvt_expected_rust_compile_error_keys_index:-}" ] && [ -f "$rvt_expected_rust_compile_error_keys_index" ]; then
+    rm -f "$rvt_expected_rust_compile_error_keys_index"
+  fi
+}
+trap cleanup_regress_temp_files EXIT
 
 usage() {
   cat <<'EOF'
@@ -185,47 +199,17 @@ collect_rust_verify_expected_rust_compile_errors() {
         pending_test="${BASH_REMATCH[1]}"
         if $in_matches_syntax_err_macro; then
           local macro_err_key="$file_base:$pending_test"
-          local macro_err_seen=false
-          local macro_existing_err
-          for macro_existing_err in "${rvt_expected_err_keys[@]-}"; do
-            if [ "$macro_existing_err" = "$macro_err_key" ]; then
-              macro_err_seen=true
-              break
-            fi
-          done
-          if ! $macro_err_seen; then
-            rvt_expected_err_keys+=("$macro_err_key")
-          fi
+          rvt_expected_err_keys+=("$macro_err_key")
         fi
         continue
       fi
       if [ -n "$pending_test" ] && [[ "$line" == *"=> Err("* ]]; then
         local err_key="$file_base:$pending_test"
-        local err_seen=false
-        local existing_err
-        for existing_err in "${rvt_expected_err_keys[@]-}"; do
-          if [ "$existing_err" = "$err_key" ]; then
-            err_seen=true
-            break
-          fi
-        done
-        if ! $err_seen; then
-          rvt_expected_err_keys+=("$err_key")
-        fi
+        rvt_expected_err_keys+=("$err_key")
       fi
       if [ -n "$pending_test" ] && [[ "$line" == *"assert_rust_error_msg"* ]]; then
         local key="$file_base:$pending_test"
-        local seen=false
-        local existing
-        for existing in "${rvt_expected_rust_compile_error_keys[@]-}"; do
-          if [ "$existing" = "$key" ]; then
-            seen=true
-            break
-          fi
-        done
-        if ! $seen; then
-          rvt_expected_rust_compile_error_keys+=("$key")
-        fi
+        rvt_expected_rust_compile_error_keys+=("$key")
         pending_test=""
       fi
       if $in_matches_syntax_err_macro && [[ "$line" == *"}"* ]]; then
@@ -233,29 +217,40 @@ collect_rust_verify_expected_rust_compile_errors() {
       fi
     done < "$file"
   done < <(find "$VERUS_RUST_VERIFY_TESTS_DIR" -maxdepth 1 -type f -name '*.rs' | sort)
+  # Bash 3 on macOS has no associative arrays; use sorted lookup indexes.
+  if [ -n "$rvt_expected_err_keys_index" ] && [ -f "$rvt_expected_err_keys_index" ]; then
+    rm -f "$rvt_expected_err_keys_index"
+  fi
+  if [ -n "$rvt_expected_rust_compile_error_keys_index" ] && [ -f "$rvt_expected_rust_compile_error_keys_index" ]; then
+    rm -f "$rvt_expected_rust_compile_error_keys_index"
+  fi
+  rvt_expected_err_keys_index="$(mktemp "${TMPDIR:-/tmp}/rvt_expected_err_keys.XXXXXX")"
+  rvt_expected_rust_compile_error_keys_index="$(mktemp "${TMPDIR:-/tmp}/rvt_expected_rust_compile_error_keys.XXXXXX")"
+  if [ ${#rvt_expected_err_keys[@]} -gt 0 ]; then
+    printf '%s\n' "${rvt_expected_err_keys[@]}" | sort -u > "$rvt_expected_err_keys_index"
+  else
+    : > "$rvt_expected_err_keys_index"
+  fi
+  if [ ${#rvt_expected_rust_compile_error_keys[@]} -gt 0 ]; then
+    printf '%s\n' "${rvt_expected_rust_compile_error_keys[@]}" | sort -u > "$rvt_expected_rust_compile_error_keys_index"
+  else
+    : > "$rvt_expected_rust_compile_error_keys_index"
+  fi
   have_rvt_expected_rust_compile_errors=true
 }
 
 rvt_expected_err_case() {
   local key="$1"
-  local existing
-  for existing in "${rvt_expected_err_keys[@]-}"; do
-    if [ "$existing" = "$key" ]; then
-      return 0
-    fi
-  done
-  return 1
+  [ -n "$rvt_expected_err_keys_index" ] || return 1
+  [ -f "$rvt_expected_err_keys_index" ] || return 1
+  grep -Fxq -- "$key" "$rvt_expected_err_keys_index"
 }
 
 rvt_expected_rust_compile_error_case() {
   local key="$1"
-  local existing
-  for existing in "${rvt_expected_rust_compile_error_keys[@]-}"; do
-    if [ "$existing" = "$key" ]; then
-      return 0
-    fi
-  done
-  return 1
+  [ -n "$rvt_expected_rust_compile_error_keys_index" ] || return 1
+  [ -f "$rvt_expected_rust_compile_error_keys_index" ] || return 1
+  grep -Fxq -- "$key" "$rvt_expected_rust_compile_error_keys_index"
 }
 
 add_rust_verify_generated_cases_for_test_name() {
@@ -437,6 +432,157 @@ is_expected_mismatch_verus_fail_strata_pass() {
     vlir-tests:LoopSimple) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+run_export() {
+  set +e
+  (
+    cd "$suite_json_dir"
+    # Some Verus examples are library-style (no `main`), so export in lib mode.
+    run_logged "$log_export" "$VERUS_BIN" --export-lean-all "$example" --crate-type=lib
+  )
+  verus_rc=$?
+  set -e
+}
+
+select_json_artifact() {
+  json_fresh="no"
+  if [ -f "$gen_json" ]; then
+    if [ "$gen_json" != "$json" ]; then
+      mv -f "$gen_json" "$json"
+    fi
+    json_fresh="yes"
+  elif [ -n "$gen_json_alt1" ] && [ -f "$gen_json_alt1" ]; then
+    if [ "$gen_json_alt1" != "$json" ]; then
+      mv -f "$gen_json_alt1" "$json"
+    fi
+    json_fresh="yes"
+  elif [ -n "$gen_json_alt2" ] && [ -f "$gen_json_alt2" ]; then
+    if [ "$gen_json_alt2" != "$json" ]; then
+      mv -f "$gen_json_alt2" "$json"
+    fi
+    json_fresh="yes"
+  elif [ -f "$gen_json_alt3" ]; then
+    if [ "$gen_json_alt3" != "$json" ]; then
+      mv -f "$gen_json_alt3" "$json"
+    fi
+    json_fresh="yes"
+  fi
+
+  if [ "$json_fresh" = "yes" ]; then
+    if [ -f "$old_gen_json" ]; then
+      rm -f "$old_gen_json"
+    fi
+    if [ -n "$old_gen_json_alt1" ] && [ -f "$old_gen_json_alt1" ]; then
+      rm -f "$old_gen_json_alt1"
+    fi
+    if [ -n "$old_gen_json_alt2" ] && [ -f "$old_gen_json_alt2" ]; then
+      rm -f "$old_gen_json_alt2"
+    fi
+    if [ -f "$old_gen_json_alt3" ]; then
+      rm -f "$old_gen_json_alt3"
+    fi
+  else
+    if $had_old_gen_json; then
+      # Restore prior artifact so local state is preserved for manual inspection.
+      mv -f "$old_gen_json" "$gen_json"
+    fi
+    if $had_old_gen_json_alt1 && [ -n "$old_gen_json_alt1" ]; then
+      mv -f "$old_gen_json_alt1" "$gen_json_alt1"
+    fi
+    if $had_old_gen_json_alt2 && [ -n "$old_gen_json_alt2" ]; then
+      mv -f "$old_gen_json_alt2" "$gen_json_alt2"
+    fi
+    if $had_old_gen_json_alt3; then
+      mv -f "$old_gen_json_alt3" "$gen_json_alt3"
+    fi
+  fi
+}
+
+run_translate() {
+  tmp_core="$suite_core_dir/.${base}.core.st.tmp.$$"
+  translated_ok="no"
+  set +e
+  run_logged "$log_translate" "$VERUS_LEAN" boogie "$json" "$tmp_core"
+  core_rc=$?
+  set -e
+
+  if [ "$core_rc" -eq 0 ] && [ -f "$tmp_core" ]; then
+    mv -f "$tmp_core" "$core"
+    translated_ok="yes"
+  else
+    if [ "$core_rc" -eq 0 ] && [ ! -f "$tmp_core" ]; then
+      core_rc="missing"
+    fi
+    if [ -f "$tmp_core" ]; then
+      rm -f "$tmp_core"
+    fi
+  fi
+}
+
+run_verify() {
+  set +e
+  (
+    cd "$STRATA_DIR"
+    run_logged "$log_verify" lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$core"
+  )
+  verify_rc=$?
+  set -e
+}
+
+classify_case() {
+  classification=""
+  if [ "$json_fresh" != "yes" ]; then
+    if $expected_empty_export; then
+      expected_empty_exports+=("$case_name")
+      classification="export-empty-expected"
+    else
+      export_failures+=("$case_name")
+      classification="export-missing"
+    fi
+    return
+  fi
+
+  if [ "$translated_ok" != "yes" ]; then
+    translation_failures+=("$case_name")
+    classification="translate-failed"
+    return
+  fi
+
+  if [ "$verify_rc" -ne 0 ]; then
+    if is_strata_parse_failure_log "$log_verify"; then
+      strata_parse_failures+=("$case_name")
+      classification="strata-parse-failed"
+    elif is_strata_type_failure_log "$log_verify"; then
+      strata_type_failures+=("$case_name")
+      classification="strata-type-failed"
+    elif grep -q "Successfully parsed\\." "$log_verify"; then
+      verify_failures+=("$case_name")
+      classification="verify-failed"
+    else
+      strata_parse_failures+=("$case_name")
+      classification="strata-parse-failed"
+    fi
+  else
+    classification="ok"
+  fi
+
+  if [ "$classification" = "ok" ] || [ "$classification" = "verify-failed" ]; then
+    if [ "$verus_rc" -eq 0 ] && [ "$verify_rc" -ne 0 ]; then
+      mismatch_verus_pass_strata_fail+=("$case_name")
+    elif [ "$verus_rc" -ne 0 ] && [ "$verify_rc" -eq 0 ]; then
+      if is_expected_mismatch_verus_fail_strata_pass "$case_name"; then
+        classification="expected-mismatch"
+        expected_mismatches+=("$case_name")
+      else
+        mismatch_verus_fail_strata_pass+=("$case_name")
+      fi
+    fi
+  fi
+
+  if [ "$classification" = "ok" ]; then
+    ok_cases+=("$case_name")
+  fi
 }
 
 while [ $# -gt 0 ]; do
@@ -694,136 +840,25 @@ for case_entry in "${cases[@]}"; do
     mv -f "$gen_json_alt3" "$old_gen_json_alt3"
   fi
 
-  set +e
-  (
-    cd "$suite_json_dir"
-    # Some Verus examples are library-style (no `main`), so export in lib mode.
-    run_logged "$log_export" "$VERUS_BIN" --export-lean-all "$example" --crate-type=lib
-  )
-  verus_rc=$?
-  set -e
-
-  json_fresh="no"
-  if [ -f "$gen_json" ]; then
-    if [ "$gen_json" != "$json" ]; then
-      mv -f "$gen_json" "$json"
-    fi
-    json_fresh="yes"
-  elif [ -n "$gen_json_alt1" ] && [ -f "$gen_json_alt1" ]; then
-    if [ "$gen_json_alt1" != "$json" ]; then
-      mv -f "$gen_json_alt1" "$json"
-    fi
-    json_fresh="yes"
-  elif [ -n "$gen_json_alt2" ] && [ -f "$gen_json_alt2" ]; then
-    if [ "$gen_json_alt2" != "$json" ]; then
-      mv -f "$gen_json_alt2" "$json"
-    fi
-    json_fresh="yes"
-  elif [ -f "$gen_json_alt3" ]; then
-    if [ "$gen_json_alt3" != "$json" ]; then
-      mv -f "$gen_json_alt3" "$json"
-    fi
-    json_fresh="yes"
-  fi
-
-  if [ "$json_fresh" = "yes" ]; then
-    [ -f "$old_gen_json" ] && rm -f "$old_gen_json"
-    [ -n "$old_gen_json_alt1" ] && [ -f "$old_gen_json_alt1" ] && rm -f "$old_gen_json_alt1"
-    [ -n "$old_gen_json_alt2" ] && [ -f "$old_gen_json_alt2" ] && rm -f "$old_gen_json_alt2"
-    [ -f "$old_gen_json_alt3" ] && rm -f "$old_gen_json_alt3"
-  else
-    if $had_old_gen_json; then
-      # Restore prior artifact so local state is preserved for manual inspection.
-      mv -f "$old_gen_json" "$gen_json"
-    fi
-    if $had_old_gen_json_alt1 && [ -n "$old_gen_json_alt1" ]; then
-      mv -f "$old_gen_json_alt1" "$gen_json_alt1"
-    fi
-    if $had_old_gen_json_alt2 && [ -n "$old_gen_json_alt2" ]; then
-      mv -f "$old_gen_json_alt2" "$gen_json_alt2"
-    fi
-    if $had_old_gen_json_alt3; then
-      mv -f "$old_gen_json_alt3" "$gen_json_alt3"
-    fi
-  fi
+  run_export
+  select_json_artifact
 
   core_rc="-"
   verify_rc="-"
   classification=""
+  translated_ok="no"
   expected_empty_export=false
   if [[ "$example" == */examples/guide/opaque.rs ]]; then
     expected_empty_export=true
   fi
 
-  if [ "$json_fresh" != "yes" ]; then
-    if $expected_empty_export; then
-      expected_empty_exports+=("$case_name")
-      classification="export-empty-expected"
-    else
-      export_failures+=("$case_name")
-      classification="export-missing"
-    fi
-  else
-    tmp_core="$suite_core_dir/.${base}.core.st.tmp.$$"
-    set +e
-    run_logged "$log_translate" "$VERUS_LEAN" boogie "$json" "$tmp_core"
-    core_rc=$?
-    set -e
-
-    if [ "$core_rc" -eq 0 ] && [ -f "$tmp_core" ]; then
-      mv -f "$tmp_core" "$core"
-
-      set +e
-      (
-        cd "$STRATA_DIR"
-        run_logged "$log_verify" lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$core"
-      )
-      verify_rc=$?
-      set -e
-
-      if [ "$verify_rc" -ne 0 ]; then
-        if is_strata_parse_failure_log "$log_verify"; then
-          strata_parse_failures+=("$case_name")
-          classification="strata-parse-failed"
-        elif is_strata_type_failure_log "$log_verify"; then
-          strata_type_failures+=("$case_name")
-          classification="strata-type-failed"
-        elif grep -q "Successfully parsed\\." "$log_verify"; then
-          verify_failures+=("$case_name")
-          classification="verify-failed"
-        else
-          strata_parse_failures+=("$case_name")
-          classification="strata-parse-failed"
-        fi
-      else
-        classification="ok"
-      fi
-    else
-      if [ "$core_rc" -eq 0 ] && [ ! -f "$tmp_core" ]; then
-        core_rc="missing"
-      fi
-      translation_failures+=("$case_name")
-      classification="translate-failed"
-      [ -f "$tmp_core" ] && rm -f "$tmp_core"
+  if [ "$json_fresh" = "yes" ]; then
+    run_translate
+    if [ "$translated_ok" = "yes" ]; then
+      run_verify
     fi
   fi
-
-  if [ "$classification" = "ok" ] || [ "$classification" = "verify-failed" ]; then
-    if [ "$verus_rc" -eq 0 ] && [ "$verify_rc" -ne 0 ]; then
-      mismatch_verus_pass_strata_fail+=("$case_name")
-    elif [ "$verus_rc" -ne 0 ] && [ "$verify_rc" -eq 0 ]; then
-      if is_expected_mismatch_verus_fail_strata_pass "$case_name"; then
-        classification="expected-mismatch"
-        expected_mismatches+=("$case_name")
-      else
-        mismatch_verus_fail_strata_pass+=("$case_name")
-      fi
-    fi
-  fi
-
-  if [ "$classification" = "ok" ]; then
-    ok_cases+=("$case_name")
-  fi
+  classify_case
 
   printf "%-40s  %-7s  %-5s  %-9s  %-7s  %s\n" \
     "$case_name" "$verus_rc" "$json_fresh" "$core_rc" "$verify_rc" "$classification"

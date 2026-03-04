@@ -13,6 +13,7 @@ tests/BoogieFiles/rust-verify-tests/*.core.st
 tests/PrettyPrinterCompare/
 tests/check_official_pretty_roundtrip.sh
 tests/compare_pretty_printers.sh
+tests/check_regression_gate.sh
 tests/tools/
 tests/waiting_for_strata.txt
 tests/integer_cast_occurrences_*.txt

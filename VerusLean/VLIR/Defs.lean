@@ -217,6 +217,12 @@ inductive UnaryOp where
   -/
   | Trigger
   /--
+    Marks a pre-state (`old`) variable reference from Verus `VarAt(..., Pre)`.
+    This is not emitted as a Core operator; it is used internally so renaming
+    passes can avoid rewriting pre-state variables into post-state outputs.
+  -/
+  | Old
+  /--
     A field projection out of a structure. For example `p.fst`.
 
     In Verus, this is called a `Field`, and is defined under `UnaryOpr`.
