@@ -134,7 +134,7 @@ inductive Typ where
   -/
   | Enum (name : Ident) (params : List Typ)
   | AirNamed (str : String)
-deriving Repr, Inhabited, Hashable
+deriving Repr, Inhabited, Hashable, BEq
 
 /-- Constant value literals -/
 inductive Const
@@ -254,7 +254,7 @@ inductive UnaryOp where
   -/
   | Unbox (t : Typ)
   | HasType (t : Typ)
-deriving Repr, Inhabited, Hashable
+deriving Repr, Inhabited, Hashable, BEq
 
 /--
   Primitive binary operations.
@@ -313,7 +313,7 @@ inductive Bind where
   | Lambda (vars : List (String × Typ))
   -- CC: Ignore choose for now
   -- | Choose ()
-deriving Repr, Inhabited, Hashable
+deriving Repr, Inhabited, Hashable, BEq
 
 /--
   Flattened Verus expressions.
@@ -343,7 +343,7 @@ inductive Exp where
   | ArrayLiteral (elems : List Exp)
   /-- MatchBlock wraps the simplified if-else chain but preserves original match info for Lean -/
   | MatchBlock (scrutinee : Exp × Typ) (body : Exp)
-deriving Repr, Inhabited, Hashable
+deriving Repr, Inhabited, Hashable, BEq
 
 end /- mutual -/
 

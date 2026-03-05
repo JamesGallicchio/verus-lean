@@ -523,27 +523,34 @@ def Const.fromJson (j : Json) : m Const := do
         else
           throw s!"[Const.fromJson?]: unexpected non-integer sign encoding: {s}"
       | _ => throw s!"[Const.fromJson?]: expected integer sign encoding, got {s}"
+    -- Reconstruct a multi-limb bigint from base-2^32 limbs (little-endian).
+    -- JSON: `[sign, [limb0, limb1, ...]]` where each limb ∈ [0, 2^32).
+    -- Value = limb0 + limb1·2^32 + limb2·2^64 + …
+    let reassembleLimbs (limbs : Array Json) : m Nat := do
+      let base : Nat := 4294967296  -- 2^32
+      let mut result : Nat := 0
+      let mut weight : Nat := 1
+      for limb in limbs do
+        let v ← limb.getNatM
+        result := result + v * weight
+        weight := weight * base
+      return result
     -- Verus bigint sign encoding has varied across snapshots:
     -- keep both legacy (`2`) and explicit-negative (`-1`) forms.
     match sign with
     | 0 =>
-      -- no sign
-      -- CZ: according to bigint.rs, 0 is minus, 1 is no sign, 2 is plus?
+      -- no sign → zero
       return Const.Int 0
     | 1 =>
       -- positive number
-      -- TODO: Need some computation for the big int
-      -- For now, take the first entry and move on
       let nArr ← n.getArrM
-      let n := nArr.getD 0 (Json.num <| JsonNumber.fromNat 0)
-      return Const.Int <| Int.ofNat <| ← n.getNatM
+      let val ← reassembleLimbs nArr
+      return Const.Int <| Int.ofNat val
     | 2 | -1 =>
       -- negative number
-      -- TODO: Need some computation for the big int
-      -- For now, take the first entry and move on
       let nArr ← n.getArrM
-      let n := nArr.getD 0 (Json.num <| JsonNumber.fromNat 0)
-      return Const.Int <| -(Int.ofNat <| ← n.getNatM)
+      let val ← reassembleLimbs nArr
+      return Const.Int <| -(Int.ofNat val)
     | _ => throw "[Const.fromJson?]: Expected an Int sign of -1, 0, 1, or 2"
   | ("StrSlice", v) => return .StrSlice <| ← v.getStrM
   | ("Char", v) =>
@@ -945,11 +952,13 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     -- dbg_trace s!"UnaryOpr op: {op}"
     let data ← fromJsonSpanned arr[1] Exp.fromJson
 
-    -- Erase (Un)Box operations, just return the base type or expression
+    -- Preserve both Box and Unbox: their type annotations carry concrete type
+    -- information for polymorphic calls.  Box(T, e) tells downstream that e
+    -- has type T (used to emit typed literals like bv{64}(10)); Unbox(T, e)
+    -- tells downstream that the result has type T (used by inferBitInfo to
+    -- determine the BV width of generic call results).
     -- dbg_trace s!"UnaryOpr data: {data}"
-    match op with
-    | .Box _ | .Unbox _ => return data
-    | _ => return .Unary op data
+    return .Unary op data
 
   | ("Binary", obj) =>
     -- A binary object should be an array with an op and two data elements
