@@ -297,7 +297,7 @@ partial def Bind.toTerm (b : Bind) (t : Term) : CoreM Term := do
     let e ← e.toTerm
     -- See `letMVar` in `Lean.Parser.Term.lean`
     `(let $v : $ty := $e; $t)
-  | .Quant q vars =>
+  | .Quant q vars _ =>
     match q with
     | .Forall =>
       let vars ← makeBracketedBinders vars.toArray

@@ -95,13 +95,6 @@ Additional counters (do not affect total):
   `vlir-tests:demo_while_loop_isolation`, `verus-examples:statements`,
   `verus-examples:guide/references`
 
-### Quantifier triggers dropped
-- All quantifier trigger annotations are silently discarded; every `forall`/`exists`
-  is emitted with `noTrigger`. An SMT-backed or pattern-matching backend would lose
-  the guidance Verus provides for instantiation.
-- Affects every test with quantifiers, e.g. `vlir-tests:quant`,
-  `verus-examples:guide/nonlinear_bitvec`, `verus-examples:guide/getting_started`
-
 ### `HasType` overflow guards dropped
 - Verus emits `HasType(U32, e)` assertions before arithmetic to check that the
   result fits in the target width. These are silently skipped in Core output,

@@ -133,7 +133,7 @@ partial def Bind.pp (b : Bind) : String :=
     let tyStr := Typ.pp ty
     let expStr := Exp.pp e
     s!"let {v} : {tyStr} := {expStr}; "
-  | .Quant q vars =>
+  | .Quant q vars _trigs =>
     let qStr := Quant.pp q
     let varsStr := vars.map (fun ⟨i, ty⟩ => s!"({i} : {ty.pp})")
     s!"{qStr} {varsStr}, "

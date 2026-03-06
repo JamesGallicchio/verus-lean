@@ -2,6 +2,7 @@ import Lean
 import Lean.PrettyPrinter
 import VerusLean
 import VerusLean.VLIR.ToCore
+import Strata.Languages.Core.DDMTransform.ASTtoCST
 
 open VerusLean
 
@@ -103,7 +104,8 @@ private def collectJsonBundleFiles (target : System.FilePath) : IO (List System.
     pure (target :: sortedShards)
   | _, _ => pure [target]
 
-unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit) : IO Unit := do
+unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit)
+    (useOfficialPrinter : Bool := false) : IO Unit := do
   let target := System.FilePath.mk path
   let bundleFiles ← collectJsonBundleFiles target
   let mut allDecls : List Decl := []
@@ -119,14 +121,24 @@ unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit) : IO U
       else
         -- Keep translating other shards so one unsupported module does not block output.
         IO.eprintln s!"warning: skipping shard {f}: {e}"
-  match ToCore.declsToCoreString allDecls with
-  | .ok str => printFn str
+  match ToCore.declsToProgram allDecls with
+  | .ok p =>
+    if useOfficialPrinter then
+      -- Use Strata's official DDM-based pretty-printer (Core.formatProgram).
+      -- Note: output does not include the "program Core;" header.
+      let formatted := Std.Format.pretty (Strata.Core.formatProgram p) 100
+      printFn ("program Core;\n\n" ++ formatted ++ "\n")
+    else
+      printFn (ToCore.Pretty.programToString p)
   | .error e => IO.println s!"Error: {e}"
 
 unsafe def main : List String → IO Unit
   | [path] => genFromFile path IO.println
   | ["boogie", path] => genCoreFromFile path IO.println
   | ["boogie", path, toFile] => genCoreFromFile path (IO.FS.writeFile toFile)
+  | ["core", "--official", path] => genCoreFromFile path IO.println (useOfficialPrinter := true)
+  | ["core", "--official", path, toFile] =>
+    genCoreFromFile path (IO.FS.writeFile toFile) (useOfficialPrinter := true)
   | ["core", path] => genCoreFromFile path IO.println
   | ["core", path, toFile] => genCoreFromFile path (IO.FS.writeFile toFile)
   /-| ["dir", path] => do
@@ -144,4 +156,4 @@ unsafe def main : List String → IO Unit
   | _ =>
     IO.println "Usage: ./verus-lean <input.json> [output.lean]\n\
       ./verus-lean boogie <input.json> [output.core.st]\n\
-      ./verus-lean core <input.json> [output.core.st]"
+      ./verus-lean core [--official] <input.json> [output.core.st]"

@@ -304,12 +304,13 @@ mutual
 
   Introduces bound variables of different types.
 
-  Note: The `BndX` analogue in Verus has lots of triggers, which we ignore.
+  Triggers are stored as a list of trigger groups, each group being a list
+  of expressions. Verus exports these in the `Quant` JSON node.
 -/
 inductive Bind where
   -- CC: Verus says this is a `VarBinders`, but for now, we say that each `let x := e` has a single variable binding
   | Let (v : String) (ty : Typ) (e : Exp)
-  | Quant (q : Quant) (vars : List (String × Typ))
+  | Quant (q : Quant) (vars : List (String × Typ)) (triggers : List (List Exp))
   | Lambda (vars : List (String × Typ))
   -- CC: Ignore choose for now
   -- | Choose ()
@@ -540,7 +541,7 @@ instance Decl.instVName : VName Decl where
 
 def Bind.idents : Bind → List (String × Typ)
   | .Let v ty _ => [(v, ty)]
-  | .Quant _ vars => vars
+  | .Quant _ vars _ => vars
   | .Lambda vars => vars
 
 mutual

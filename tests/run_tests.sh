@@ -58,6 +58,11 @@ Target:
     *.core.st runs Boole wrapping only
     (no target) wraps existing Core files under tests/BoogieFiles/*
 
+Environment variables:
+  VERUS_LEAN_OFFICIAL=1
+    Use Strata's official pretty-printer (Core.formatProgram) instead of
+    the local one when generating Core files.
+
 EOF
 }
 
@@ -326,7 +331,11 @@ run_verus_lean_jsons() {
   local cmd=("$VERUS_LEAN")
 
   if [ "$mode" = "boogie" ]; then
-    cmd+=("boogie")
+    if [ "${VERUS_LEAN_OFFICIAL:-}" = "1" ]; then
+      cmd+=("core" "--official")
+    else
+      cmd+=("boogie")
+    fi
   fi
 
   if [ -n "$target_json_path" ]; then

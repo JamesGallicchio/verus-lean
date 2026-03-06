@@ -772,11 +772,13 @@ partial def substExp (name : String) (rhs : Exp) : Exp → Exp
         .Bind (.Let v ty e') body
       else
         .Bind (.Let v ty e') (substExp name rhs body)
-    | .Quant q vars =>
+    | .Quant q vars trigs =>
+      -- Trigger exprs reference the quantifier's own bound variables, so they
+      -- are unaffected by substitution of external names.
       if vars.any (fun (v, _) => v == name) then
-        .Bind (.Quant q vars) body
+        .Bind (.Quant q vars trigs) body
       else
-        .Bind (.Quant q vars) (substExp name rhs body)
+        .Bind (.Quant q vars trigs) (substExp name rhs body)
     | .Lambda vars =>
       if vars.any (fun (v, _) => v == name) then
         .Bind (.Lambda vars) body
@@ -789,6 +791,18 @@ partial def substExp (name : String) (rhs : Exp) : Exp → Exp
 
 def substExps (subs : List (String × Exp)) (e : Exp) : Exp :=
   subs.foldl (fun acc (n, rhs) => substExp n rhs acc) e
+
+/-! ### Trigger LExpr encoding
+
+We encode quantifier trigger groups into the `trigger` slot of `LExpr.quant`
+using Strata's official trigger ops from `Core.Factory`:
+
+  • empty trigger list  → `LExpr.noTrigger ()` (= `bvar 0`)
+  • non-empty           → `Core.mkTriggerExpr groups`
+
+which builds an `Triggers.addGroup` / `TriggerGroup.addTrigger` tree that
+Strata's pretty-printer and verifier natively understand.
+-/
 
 mutual
 
@@ -818,6 +832,16 @@ private partial def comparisonPreludeToCore
     else
       castExprToBitInfoIfNeeded rhsInfo? targetInfo? r0
   return (argTy?, l, r)
+
+-- Translate each trigger Exp into a CoreExpr and encode the groups into a
+-- single LExpr tree suitable for the trigger slot of LExpr.quant.
+partial def mkTriggersLExpr (env : VarEnv) (boundVars : BoundEnv)
+    (trigs : List (List Exp)) : Except String CoreExpr := do
+  if trigs.isEmpty then
+    return LExpr.noTrigger ()
+  let groups ← trigs.mapM (fun group =>
+    group.mapM (fun e => expToCoreWithBound env boundVars none e))
+  return Core.mkTriggerExpr groups
 
 partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     (expected? : Option Typ) :
@@ -1111,7 +1135,7 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     | .Let v _ty rhs =>
       let body' := substExp v rhs body
       expToCoreWithBound env bound expected? body'
-    | .Quant q vars => do
+    | .Quant q vars trigs => do
       let bitInfo? := inferBitInfo env bound body
       let vars' :=
         match bitInfo? with
@@ -1126,12 +1150,21 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
         | none => vars
       let boundVars := vars'.reverse ++ bound
       let bodyExpr ← expToCoreWithBound env boundVars (some .Bool) body
+      -- Translate trigger groups into CoreExpr and encode for the trigger slot.
+      let trigExpr ← mkTriggersLExpr env boundVars trigs
       let qk := match q with
         | .Forall => Lambda.QuantifierKind.all
         | .Exists => Lambda.QuantifierKind.exist
-      let wrap := fun (_v, ty) acc =>
-        LExpr.quant () qk (some (monoTyOfTyp ty)) (LExpr.noTrigger ()) acc
-      return vars'.foldr wrap bodyExpr
+      -- Attach triggers to the innermost quantifier (last in `vars'`); outer
+      -- ones get `noTrigger`.  Strata's grammar expects trigger groups on a
+      -- single `forallT`/`existsT`, and `collectQuantChain` in the pretty-
+      -- printer will flatten the nested quants back into one multi-binder form.
+      let n := vars'.length
+      let indexed := (List.range n).zip vars'
+      let wrap := fun ((i : Nat), (_, ty)) acc =>
+        let trig := if i == n - 1 then trigExpr else LExpr.noTrigger ()
+        LExpr.quant () qk (some (monoTyOfTyp ty)) trig acc
+      return indexed.foldr wrap bodyExpr
     | .Lambda vars => do
       let boundVars := vars.reverse ++ bound
       let bodyExpr ← expToCoreWithBound env boundVars none body
@@ -1551,7 +1584,7 @@ private partial def expMentionsVar (target : String) : Exp → Bool
     expMentionsVar target c || expMentionsVar target t || expMentionsVar target f
   | .Bind (.Let _ _ e) body =>
     expMentionsVar target e || expMentionsVar target body
-  | .Bind (.Quant _ _) body =>
+  | .Bind (.Quant _ _ _) body =>
     expMentionsVar target body
   | .Bind (.Lambda _) body =>
     expMentionsVar target body
@@ -2877,29 +2910,66 @@ where
     go 0 bound
 
   -- Collect a maximal chain of same-kind quantifiers so we can print:
-  --   forall x: T, y: U :: body
+  --   forall x: T, y: U :: { trig } body
   -- instead of nested:
   --   forall x: T :: forall y: U :: body
   --
   -- `boundAcc` mirrors the bound-variable environment used for body printing.
   -- As we descend quantifiers, new binders are cons'ed to the front.
+  -- Returns (binders, bound', triggerExpr, body) where triggerExpr is from the
+  -- innermost quantifier in the chain.
   collectQuantChain
       (k : Lambda.QuantifierKind)
       (boundAcc : List String)
       (e : CoreExpr) :
-      (List (String × Option String) × List String × CoreExpr) :=
-    let rec go (boundNow : List String) (acc : List (String × Option String)) (cur : CoreExpr) :
-        (List (String × Option String) × List String × CoreExpr) :=
+      (List (String × Option String) × List String × CoreExpr × CoreExpr) :=
+    let rec go (boundNow : List String) (acc : List (String × Option String))
+        (lastTrig : CoreExpr) (cur : CoreExpr) :
+        (List (String × Option String) × List String × CoreExpr × CoreExpr) :=
       match cur with
-      | .quant _ k' ty _ body =>
+      | .quant _ k' ty trig body =>
         if k' == k then
           let name := s!"x{boundNow.length}"
           let tyStr := ty.map (fun mty => tyToString (.forAll [] mty))
-          go (name :: boundNow) (acc ++ [(name, tyStr)]) body
+          go (name :: boundNow) (acc ++ [(name, tyStr)]) trig body
         else
-          (acc, boundNow, cur)
-      | _ => (acc, boundNow, cur)
-    go boundAcc [] e
+          (acc, boundNow, lastTrig, cur)
+      | _ => (acc, boundNow, lastTrig, cur)
+    go boundAcc [] (LExpr.noTrigger ()) e
+
+  -- Decode the trigger tree produced by `Core.mkTriggerExpr`.  The encoding
+  -- uses Strata's official ops: `Triggers.addGroup`, `TriggerGroup.addTrigger`,
+  -- `Triggers.empty`, `TriggerGroup.empty`.
+  --
+  -- We mirror the logic of `extractTriggerPatterns` from Strata's ASTtoCST but
+  -- render each expression as text via our local `exprToStringWithBound`.
+  decodeTriggerTree (bound : List String) (e : CoreExpr) : List String :=
+    match e with
+    | .bvar _ 0 => []  -- noTrigger sentinel
+    | .app _ (.app _ (.op _ name _) arg) rest =>
+      match name.name with
+      | "TriggerGroup.addTrigger" =>
+        exprToStringWithBound bound arg :: decodeTriggerTree bound rest
+      | "Triggers.addGroup" =>
+        decodeTriggerTree bound arg ++ decodeTriggerTree bound rest
+      | _ => []  -- unknown op
+    | .op _ name _ =>
+      if name.name == "TriggerGroup.empty" || name.name == "Triggers.empty"
+      then []
+      else []
+    | _ => []
+
+  -- Render the trigger slot of the innermost quantifier to textual trigger
+  -- groups like `{ f(x0), g(x0, x1) }`.
+  -- Returns the empty string when there are no triggers.
+  triggerGroupsStr (bound : List String) (trigExpr : CoreExpr) : String :=
+    match trigExpr with
+    | .bvar _ 0 => ""  -- noTrigger
+    | _ =>
+      let exprs := decodeTriggerTree bound trigExpr
+      if exprs.isEmpty then ""
+      else
+        s!" \{ {String.intercalate ", " exprs} }\n  "
 
   exprToStringWithBound (bound : List String) (e : CoreExpr) : String :=
     match e with
@@ -2918,12 +2988,13 @@ else {exprToStringWithBound bound f})"
       let kw := match k with
         | .all => "forall"
         | .exist => "exists"
-      let (binders, bound', body) := collectQuantChain k bound e
+      let (binders, bound', trigExpr, body) := collectQuantChain k bound e
       let binderStrs := binders.map (fun (name, tyStr) =>
         match tyStr with
         | some ts => s!"{name}: {ts}"
         | none => name)
-      s!"{kw} {String.intercalate ", " binderStrs} :: {exprToStringWithBound bound' body}"
+      let trigStr := triggerGroupsStr bound' trigExpr
+      s!"{kw} {String.intercalate ", " binderStrs} ::{trigStr} {exprToStringWithBound bound' body}"
     | .abs _ _ _ =>
       -- Core textual syntax in this pipeline is first-order; lambda abstractions
       -- are currently emitted as an explicit placeholder symbol to avoid

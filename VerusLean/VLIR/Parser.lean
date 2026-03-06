@@ -788,7 +788,13 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 4
     let q ← Quant.fromJson arr[0]
     let binders ← VarBinder.typBindersFromJson arr[1]
-    return .Quant q binders
+    -- arr[2] = trigger groups: List (List TypedExpr)
+    let triggerGroups ← do
+      let trigArr ← arr[2].getArrM
+      trigArr.toList.mapM (fun groupJson => do
+        let groupArr ← groupJson.getArrM
+        groupArr.toList.mapM (fun exprJson => fromJsonSpanned exprJson Exp.fromJson))
+    return .Quant q binders triggerGroups
   | ("Let", obj) =>
     -- Most `Let` handling is done in `Exp.fromJson` where we desugar
     -- multi-binder lets into nested `Bind (Let ...)` nodes.
