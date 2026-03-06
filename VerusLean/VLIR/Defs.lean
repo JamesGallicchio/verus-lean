@@ -398,7 +398,7 @@ inductive Stm where
   | BreakOrContinue (label : Option String) (isBreak : Bool)
   | If (cond : Exp) (branch₁ : Stm) (branch₂ : Option Stm)
   | Loop (isForLoop : Bool) (label : Option String) (cond : Option (Stm × Exp)) (body : Stm)
-         (invariants : List LoopInvariant) -- missing decrease, typ_inv_vars
+         (invariants : List LoopInvariant) (decrease : List Exp) -- missing typ_inv_vars
   | OpenInvariant (stm : Stm)
   | ClosureInner (body : Stm) -- missing typ_inv_vars
   | Block (stms : List Stm)

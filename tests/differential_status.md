@@ -89,11 +89,13 @@ Additional counters (do not affect total):
   should not see it.
 - Affects: `verus-examples:modules`
 
-### `decreases` clauses dropped
-- Loop and recursive-function `decreases` annotations are omitted from Core output.
-- Affects: `vlir-tests:FindMax`, `vlir-tests:LoopSimple`, `vlir-tests:demo_while`,
-  `vlir-tests:demo_while_loop_isolation`, `verus-examples:statements`,
-  `verus-examples:guide/references`
+### `decreases` gaps
+- Loop measures are emitted as `// decreases (expr)` comments because 
+  Strata has no parser support for `decreases` yet. The AST is faithful.
+- Recursive-function `decreases` (`SpecFn.decreases`) are dropped in
+  `specFnToCore` because Strata Core currently has no function-level
+  termination measure syntax.
+- Affects: all loop tests, `verus-examples:modules` (recursive spec fns)
 
 ### `HasType` overflow guards dropped
 - Verus emits `HasType(U32, e)` assertions before arithmetic to check that the

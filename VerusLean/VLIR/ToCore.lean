@@ -1518,10 +1518,11 @@ partial def substStm (name : String) (rhs : Exp) : Stm → Stm
   | .BreakOrContinue label isBreak => .BreakOrContinue label isBreak
   | .If cond b1 b2 =>
     .If (substExp name rhs cond) (substStm name rhs b1) (b2.map (substStm name rhs))
-  | .Loop isFor label cond body invs =>
+  | .Loop isFor label cond body invs decrease =>
     let cond' := cond.map (fun (s, e) => (substStm name rhs s, substExp name rhs e))
     let invs' := invs.map (fun inv => { inv with body := substExp name rhs inv.body })
-    .Loop isFor label cond' (substStm name rhs body) invs'
+    let decrease' := decrease.map (substExp name rhs)
+    .Loop isFor label cond' (substStm name rhs body) invs' decrease'
   | .OpenInvariant stm => .OpenInvariant (substStm name rhs stm)
   | .ClosureInner body => .ClosureInner (substStm name rhs body)
   | .Block stms => .Block (stms.map (substStm name rhs))
@@ -1550,10 +1551,11 @@ partial def renameStmVar (src dst : String) : Stm → Stm
   | .BreakOrContinue label isBreak => .BreakOrContinue label isBreak
   | .If cond b1 b2 =>
     .If (substExp src (.Var dst) cond) (renameStmVar src dst b1) (b2.map (renameStmVar src dst))
-  | .Loop isFor label cond body invs =>
+  | .Loop isFor label cond body invs decrease =>
     let cond' := cond.map (fun (s, e) => (renameStmVar src dst s, substExp src (.Var dst) e))
     let invs' := invs.map (fun inv => { inv with body := substExp src (.Var dst) inv.body })
-    .Loop isFor label cond' (renameStmVar src dst body) invs'
+    let decrease' := decrease.map (substExp src (.Var dst))
+    .Loop isFor label cond' (renameStmVar src dst body) invs' decrease'
   | .OpenInvariant stm => .OpenInvariant (renameStmVar src dst stm)
   | .ClosureInner body => .ClosureInner (renameStmVar src dst body)
   | .Block stms => .Block (stms.map (renameStmVar src dst))
@@ -1624,13 +1626,14 @@ private partial def stmMentionsVar (target : String) : Stm → Bool
     expMentionsVar target cond ||
       stmMentionsVar target b1 ||
       (b2.map (stmMentionsVar target)).getD false
-  | .Loop _ _ cond body invs =>
+  | .Loop _ _ cond body invs decrease =>
     let condMentions :=
       match cond with
       | some (s, e) => stmMentionsVar target s || expMentionsVar target e
       | none => false
     let invMentions := invs.any (fun inv => expMentionsVar target inv.body)
-    condMentions || invMentions || stmMentionsVar target body
+    let decMentions := decrease.any (expMentionsVar target)
+    condMentions || invMentions || decMentions || stmMentionsVar target body
   | .Block stms =>
     stms.any (stmMentionsVar target)
 
@@ -1643,7 +1646,7 @@ partial def inlineTempsInStm : Stm → Stm
     -- Sequence-local temp inlining can drop branch-local temp chains that feed
     -- values used after the `if`, causing non-faithful translation.
     .If cond b1 b2
-  | .Loop isFor label cond body invs =>
+  | .Loop isFor label cond body invs decrease =>
     -- Keep `prefixStm` (the first component of `cond`) intact so loop lowering
     -- can substitute its temp assignments into `guardExpr`.
     let cond' := cond
@@ -1651,7 +1654,7 @@ partial def inlineTempsInStm : Stm → Stm
       match body with
       | .Block stms => .Block (inlineTemps stms)
       | _ => inlineTempsInStm body
-    .Loop isFor label cond' body' invs
+    .Loop isFor label cond' body' invs decrease
   | .OpenInvariant stm => .OpenInvariant (inlineTempsInStm stm)
   | .ClosureInner body => .ClosureInner (inlineTempsInStm body)
   | .Block stms => .Block (inlineTemps stms)
@@ -1954,7 +1957,7 @@ mutual
       | some s => stmToCore env projLayouts mutArgMap retVar? s
       | none => pure []
     return [mkIteStmt c thenStms elseStms]
-  | .Loop _isForLoop label cond body invs => do
+  | .Loop _isForLoop label cond body invs decrease => do
     -- Verus emits SST guard shapes depending on `loop_isolation` (default is `true`):
     --   1) `loop_isolation(false)`: `cond = none`, guard appears in body prefix
     --      as `if (!guard) { break; }`.
@@ -2020,9 +2023,18 @@ mutual
     -- Preserve loop invariants as exported by Verus SST.
     -- Do not drop/normalize for-loop ghost conjuncts here for faithful translation
     let invExprs ← loopInvariantToCore env invs
+    -- Translate decreases clause to a Core loop measure (must type as `int`).
+    -- Strata supports a single measure expression. When Verus supplies a
+    -- multi-element decreases tuple we use the first element, as lexicographic
+    -- ordering is not yet expressible in Core's single-measure slot.
+    let measureExpr? ← match decrease with
+      | [] => pure none
+      | e :: _ => do
+        let ce ← expToCore env none e
+        pure (some ce)
     let bodyBound := match loopLabel? with | some l => bindUnlabeledLoopControlTo l body' | none => body'
     let bodyStms ← stmToCore env projLayouts mutArgMap retVar? bodyBound
-    let loopStmt := mkLoop condExpr none invExprs bodyStms
+    let loopStmt := mkLoop condExpr measureExpr? invExprs bodyStms
     let stmt := match loopLabel? with | some l => mkBlockStmt l [loopStmt] | none => loopStmt
     return condStms ++ [stmt]
   | .OpenInvariant stm =>
@@ -2132,7 +2144,7 @@ partial def collectSetVars : Stm → List (String × Typ)
   | .DeadEnd stm => collectSetVars stm
   | .If _cond b1 b2 =>
     collectSetVars b1 ++ (b2.map collectSetVars).getD []
-  | .Loop _isForLoop _label cond body _invs =>
+  | .Loop _isForLoop _label cond body _invs _decrease =>
     let condVars := match cond with
       | some (s, _) => collectSetVars s
       | none => []
@@ -2237,6 +2249,12 @@ private def inferProcModifies (p : Core.Procedure) : List CoreIdent :=
 def specFnToCore (emitBody : Bool) (f : SpecFn) : Except String Core.Function := do
   let env := envFromDecls f.inputs
   let typeArgs := (typeArgsFromDecls f.inputs ++ typeArgsFromTyps [f.returnType]).eraseDups
+  -- `SpecFn.decreases` is preserved in VLIR, but currently dropped here.
+  -- Strata Core supports loop-level measures in the AST, but has no
+  -- function-level `decreases` slot/syntax yet.
+  -- TODO(strata): add function-level termination-measure support so
+  -- recursive spec-fn decreases clauses can be emitted faithfully.
+  let _ := f.decreases
   let body ←
     if emitBody then
       expToCore env (some f.returnType) f.body
@@ -3105,11 +3123,15 @@ partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
     else
       let elseLines := stmtsToLines (indent + 1) e
       [head] ++ thenLines ++ [pad ++ "} else {"] ++ elseLines ++ [pad ++ "}"]
-  | .loop guard _ invs body _ =>
+  | .loop guard measure invs body _ =>
     let invLine := invs.map (fun i => s!"{pad}  invariant ({exprToString i})")
+    -- Strata Core's parser has no `decreases` keyword; emit as a comment for now to pass regression tests.
+    let measureLine := match measure with
+      | some m => [s!"{pad}  // decreases ({exprToString m})"]
+      | none => []
     let head := s!"{pad}while ({exprToString guard})"
     let bodyLines := stmtsToLines (indent + 1) body
-    [head] ++ invLine ++ [pad ++ "{"] ++ bodyLines ++ [pad ++ "}"]
+    [head] ++ invLine ++ measureLine ++ [pad ++ "{"] ++ bodyLines ++ [pad ++ "}"]
   | .goto lbl _ =>
     [s!"{pad}goto {lbl};"]
   | .funcDecl _ _ =>

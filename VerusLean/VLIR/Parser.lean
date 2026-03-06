@@ -1269,7 +1269,13 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     let body ← fromJsonSpanned (← obj.getObjValM "body") Stm.fromJson
     let invsArr ← obj.getArrUnderKeyM "invs"
     let invs ← invsArr.mapM LoopInvariant.fromJson
-    return .Loop isForLoop label cond body invs.toList
+    let decrease ←
+      match obj.getObjVal? "decrease" with
+      | .error _ => pure []
+      | .ok .null => pure []
+      | .ok (.arr arr) => arr.mapM (fun j => fromJsonSpanned j Exp.fromJson) |>.map (·.toList)
+      | .ok j => throw s!"expected loop decrease array, got: {j.compress}"
+    return .Loop isForLoop label cond body invs.toList decrease
 
   | ("OpenInvariant", obj) =>
     let stm ← fromJsonSpanned obj Stm.fromJson
@@ -1387,6 +1393,8 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
     -- let termCheckKind ← j.getObjValByPathM ["axioms", "spec_axioms", "termination_check", "post_condition", "kind"]
     -- if termCheckKind != "DecreasesImplicitLemma" then
     let termCheck : Json ← j.getObjValByPath ["axioms", "spec_axioms", "termination_check"]
+    -- Keep recursive-function decreases in VLIR even though current Core lowering
+    -- cannot emit function-level measures yet (documented in `specFnToCore`).
     let decreases ← fromJsonSpanned (← termCheck.getObjValM "body") Stm.fromJson
     return some <| SpecFn.mk name args returnType decreases bodyExp
   catch _ =>

@@ -1,6 +1,6 @@
 # verus-lean: A Verus-Lean connection
 
-The Lean backend to a [verus fork](https://github.com/ccodel/verus)
+The Lean backend to a [verus fork](https://github.com/ccodel/verus/tree/boogie)
 that allows for the export of verus definitions and verification conditions to Lean.
 
 This repository now supports two main translation paths:
