@@ -315,7 +315,7 @@ partial def Typ.fromJson (j : Json) : m Typ := do
   | .ok "ISize" => return .SInt archWordBitWidth
   | .ok _ => throw s!"unsupported primitive type string: {j}"
   | .error _ =>
-    match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam", "Projection", "FnDef"] with
+    match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam", "Projection", "FnDef", "Float"] with
     | ("Primitive", obj) =>
       let t ← obj.getArrM
       match t[0]? with
@@ -452,6 +452,9 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
       let fnPath ← pathedNameFromJson arr[0]
       return .AirNamed s!"Unsupported.FnDef.{fnPath}"
+    | ("Float", obj) =>
+      -- VLIR does not model floats yet; preserve width as a named placeholder.
+      return .AirNamed s!"Unsupported.Float{← obj.getNatM}"
 
     | _ => throw s!"unsupported primitive type object: {j}"
 
@@ -477,6 +480,19 @@ def Mode.fromJson (j : Json) : m Mode := do
   | "Proof" => return .Proof
   | "Exec"  => return .Exec
   | str => throw s!"[Mode.fromJson?]: Expected one of \{ Spec, Proof, Exec }, got {str}"
+
+/--
+  Binary-op auxiliary payloads (overflow/div0/bitshift behavior) are serialized
+  differently across Verus versions. VLIR currently stores only a coarse mode,
+  so convert behavior payloads to a conservative mode marker.
+-/
+def opBehaviorToMode (j : Json) : Mode :=
+  match j.getStr? with
+  | .ok "Spec" => .Spec
+  | .ok "Proof" => .Proof
+  | .ok "Exec" => .Exec
+  | .ok _ => .Exec
+  | .error _ => .Exec
 
 def AssertQueryMode.fromJson (j : Json) : m AssertQueryMode := do
   match ← j.getStrM with
@@ -507,7 +523,7 @@ def IntRange.fromJson (j : Json) : m IntRange := do
     -- throw s!"Unexpected IntRange: {j}"
 
 def Const.fromJson (j : Json) : m Const := do
-  match ← j["Bool", "Int", "StrSlice", "Char"] with
+  match ← j["Bool", "Int", "StrSlice", "Char", "Float64", "Float32"] with
   | ("Bool", v) => return Const.Bool <| ← v.getBoolM
   | ("Int", v) =>
     -- Ints are serialized as an array, with the first element the sign enum
@@ -535,8 +551,7 @@ def Const.fromJson (j : Json) : m Const := do
         result := result + v * weight
         weight := weight * base
       return result
-    -- Verus bigint sign encoding has varied across snapshots:
-    -- keep both legacy (`2`) and explicit-negative (`-1`) forms.
+    -- Current Verus bigint sign encoding uses {-1, 0, 1}.
     match sign with
     | 0 =>
       -- no sign → zero
@@ -546,12 +561,12 @@ def Const.fromJson (j : Json) : m Const := do
       let nArr ← n.getArrM
       let val ← reassembleLimbs nArr
       return Const.Int <| Int.ofNat val
-    | 2 | -1 =>
+    | -1 =>
       -- negative number
       let nArr ← n.getArrM
       let val ← reassembleLimbs nArr
       return Const.Int <| -(Int.ofNat val)
-    | _ => throw "[Const.fromJson?]: Expected an Int sign of -1, 0, 1, or 2"
+    | _ => throw "[Const.fromJson?]: Expected an Int sign of -1, 0, or 1"
   | ("StrSlice", v) => return .StrSlice <| ← v.getStrM
   | ("Char", v) =>
     match v.getStr? with
@@ -559,9 +574,15 @@ def Const.fromJson (j : Json) : m Const := do
       match s.toList with
       | [c] => return .Char c
       | _ => throw s!"expected char literal as one-character string, got {s}"
-    | .error _ =>
-      -- Fallback for exports that encode chars as numeric code points.
-      return .Char (Char.ofNat (← v.getNatM))
+    | .error _ => throw s!"expected char literal as one-character string, got {v}"
+  | ("Float64", v) =>
+    -- Verus exports float literals as raw IEEE-754 bit-patterns.
+    -- VLIR has no dedicated float literal node yet, so keep the payload as an
+    -- integer constant to avoid parse failure and preserve the bit pattern.
+    return .Int (Int.ofNat (← v.getNatM))
+  | ("Float32", v) =>
+    -- Same representation strategy as Float64.
+    return .Int (Int.ofNat (← v.getNatM))
   | _ => throw "[Const.fromJson?]: Unexpected match"
 
 def Bitwise.fromJson (j : Json) : m BitwiseOp :=
@@ -571,8 +592,7 @@ def Bitwise.fromJson (j : Json) : m BitwiseOp :=
   | .ok "BitOr"  => return .BitOr
   | .ok str => throw s!"[Bitwise.fromJson?]: Expected one of \{ BitXor, BitAnd, BitOr }, got {str}"
   | .error _ => do
-    -- Try one of the shifts instead
-    -- They are Json objects that store the width (and sign extension)
+    -- Shift operators are encoded as objects carrying width/sign-extension data.
     match ← j["Shr", "Shl"] with
     | ("Shr", obj) => do
       let width ← widthFromJson obj
@@ -592,7 +612,7 @@ def ArithOp.fromJson (j : Json) : m ArithOp := do
   | "Mul"          => return .Mul
   | "EuclideanDiv" => return .EuclideanDiv
   | "EuclideanMod" => return .EuclideanMod
-  | s => throw s!"[ArithOp.fromJson?]: Expected one of \{ Add, Sub, Mul, Div, Mod }, got {s}"
+  | s => throw s!"[ArithOp.fromJson?]: Expected one of \{ Add, Sub, Mul, EuclideanDiv, EuclideanMod }, got {s}"
 
 def InequalityOp.fromJson (j : Json) : m InequalityOp := do
   match ← j.getStrM with
@@ -719,17 +739,20 @@ def BinaryOp.fromJson (j : Json) : m BinaryOp :=
     | ("Eq", obj)         => return .Eq (← Mode.fromJson obj)
     | ("Inequality", obj) => return .Inequality (← InequalityOp.fromJson obj)
     | ("Bitwise", obj) =>
-      -- Object under "Bitwise" should be a two-element array with an op and a mode
+      -- Current Verus encoding: `[bitwise_op, behavior]`.
       let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
       let op ← Bitwise.fromJson arr[0]
-      let mode ← Mode.fromJson arr[1]
+      let mode := opBehaviorToMode arr[1]
       return .Bitwise op mode
     | ("Arith", obj) =>
-      -- Object under "Arith" should be a two-element array with an op and a mode
-      let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
-      let op ← ArithOp.fromJson arr[0]
-      let mode ← Mode.fromJson arr[1]
-      return .Arith op mode
+      -- Current Verus encoding: `{arith_op: behavior}`.
+      match obj.getFirstVal ["Add", "Sub", "Mul", "EuclideanDiv", "EuclideanMod"] with
+      | .ok (opName, payload) =>
+        let op ← ArithOp.fromJson (.str opName)
+        let mode := opBehaviorToMode payload
+        return .Arith op mode
+      | .error _ =>
+        throw s!"[BinaryOp.fromJson?]: expected Arith payload as object keyed by op name, got {obj}"
     | ("HeightCompare", obj) =>
       let strictlyLt ← obj.getBoolUnderKeyM "strictly_lt"
       return .Inequality (if strictlyLt then .Lt else .Le)
@@ -754,10 +777,23 @@ def CallFun.fromJson (j : Json) : m CallFun := do
     return .Fun <| String.toName <| ← obj.getStrM
   | s => throw s!"unexpected {s}"
 
+private def decodeVarNameJson (j : Json) : m String := do
+  let ⟨arr, _⟩ ← j.getArrWithSizeGeM 2
+  let ident ← arr[0].getStrM
+  match ident with
+  | "tmp%" => return s!"tmp{← arr[1].getNatUnderKeyM "VirTemp"}"
+  | "tmp%%" =>
+    -- Renumbered temps appear in some exports as `tmp%%` with `VirRenumbered`.
+    match arr[1].getObjVal? "VirRenumbered" with
+    | .ok renObj => return s!"tmp_ren{← renObj.getNatUnderKeyM "id"}"
+    | .error _ => return "tmp_ren"
+  | _ => return ident
+
 def VarBinder.fromJson (j : Json) (key : String := "typ") : m (String × Typ) := do
-  -- The parameter's name is the 0th index (the "VirParam" is the 1st index)
-  let ⟨arr, _⟩ ← j.getArrUnderKeyWithSizeGeM "name" 1
-  let name ← arr[0].getStrM
+  -- Decode binder names through `Var.fromJson` so renumbered temporaries like
+  -- `["tmp%%", {"VirRenumbered": ...}]` stay consistent with variable uses.
+  let nameJson ← j.getObjValM "name"
+  let name ← decodeVarNameJson nameJson
   let typ ← Typ.fromJson <| ← j.getObjValM key
   return (name, typ)
 
@@ -766,24 +802,14 @@ def VarBinder.typBindersFromJson (j : Json) : m (List (String × Typ)) := do
   arr.toList.mapM (VarBinder.fromJson · "a")
 
 def Var.fromJson (j : Json) : m String := do
-  let ⟨arr, _⟩ ← j.getArrWithSizeGeM 2
-  let ident ← arr[0].getStrM
-  match ident with
-  | "tmp%" => return s!"tmp{← arr[1].getNatUnderKeyM "VirTemp"}"
-  | "tmp%%" =>
-    -- Renumbered temps appear in some exports as `tmp%%` with `VirRenumbered`.
-    match arr[1].getObjVal? "VirRenumbered" with
-    | .ok renObj =>
-      return s!"tmp_ren{← renObj.getNatUnderKeyM "id"}"
-    | .error _ => return "tmp_ren"
-  | _ => return ident
+  decodeVarNameJson j
 
 
 mutual /- {Bind, Exp}.fromJson -/
 
 partial def Bind.fromJson (j : Json) : VParser Bind := do
   let obj ← xJsonFromSpanned j
-  match ← obj["Quant", "Let", "Lambda", "Choose"] with
+  match ← obj["Quant", "Lambda", "Choose"] with
   | ("Quant", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 4
     let q ← Quant.fromJson arr[0]
@@ -795,33 +821,6 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
         let groupArr ← groupJson.getArrM
         groupArr.toList.mapM (fun exprJson => fromJsonSpanned exprJson Exp.fromJson))
     return .Quant q binders triggerGroups
-  | ("Let", obj) =>
-    -- Most `Let` handling is done in `Exp.fromJson` where we desugar
-    -- multi-binder lets into nested `Bind (Let ...)` nodes.
-    -- This branch is only a compatibility fallback for single-binder lets.
-    -- TODO: centralize all `Let` parsing in one place and remove this fallback.
-    /-
-      The type of the expression is hidden in the `SpannedTyped<ExpX>`,
-      so we need to parse the type carefully/separately.
-    -/
-    let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 1
-    let binders ← arr.mapM (fun v => do
-      let ⟨nameArr, _⟩ ← v.getArrUnderKeyWithSizeGeM "name" 1
-      let name ← nameArr[0].getStrM
-      let expObj ← v.getObjValM "a"
-      -- Get the type manually
-      let typ ← Typ.fromJson <| ← expObj.getObjValM "typ"
-      let exp ← fromJsonSpanned expObj Exp.fromJson
-      return (name, typ, exp))
-    if hb : binders.size ≥ 1 then
-      let (name, typ, exp) := binders[0]
-      if binders.size > 1 then
-        -- Avoid silently dropping binders in this fallback path.
-        throw s!"Bind.fromJson fallback received multi-binder let; expected single binder"
-      return .Let name typ exp
-    else
-      throw s!"Expected at least one binder"
-
   | ("Lambda", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
     let binders ← VarBinder.typBindersFromJson arr[0]
@@ -1016,8 +1015,8 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
       let mut parsed : List (String × Typ × Exp) := []
       let mut seen : List (String × Typ) := []
       for v in binderArr.toList do
-        let ⟨nameArr, _⟩ ← v.getArrUnderKeyWithSizeGeM "name" 1
-        let name ← nameArr[0].getStrM
+        let nameJson ← v.getObjValM "name"
+        let name ← decodeVarNameJson nameJson
         let expObj ← v.getObjValM "a"
         let typ ← Typ.fromJson <| ← expObj.getObjValM "typ"
         -- Later let-binders may reference earlier ones.
@@ -1047,12 +1046,9 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     let scrutineeObj ← obj.getObjValM "scrutinee"
     let scrutinee ← fromJsonSpanned scrutineeObj Exp.fromJson
     let typ ← Typ.fromJson <| ← scrutineeObj.getObjValM "typ"
-    -- dbg_trace s!"MatchBlock scrutinee: {scrutinee}, type: {typ}"
-    let bodyObj ← obj.getObjValM "body"
-    -- dbg_trace s!"MatchBlock bodyObj"
+    let bodyObj ← obj.getObjValM "simplified_body"
     -- let variant ← bodyObj.getStrUnderKeyM "variant"
     let body ← fromJsonSpanned bodyObj Exp.fromJson
-    -- dbg_trace s!"MatchBlock body: {body}"
     return .MatchBlock (scrutinee, typ) body
 
   | s => throw s!"[ExpX.fromJson?]: Expected an Exp branch string, got {s}"
@@ -1135,12 +1131,7 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
   | ("Call", obj) =>
     let fnName ← pathedNameFromNameJson obj (nameKey := "fun")
     let typArgsArr ← obj.getArrUnderKeyM "typ_args"
-    -- In current Verus JSON, type args may be either wrapped (`{x: ...}`) or
-    -- already unwrapped type JSON.
-    let typArgs ← typArgsArr.mapM (fun tj => do
-      match tj.getObjVal? "x" with
-      | .ok v => Typ.fromJson v
-      | .error _ => Typ.fromJson tj)
+    let typArgs ← typArgsArr.mapM Typ.fromJson
     let argsArr ← obj.getArrUnderKeyM "args"
     let argsParsed ← argsArr.mapM (fun arg => do
       let e ← fromJsonSpanned arg Exp.fromJson

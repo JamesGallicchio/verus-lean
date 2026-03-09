@@ -256,8 +256,6 @@ run_verus_export() {
   local base="$3"
   local out_base="$4"
   local rc
-  local out_json
-  local out_json_alt
   local out_json_final
   local out_json_tmp
   local out_json_alt_tmp
@@ -280,8 +278,6 @@ run_verus_export() {
 
   mkdir -p "$out_dir"
   tmp_dir="$(mktemp -d "$out_dir/.export_${base}.XXXXXX")"
-  out_json="$out_dir/${base}.json"
-  out_json_alt="$out_dir/${out_base}.json"
   out_json_final="$out_dir/${out_base}.json"
   out_json_tmp="$tmp_dir/${base}.json"
   out_json_alt_tmp="$tmp_dir/${out_base}.json"
@@ -289,17 +285,13 @@ run_verus_export() {
   run_cmd_quiet_in_dir "$tmp_dir" "$VERUS_BIN" "${flags[@]-}" "$file"
   rc=$?
   set -e
-  if [ $rc -ne 0 ]; then
-    failures+=("$base ($label)")
+  if [ $rc -ne 0 ] && $verbose; then
+    echo "Verus exited non-zero for $base ($label); continuing if JSON was produced."
   fi
   if [ -f "$out_json_alt_tmp" ]; then
     mv -f "$out_json_alt_tmp" "$out_json_final"
   elif [ -f "$out_json_tmp" ]; then
     mv -f "$out_json_tmp" "$out_json_final"
-  elif [ -f "$out_json_alt" ]; then
-    :
-  elif [ -f "$out_json" ]; then
-    :
   else
     if [ "$mode" = "boogie" ]; then
       failures+=("$base (core json missing)")
@@ -394,9 +386,6 @@ run_verus_lean_jsons() {
           continue
         fi
       fi
-    fi
-    if [ -z "$target_json_path" ] && [ -z "$target_rs_path" ] && [[ "$base" == serialized_* ]]; then
-      continue
     fi
     any_json=true
     echo "$label: $base"
@@ -670,7 +659,7 @@ if $run_verus; then
     done
 
     if [ ${#failures[@]} -gt 0 ]; then
-      echo "Verus export issues: ${failures[*]}"
+      echo "Verus export failures (missing JSON): ${failures[*]}"
     fi
   )
 fi
@@ -746,9 +735,6 @@ if $run_boole; then
           continue
         fi
       fi
-      if [[ "$base" == serialized_* ]]; then
-        continue
-      fi
     fi
     any=true
     if [ "$custom_out_mode" = "boole" ]; then
@@ -821,9 +807,6 @@ if $run_verify; then
               continue
             fi
           fi
-        fi
-        if [[ "$(basename "$file")" == serialized_* ]]; then
-          continue
         fi
         any=true
         (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$file")

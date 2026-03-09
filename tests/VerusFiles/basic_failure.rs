@@ -1,7 +1,5 @@
 // rust_verify/tests/example.rs expect-failures
 #![allow(unused_imports)]
-use builtin::*;
-use builtin_macros::*;
 use vstd::prelude::*;
 
 verus! {

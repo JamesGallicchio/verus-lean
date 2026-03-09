@@ -17,6 +17,16 @@ namespace ToCore
 open Core
 open Lambda
 
+-- Strata now uses `Unit` metadata for core identifiers/datatypes.
+abbrev Visibility := Unit
+
+namespace CoreIdent
+
+-- Backward-compat constructor used throughout this file.
+def unres (s : String) : CoreIdent := (s : CoreIdent)
+
+end CoreIdent
+
 abbrev CoreExpr := Core.Expression.Expr
 abbrev VarEnv := Std.HashMap String Typ -- global/free variables
 abbrev BoundEnv := List (String × Typ) -- bound variables introduced by binders in quantifiers, lets, etc.
@@ -122,7 +132,13 @@ def enumCtorIdentOf (dt : Ident) (variant : String) : CoreIdent :=
   CoreIdent.unres (enumCtorNameOf dt variant)
 
 def fieldAccessorNameOf (field : String) : String :=
-  sanitizeIdent field
+  match field.toNat? with
+  | some i =>
+    -- Tuple-style struct fields are serialized as `"0"`, `"1"`, ...
+    -- Prefix with `_` so names stay legal and distinct (`_0`, `_1`, ...).
+    s!"_{i}"
+  | none =>
+    sanitizeIdent field
 
 def fieldAccessorIdentOf (field : String) : CoreIdent :=
   CoreIdent.unres (fieldAccessorNameOf field)
@@ -187,8 +203,9 @@ def mkAssumeStmt (label : String) (e : CoreExpr) : Core.Statement :=
 def mkCallStmt (lhs : List CoreIdent) (pname : String) (args : List CoreExpr) : Core.Statement :=
   Core.Statement.call lhs pname args emptyStmtMeta
 
-def mkGotoStmt (label : String) : Core.Statement :=
-  Imperative.Stmt.goto label emptyStmtMeta
+-- Core now models labeled jumps as `exit <label>`.
+def mkExitToLabelStmt (label : String) : Core.Statement :=
+  Imperative.Stmt.exit (some label) emptyStmtMeta
 
 def mkIteStmt (cond : CoreExpr) (thenb elseb : List Core.Statement) : Core.Statement :=
   Imperative.Stmt.ite cond thenb elseb emptyStmtMeta
@@ -1161,14 +1178,14 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
       -- printer will flatten the nested quants back into one multi-binder form.
       let n := vars'.length
       let indexed := (List.range n).zip vars'
-      let wrap := fun ((i : Nat), (_, ty)) acc =>
+      let wrap := fun ((i : Nat), (v, ty)) acc =>
         let trig := if i == n - 1 then trigExpr else LExpr.noTrigger ()
-        LExpr.quant () qk (some (monoTyOfTyp ty)) trig acc
+        LExpr.quant () qk (sanitizeVarName v) (some (monoTyOfTyp ty)) trig acc
       return indexed.foldr wrap bodyExpr
     | .Lambda vars => do
       let boundVars := vars.reverse ++ bound
       let bodyExpr ← expToCoreWithBound env boundVars none body
-      let wrap := fun (_v, ty) acc => LExpr.abs () (some (monoTyOfTyp ty)) acc
+      let wrap := fun (v, ty) acc => LExpr.abs () (sanitizeVarName v) (some (monoTyOfTyp ty)) acc
       return vars.foldr wrap bodyExpr
   | .MatchBlock _scrut body =>
     expToCoreWithBound env bound expected? body
@@ -1493,7 +1510,11 @@ def extractLoopGuardFromBody : Stm → Option (Exp × Stm)
   -- TODO: continue-based guards, non-empty else branches,
   -- and guard checks that are not the first non-temp statement.
   | .Block stms =>
-    let (subs, rest) := splitGuardTempPrefix stms
+    -- Newer Verus SST can wrap the guard-temp prefix in an extra sequence-only
+    -- `Block` node. Flatten those wrappers so the prefix matcher still sees:
+    --   [tmp-prefix]* ; if (!guard) { break; } ; tail
+    let linear := (flattenSeqBlocks stms).map stripSingletonBlocks
+    let (subs, rest) := splitGuardTempPrefix linear
     match rest with
     | s :: tail =>
       match breakGuardFromPrefix s with
@@ -1945,7 +1966,7 @@ mutual
     | _, _ => return []
   | .BreakOrContinue label isBreak =>
     match label with
-    | some l => return [mkGotoStmt (sanitizeIdent l)]
+    | some l => return [mkExitToLabelStmt (sanitizeIdent l)]
     | none =>
       -- Unlabeled break/continue must be eliminated by structured loop
       -- reconstruction; emitting synthetic goto labels is not type-safe in Core.
@@ -2217,8 +2238,9 @@ private partial def stmtModifiedVars : Core.Statement → List CoreIdent
   | .block _ ss _ => (ss.flatMap stmtModifiedVars).eraseDups
   | .ite _ t e _ => (t.flatMap stmtModifiedVars ++ e.flatMap stmtModifiedVars).eraseDups
   | .loop _ _ _ body _ => (body.flatMap stmtModifiedVars).eraseDups
-  | .goto _ _ => []
+  | .exit _ _ => []
   | .funcDecl _ _ => []
+  | .typeDecl _ _ => []
 
 private def stmtsModifiedVars (ss : List Core.Statement) : List CoreIdent :=
   (ss.flatMap stmtModifiedVars).eraseDups
@@ -2232,8 +2254,9 @@ private partial def stmtDeclOnlyLocals : Core.Statement → List CoreIdent
   | .block _ ss _ => (ss.flatMap stmtDeclOnlyLocals).eraseDups
   | .ite _ t e _ => (t.flatMap stmtDeclOnlyLocals ++ e.flatMap stmtDeclOnlyLocals).eraseDups
   | .loop _ _ _ body _ => (body.flatMap stmtDeclOnlyLocals).eraseDups
-  | .goto _ _ => []
+  | .exit _ _ => []
   | .funcDecl _ _ => []
+  | .typeDecl _ _ => []
 
 private def stmtsDeclOnlyLocals (ss : List Core.Statement) : List CoreIdent :=
   (ss.flatMap stmtDeclOnlyLocals).eraseDups
@@ -2255,17 +2278,17 @@ def specFnToCore (emitBody : Bool) (f : SpecFn) : Except String Core.Function :=
   -- TODO(strata): add function-level termination-measure support so
   -- recursive spec-fn decreases clauses can be emitted faithfully.
   let _ := f.decreases
-  let body ←
+  let body? ←
     if emitBody then
-      expToCore env (some f.returnType) f.body
+      some <$> expToCore env (some f.returnType) f.body
     else
-      pure (LExpr.boolConst () true : CoreExpr)
+      pure none
   return {
     name := identToCore f.name
     typeArgs := typeArgs
     inputs := signatureOf f.inputs
     output := monoTyOfTyp f.returnType
-    body := if emitBody then some body else none
+    body := body?
   }
 
 def proofFnToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
@@ -2451,7 +2474,7 @@ def enumToCoreTypeDecl (e : Enum) : Except String Core.TypeDecl := do
   | [] =>
     -- Opaque/imported enum shards can serialize with zero variants.
     -- Lower these to an abstract type constructor so references remain well-formed.
-    return .con { name := dtName, numargs := typeArgs.length }
+    return .con { name := dtName, params := typeArgs }
   | c :: cs =>
     let d : LDatatype Visibility :=
       { name := dtName
@@ -2565,12 +2588,13 @@ private partial def stmtTouchedVarsExcludingDeclOnly : Core.Statement → List S
     let measureRefs := match measure with | some m => exprVarNames m | none => []
     let invariantRefs := joinRefs <| invariant.map exprVarNames
     joinRefs [exprVarNames guard, measureRefs, invariantRefs, joinRefs (body.map stmtTouchedVarsExcludingDeclOnly)]
-  | .goto _ _ => []
+  | .exit _ _ => []
   | .funcDecl decl _ =>
     let bodyRefs := (decl.body.map exprVarNames).getD []
     let axiomRefs := joinRefs <| decl.axioms.map exprVarNames
     let preRefs := joinRefs <| decl.preconditions.map (fun p => exprVarNames p.expr)
     joinRefs [bodyRefs, axiomRefs, preRefs]
+  | .typeDecl _ _ => []
 
 private def stmtsTouchedVarsExcludingDeclOnly (ss : List Core.Statement) : List String :=
   joinRefs <| ss.map stmtTouchedVarsExcludingDeclOnly
@@ -2593,8 +2617,9 @@ private partial def pruneUnusedDeclOnlyStmt
     some (.ite cond (t.filterMap (pruneUnusedDeclOnlyStmt usedVars)) (e.filterMap (pruneUnusedDeclOnlyStmt usedVars)) md)
   | .loop guard measure invariant body md =>
     some (.loop guard measure invariant (body.filterMap (pruneUnusedDeclOnlyStmt usedVars)) md)
-  | .goto l md => some (.goto l md)
+  | .exit l md => some (.exit l md)
   | .funcDecl decl md => some (.funcDecl decl md)
+  | .typeDecl tc md => some (.typeDecl tc md)
 
 -- Remove only declaration-only locals that are not referenced anywhere else in
 -- the same procedure (body/spec/call destinations). This is conservative:
@@ -2644,8 +2669,9 @@ private partial def stmtRefsBy
     let measureRefs := match measure with | some m => exprRefs m | none => []
     let invariantRefs := joinRefs <| invariant.map exprRefs
     joinRefs [exprRefs guard, measureRefs, invariantRefs, joinRefs (body.map (stmtRefsBy exprRefs callNameRefs))]
-  | .goto _ _ => []
+  | .exit _ _ => []
   | .funcDecl _ _ => []
+  | .typeDecl _ _ => []
 
 private def stmtsRefsBy
     (exprRefs : CoreExpr → List String)
@@ -2945,11 +2971,11 @@ where
         (lastTrig : CoreExpr) (cur : CoreExpr) :
         (List (String × Option String) × List String × CoreExpr × CoreExpr) :=
       match cur with
-      | .quant _ k' ty trig body =>
+      | .quant _ k' name ty trig body =>
         if k' == k then
-          let name := s!"x{boundNow.length}"
+          let binderName := if name.isEmpty then s!"x{boundNow.length}" else name
           let tyStr := ty.map (fun mty => tyToString (.forAll [] mty))
-          go (name :: boundNow) (acc ++ [(name, tyStr)]) trig body
+          go (binderName :: boundNow) (acc ++ [(binderName, tyStr)]) trig body
         else
           (acc, boundNow, lastTrig, cur)
       | _ => (acc, boundNow, lastTrig, cur)
@@ -3002,7 +3028,7 @@ where
     | .ite _ c t f =>
       s!"(if {exprToStringWithBound bound c} then {exprToStringWithBound bound t} \
 else {exprToStringWithBound bound f})"
-    | .quant _ k _ _ _ =>
+    | .quant _ k _ _ _ _ =>
       let kw := match k with
         | .all => "forall"
         | .exist => "exists"
@@ -3013,7 +3039,7 @@ else {exprToStringWithBound bound f})"
         | none => name)
       let trigStr := triggerGroupsStr bound' trigExpr
       s!"{kw} {String.intercalate ", " binderStrs} ::{trigStr} {exprToStringWithBound bound' body}"
-    | .abs _ _ _ =>
+    | .abs _ _ _ _ =>
       -- Core textual syntax in this pipeline is first-order; lambda abstractions
       -- are currently emitted as an explicit placeholder symbol to avoid
       -- unparsable Lean-format output.
@@ -3132,11 +3158,15 @@ partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
     let head := s!"{pad}while ({exprToString guard})"
     let bodyLines := stmtsToLines (indent + 1) body
     [head] ++ invLine ++ measureLine ++ [pad ++ "{"] ++ bodyLines ++ [pad ++ "}"]
-  | .goto lbl _ =>
-    [s!"{pad}goto {lbl};"]
+  | .exit lbl _ =>
+    match lbl with
+    | some l => [s!"{pad}exit {l};"]
+    | none => [s!"{pad}exit;"]
   | .funcDecl _ _ =>
     -- Current VLIR→Core lowering path does not emit statement-level function declarations.
     [s!"{pad}/* unsupported: statement-level function declaration */"]
+  | .typeDecl _ _ =>
+    [s!"{pad}/* unsupported: statement-level type declaration */"]
 end
 
 def typeArgsToString (args : List String) : String :=

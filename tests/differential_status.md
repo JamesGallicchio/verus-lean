@@ -9,32 +9,35 @@ Solver success is **not** used to classify faithfulness.
 ## Data Sources
 - Full run:
   - command: `./tests/regress_examples.sh --all-suites`
-  - run id: `20260305_150613`
+  - run id: `20260309_102607`
   - solver: `cvc5`
 
 ## Raw Regression Summary (Full Run)
-Total cases: **112**
+Total cases: **117**
 
-Primary statuses (sum to 112):
+Primary statuses (sum to 117):
+- export failures: 1
 - expected empty exports: 1
 - translate failures: 0
 - strata parse failures: 0
-- strata type failures: 79
-- verify failures: 14
-- verify success: 17
+- strata type failures: 83
+- verify failures: 15
+- verify success: 16
 - expected mismatches: 1
 
 Additional counters (do not affect total):
-- export failures: 0
-- mismatch (Verus pass, Strata fail): 9
+- mismatch (Verus pass, Strata fail): 10
 - mismatch (Verus fail, Strata pass): 0
+
+Current export failures in the full run:
+- `rust-verify-tests:basic-fe9539cec5a28303-test_ret/test`
 
 ## Translation Quality Labels
 - `passing`: behavior aligns with expectation and translation is faithful.
 - `faithful but different from Verus output`: translation is faithful, but Verus/Strata outcomes differ or Strata lacks support.
 - `not faithful translation`: translation currently drops/changes important semantics compared to source-level intent.
 
-## passing (21)
+## passing (20)
 - `vlir-tests:datatypes`
 - `vlir-tests:proof_fn`
 - `vlir-tests:quant`
@@ -48,7 +51,6 @@ Additional counters (do not affect total):
 - `verus-examples:structural`
 - `verus-examples:test`
 - `verus-examples:guide/calc`
-- `verus-examples:guide/datatypes`
 - `verus-examples:guide/equality`
 - `verus-examples:guide/getting_started`
 - `verus-examples:guide/nonlinear_bitvec`
@@ -57,16 +59,18 @@ Additional counters (do not affect total):
 - `verus-examples:guide/requires_ensures`
 - `verus-examples:guide/requires_ensures_edit`
 
-## faithful but different from Verus output (9)
+## faithful but different from Verus output (11)
 - `vlir-tests:FindMax` (cvc5 default gives one VC unknown)
 - `vlir-tests:LoopSimple` (expected mismatch bucket)
 - `vlir-tests:demo_while` (same as FindMax)
 - `vlir-tests:demo_while_loop_isolation` (same as FindMax)
-- `verus-examples:bitvector_basic` (remaining VC failures are cast semantics/modeling)
+- `verus-examples:bitvector_basic` (Core translation is semantically faithful but Strata SMT encoding panics on indexed bitvector literal `(_ bv0 32)` while discharging `bit_and32_auto_ensures_3`)
 - `verus-examples:fun_ext` (blocked by higher-order/extensional support)
 - `verus-examples:generics` (2 goals hit Strata "Unimplemented encoding for type var"; 1 goal needs `reveal`)
 - `verus-examples:guide/modes` (blocked by missing `Tuple`/`Tuple_ctor_2` support)
-- `verus-examples:statements` (mixed-width integer comparison lowered via `bv*_to_int_u`)
+- `verus-examples:guide/datatypes` (datatype-constructor/selector VCs currently fail in Strata despite faithful emission)
+- `verus-examples:guide/overflow` (blocked by missing arithmetic-overflow/cast support in Strata)
+- `verus-examples:statements` (mixed-width bitvector arithmetic lowered with explicit width extension, e.g. `bv8_to_bv64_u`)
 
 ## not faithful translation (6)
 - `vlir-tests:matching` (`nat` lowered as `int`, losing non-negativity semantics)
@@ -95,15 +99,17 @@ Additional counters (do not affect total):
 - Recursive-function `decreases` (`SpecFn.decreases`) are dropped in
   `specFnToCore` because Strata Core currently has no function-level
   termination measure syntax.
+- Self-recursive `SpecFn` bodies are currently emitted declaration-only
+  (no body) to avoid Strata recursive-function resolution failures.
 - Affects: all loop tests, `verus-examples:modules` (recursive spec fns)
 
 ### `HasType` overflow guards dropped
 - Verus emits `HasType(U32, e)` assertions before arithmetic to check that the
   result fits in the target width. These are silently skipped in Core output,
   meaning overflow checks are lost.
-- Affects: ~80 of 112 test JSONs contain `HasType`; directly impacts any test with
-  exec-mode integer arithmetic (e.g. `verus-examples:guide/references`,
-  `vlir-tests:FindMax`, `vlir-tests:LoopSimple`)
+- Affects: many test JSONs with exec-mode integer arithmetic (e.g.
+  `verus-examples:guide/references`, `vlir-tests:FindMax`,
+  `vlir-tests:LoopSimple`)
 
 ### Extensional equality lowered to spec equality
 - `=~=` (`ExtEq`) is silently lowered to ordinary `==` (`Eq Spec`). For
