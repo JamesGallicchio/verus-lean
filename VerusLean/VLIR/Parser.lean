@@ -1427,9 +1427,27 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
   let requiresObj ← j.getArrByPathM ["exec_proof_check", "reqs"]
   let requires ← requiresObj.mapM (fromJsonSpanned · Exp.fromJson)
 
-  -- TODO: This ignores other postcondition information
-  let ensuresObj ← j.getArrByPathM ["exec_proof_check", "post_condition", "ens_exps"]
-  let ensures ← ensuresObj.mapM (fromJsonSpanned · Exp.fromJson)
+  -- Prefer declaration-level ensures (`decl.enss`) so we preserve the source
+  -- postconditions instead of post-elaboration query rewrites in
+  -- `exec_proof_check.post_condition.ens_exps`.
+  let ensures : List Exp ←
+    match j.getArrByPath? ["decl", "enss"] with
+    | .ok ensGroups =>
+      let mut acc : List Exp := []
+      for g in ensGroups do
+        match g.getArr? with
+        | .ok group =>
+          let parsed ← group.mapM (fromJsonSpanned · Exp.fromJson)
+          acc := acc ++ parsed.toList
+        | .error _ => pure ()
+      pure acc
+    | .error _ =>
+      -- Backward-compatible fallback for older JSON shapes.
+      match j.getArrByPath? ["exec_proof_check", "post_condition", "ens_exps"] with
+      | .ok ensuresObj =>
+        let parsed ← ensuresObj.mapM (fromJsonSpanned · Exp.fromJson)
+        pure parsed.toList
+      | .error _ => pure []
 
   -- CC TODO: Still need to examine the internals for `by (lean)`
   -- If the proof function is NOT marked `by (lean)`, then we don't need to
@@ -1441,7 +1459,7 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
   let bodyObj ← j.getObjValByPathM ["exec_proof_check", "body", "x"]
   let bodyStm ← Stm.fromJson bodyObj
   let locals ← localDeclsFromJson j
-  return ProofFn.mk name args requires.toList ensures.toList bodyStm locals
+  return ProofFn.mk name args requires.toList ensures bodyStm locals
   --else
     --return ProofFn.mk name args requires.toList ensures.toList none
 
