@@ -259,7 +259,32 @@ def isFuelVar : Exp → Bool
   | _ => false
 
 def normalizeCallArgs (args : List Exp) : List Exp :=
+  -- Fuel vars are Verus-internal and not source-level arguments.
   args.filter (fun e => !isFuelVar e)
+
+private def noParamMarkerKey (fname : String) : String :=
+  s!"__verus_noparam_fn__{fname}"
+
+private def addNoParamFnMarkers (env : VarEnv) (noParamFns : List String) : VarEnv :=
+  noParamFns.foldl (init := env) (fun acc fname => acc.insert (noParamMarkerKey fname) .Bool)
+
+private def hasNoParamFnMarker (env : VarEnv) (fname : String) : Bool :=
+  env.contains (noParamMarkerKey fname)
+
+private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : List Exp) : List Exp :=
+  let fnameStr := CoreIdent.toPretty (identToCore fname)
+  let argsNoFuel := normalizeCallArgs args
+  if hasNoParamFnMarker env fnameStr then
+    -- Verus JSON can emit a fake argument at some call sites for zero-parameter
+    -- functions (`no%param` shape), typically as boxed `0`.
+    -- Strip this placeholder only for declarations that are actually zero-input
+    -- in VLIR, so we do not accidentally rewrite real user arguments.
+    argsNoFuel.filter (fun e =>
+      match e with
+      | .Unary (.Box .Int) (.Const (.Int 0)) => false
+      | _ => true)
+  else
+    argsNoFuel
 
 partial def vecVarFromExp : Exp → Option String
   | .Var x => some x
@@ -267,7 +292,8 @@ partial def vecVarFromExp : Exp → Option String
     match op with
     | .Box _ | .Unbox _ | .Clip _ _ | .Old | .Trigger | .HasType _ => vecVarFromExp e
     | _ => none
-  | .Call (.Fun name) _ [arg] =>
+  | .Call fn _ [arg] =>
+    let name := CallFun.name fn
     if isViewName name then vecVarFromExp arg else none
   | _ => none
 
@@ -281,7 +307,8 @@ private partial def lvalueFromMutArgExp? : Exp → Option LValue
       (lvalueFromMutArgExp? e).map (fun base => .Proj' base size field)
     | .Box _ | .Unbox _ | .Clip _ _ | .Old | .Trigger | .HasType _ => lvalueFromMutArgExp? e
     | _ => none
-  | .Call (.Fun name) _ [arg] =>
+  | .Call fn _ [arg] =>
+    let name := CallFun.name fn
     if isViewName name then lvalueFromMutArgExp? arg else none
   | _ => none
 
@@ -726,7 +753,8 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
   match e with
   | .Var x =>
     (boundType? bound x <|> env.get? x) |>.bind bitInfoOfTyp
-  | .Call (.Fun name) _ args =>
+  | .Call fn _ args =>
+    let name := CallFun.name fn
     if isVecLenSpecName name || isVecLenExecName name then
       some (usizeBitWidth, false)
     else if isVecIndexSpecName name || isVecIndexExecName name then
@@ -1096,9 +1124,8 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     let e' ← expToCoreWithBound env bound expected? e
     return LExpr.ite () c' t' e'
   | .Call fn _typs args => do
-    let fname := match fn with
-      | .Fun name => name
-    let argsFiltered := normalizeCallArgs args
+    let fname := CallFun.name fn
+    let argsFiltered := normalizeCallArgsForCallee env fname args
     let mkFallback := do
       let argExpected? :=
         match expected? with
@@ -1387,7 +1414,8 @@ partial def flattenSeqBlocks : List Stm → List Stm
 -- Calls that lower to side-effect-free Core expressions and are safe to inline
 -- when cleaning up temporary-prefix assignments.
 private def isPureBuiltinCallExp : Exp → Bool
-  | .Call (.Fun fn) _ _ =>
+  | .Call fn _ _ =>
+    let fn := CallFun.name fn
     isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
       || isVecIndexSpecName fn || isVecIndexExecName fn
   | _ => false
@@ -1866,7 +1894,7 @@ mutual
   | .Call fn _typArgs args => do
     if isGhostPervasiveCallName fn then
       return []
-    let argsFiltered := normalizeCallArgs args
+    let argsFiltered := normalizeCallArgsForCallee env fn args
     let callee := CoreIdent.toPretty (identToCore fn)
     let lowered ← lowerMutCallArgs env projLayouts mutArgMap callee argsFiltered
     return lowered.pre ++ [mkCallStmt lowered.mutOuts callee lowered.argsCore] ++ lowered.post
@@ -1911,20 +1939,21 @@ mutual
         let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
         return [mkSetStmt (varToCore rootName) updatedRoot]
     match rhs with
-    | .Call (.Fun fn) _typArgs args => do
-      if isGhostPervasiveCallName fn then
+    | .Call fn _typArgs args => do
+      let fnName := CallFun.name fn
+      if isGhostPervasiveCallName fnName then
         return []
-      let argsFiltered := normalizeCallArgs args
-      if isIntoIterName fn then
+      let argsFiltered := normalizeCallArgsForCallee env fnName args
+      if isIntoIterName fnName then
         match argsFiltered with
         | [arg] =>
           let rhs' ← expToCore env (some lhsTy) arg
           return (← assignExprToLhs rhs')
         | _ => pure ()
-      if isIteratorNextName fn && (optionTypAndElem? lhsTy).isNone then
+      if isIteratorNextName fnName && (optionTypAndElem? lhsTy).isNone then
         throw s!"iterator-next call has non-option lhs type: {repr lhsTy}"
-      if isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
-          || isVecIndexSpecName fn || isVecIndexExecName fn then
+      if isViewName fnName || isVecLenSpecName fnName || isVecLenExecName fnName
+          || isVecIndexSpecName fnName || isVecIndexExecName fnName then
         let rhs' ← expToCore env (some lhsTy) rhs
         assignExprToLhs rhs'
       else
@@ -1935,10 +1964,10 @@ mutual
             pure (varToCore lhsName, [])
           | none =>
             -- Projected l-values need a temporary to receive the call result.
-            let tmp := varToCore (projectedCallTmpName fn lhs)
+            let tmp := varToCore (projectedCallTmpName fnName lhs)
             let declTy := .forAll [] (monoTyOfTyp lhsTy)
             pure (tmp, [mkInitStmt tmp declTy declSentinel])
-        let callee := CoreIdent.toPretty (identToCore fn)
+        let callee := CoreIdent.toPretty (identToCore fnName)
         let lowered ← lowerMutCallArgs env projLayouts mutArgMap callee argsFiltered
         let callStmt := mkCallStmt ([destName] ++ lowered.mutOuts) callee lowered.argsCore
         match lvalueVarName? lhs with
@@ -2137,7 +2166,8 @@ def dedupLocals (locals : List (String × Typ)) : List (String × Typ) :=
 -- Predeclare them so assignment statements can emit plain `set` commands.
 private def rangeIterTempLocalsFromAssign (lhsTy : Typ) (rhs : Exp) : List (String × Typ) :=
   match rhs with
-  | .Call (.Fun fn) _ args =>
+  | .Call fn _ args =>
+    let fn := CallFun.name fn
     if isIteratorNextName fn then
       match optionTypAndElem? lhsTy, args with
       | some (_, idxTy), [iterArg] =>
@@ -2215,14 +2245,26 @@ partial def collectMutArgMapFromDecls (decls : List Decl) : MutArgMap :=
       go acc' rest
   go (∅ : MutArgMap) decls
 
+private partial def collectNoParamFnNamesFromDecls : List Decl → List String
+  | [] => []
+  | d :: rest =>
+    let here :=
+      match d with
+      | .specFn f | .proofFn f | .execFn f =>
+        if f.inputs.isEmpty then [CoreIdent.toPretty (identToCore f.name)] else []
+      | .func f =>
+        if f.decls.isEmpty then [CoreIdent.toPretty (identToCore f.name)] else []
+      | .mutualBlock ds => collectNoParamFnNamesFromDecls ds
+      | _ => []
+    (here ++ collectNoParamFnNamesFromDecls rest).eraseDups
+
 def mkChecks (env : VarEnv) (checkPrefix : String) (exps : List Exp) :
     Except String (ListMap CoreLabel Procedure.Check) := do
   let exprs ← exps.mapM (expToCore env (some .Bool))
-  let rec withIdx (i : Nat) (rest : List CoreExpr) : ListMap CoreLabel Procedure.Check :=
-    match rest with
-    | [] => []
-    | e :: es => (s!"{checkPrefix}{i}", { expr := e, attr := .Default }) :: withIdx (i + 1) es
-  return withIdx 0 exprs
+  return exprs.zipIdx.map (fun (e, i) => (s!"{checkPrefix}{i}", { expr := e, attr := .Default }))
+
+private def concatRefLists {α : Type} (xss : List (List α)) : List α :=
+  xss.foldr (· ++ ·) []
 
 private partial def stmtModifiedVars : Core.Statement → List CoreIdent
   | .cmd (.cmd (.init name _ e _)) =>
@@ -2269,9 +2311,18 @@ private def inferProcModifies (p : Core.Procedure) : List CoreIdent :=
   let disallowed := (ListMap.keys p.header.inputs ++ ListMap.keys p.header.outputs ++ locals).eraseDups
   written.filter (fun v => !disallowed.contains v) |>.eraseDups
 
-def specFnToCore (emitBody : Bool) (f : SpecFn) : Except String Core.Function := do
-  let env := envFromDecls f.inputs
+def specFnToCore (noParamFns : List String)
+    (emitBody : Bool) (f : SpecFn) : Except String Core.Function := do
+  let env := addNoParamFnMarkers (envFromDecls f.inputs) noParamFns
   let typeArgs := (typeArgsFromDecls f.inputs ++ typeArgsFromTyps [f.returnType]).eraseDups
+  -- Recursion metadata comes directly from Verus JSON (`has.is_recursive`) and
+  -- parsed termination-check hints (`recursiveCasesIdxHint`).
+  let recCasesIdx? := f.recursiveCasesIdxHint
+  let isRecursive := f.isRecursive
+  let attrs : Array Strata.DL.Util.FuncAttr :=
+    match recCasesIdx? with
+    | some idx => #[.inlineIfConstr idx]
+    | none => #[]
   -- `SpecFn.decreases` is preserved in VLIR, but currently dropped here.
   -- Strata Core supports loop-level measures in the AST, but has no
   -- function-level `decreases` slot/syntax yet.
@@ -2286,12 +2337,14 @@ def specFnToCore (emitBody : Bool) (f : SpecFn) : Except String Core.Function :=
   return {
     name := identToCore f.name
     typeArgs := typeArgs
+    isRecursive := isRecursive
     inputs := signatureOf f.inputs
     output := monoTyOfTyp f.returnType
     body := body?
+    attr := attrs
   }
 
-def proofFnToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
+def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (f : ProofFn) : Except String Core.Procedure := do
   let inputNames := f.inputs.map Prod.fst
   let bodyStm? := f.body
@@ -2307,7 +2360,7 @@ def proofFnToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
   let localsAll := localsAll.filter (fun (n, t) =>
     !shouldDropForLoopScaffoldingLocal n && !isUnitLikeTyp t)
   let localsDecls := localsAll
-  let env := envFromDecls (expandVecDecls (f.inputs ++ localsAll))
+  let env := addNoParamFnMarkers (envFromDecls (expandVecDecls (f.inputs ++ localsAll))) noParamFns
   let typeArgs := typeArgsFromDecls (f.inputs ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" f.ensures
@@ -2335,7 +2388,7 @@ def proofFnToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
   let modifies := inferProcModifies proc
   return { proc with spec := { proc.spec with modifies := modifies } }
 
-def execFnToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
+def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (f : ExecFn) : Except String Core.Procedure := do
   let mutOutDecls :=
     f.inputs.filterMap (fun (n, t) =>
@@ -2363,7 +2416,8 @@ def execFnToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     !shouldDropForLoopScaffoldingLocal n && !isUnitLikeTyp t)
   let localsDecls := localsAll
   let outputs := retDecls ++ mutOutputDecls
-  let env := envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))
+  let env := addNoParamFnMarkers
+    (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns
   let typeArgs := typeArgsFromDecls (f.inputs ++ outputs ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" rewrittenEnsures
@@ -2395,8 +2449,8 @@ def execFnToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
   return { proc with spec := { proc.spec with modifies := modifies } }
 
 -- TODO
-def funcCheckSstToCore (f : FuncCheckSst) : Except String Core.Procedure := do
-  let env := envFromDecls f.decls
+def funcCheckSstToCore (noParamFns : List String) (f : FuncCheckSst) : Except String Core.Procedure := do
+  let env := addNoParamFnMarkers (envFromDecls f.decls) noParamFns
   let pre ← mkChecks env "requires_" f.reqs
   let post ← mkChecks env "ensures_" f.postCondition
   let proc : Core.Procedure := {
@@ -2483,7 +2537,8 @@ def enumToCoreTypeDecl (e : Enum) : Except String Core.TypeDecl := do
         constrs_ne := by simp }
     return .data [d]
 
-partial def declToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) :
+partial def declToCore (noParamFns : List String)
+    (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) :
     Decl → Except String (List Core.Decl)
   | .assertion _ =>
     -- Drop top-level `DeclType: Assert` wrappers for Core emission.
@@ -2491,10 +2546,10 @@ partial def declToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) :
     -- (These declarations remain useful in the Verus->Lean pipeline.)
     return []
   | .specFn f => do
-    let fn ← specFnToCore true f
+    let fn ← specFnToCore noParamFns true f
     return [Core.Decl.func fn]
   | .proofFn f => do
-    let p ← proofFnToCore projLayouts mutArgMap f
+    let p ← proofFnToCore noParamFns projLayouts mutArgMap f
     return [Core.Decl.proc p]
   | .execFn f => do
     let isDeclOnly := match f.body with | .Block [] => true | _ => false
@@ -2512,10 +2567,10 @@ partial def declToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) :
         spec := { modifies := [], preconditions := [], postconditions := [] }
         body := []
       }]
-    let p ← execFnToCore projLayouts mutArgMap f
+    let p ← execFnToCore noParamFns projLayouts mutArgMap f
     return [Core.Decl.proc p]
   | .func f => do
-    let p ← funcCheckSstToCore f
+    let p ← funcCheckSstToCore noParamFns f
     return [Core.Decl.proc p]
   | .struct s =>
     return [Core.Decl.type (structToCoreTypeDecl s)]
@@ -2526,9 +2581,9 @@ partial def declToCore (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) :
     let parts ← ds.mapM (fun d =>
       match d with
       | .specFn f => do
-        let fn ← specFnToCore true f
+        let fn ← specFnToCore noParamFns true f
         return [Core.Decl.func fn]
-      | _ => declToCore projLayouts mutArgMap d)
+      | _ => declToCore noParamFns projLayouts mutArgMap d)
     -- TODO: mutual recursion?
     return parts.flatten
 
@@ -2844,9 +2899,10 @@ private def neededBvWidenCastDecls (decls : List Core.Decl) : List Core.Decl :=
   bvWidenCastDecls.filter (fun d => needed.contains (declNameString d))
 
 def declsToProgram (decls : List Decl) : Except String Core.Program := do
+  let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
   let mutArgMap := collectMutArgMapFromDecls decls
-  let parts ← decls.mapM (declToCore projLayouts mutArgMap)
+  let parts ← decls.mapM (declToCore noParamFns projLayouts mutArgMap)
   -- Keep declaration-only procedure stubs unless a stronger reachability proof
   -- is implemented. Some Verus shards reference helpers only through specs,
   -- and dropping them here can lose required declarations.
@@ -3220,9 +3276,13 @@ where
       s!"{CoreIdent.toPretty id}: {tyToString (.forAll [] ty)}"))
 
 def funcToString (f : Core.Function) : String :=
-  let inputs := String.intercalate ", " (f.inputs.map (fun (id, ty) =>
-    s!"{CoreIdent.toPretty id}: {tyToString (.forAll [] ty)}"))
-  let header := s!"function {CoreIdent.toPretty f.name}{typeArgsToString f.typeArgs}({inputs}): {tyToString (.forAll [] f.output)}"
+  let recCasesIdx? :=
+    if f.isRecursive then Strata.DL.Util.FuncAttr.findInlineIfConstr f.attr else none
+  let inputs := String.intercalate ", " (f.inputs.zipIdx.map (fun ((id, ty), i) =>
+    let ann := if recCasesIdx? == some i then "@[cases] " else ""
+    s!"{ann}{CoreIdent.toPretty id}: {tyToString (.forAll [] ty)}"))
+  let recPrefix := if f.isRecursive then "rec " else ""
+  let header := s!"{recPrefix}function {CoreIdent.toPretty f.name}{typeArgsToString f.typeArgs}({inputs}): {tyToString (.forAll [] f.output)}"
   match f.body with
   | none => header ++ ";"
   | some body =>

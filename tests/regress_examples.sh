@@ -6,9 +6,9 @@ VERUS_DIR="$(cd "$ROOT_DIR/../verus" && pwd -P)"
 VERUS_SRC="$VERUS_DIR/source"
 VERUS_EXAMPLES_DIR="$VERUS_DIR/examples"
 VERUS_TESTS_DIR="$VERUS_DIR/tests"
-VERUS_RUST_VERIFY_TESTS_DIR="$VERUS_SRC/rust_verify_test/tests"
-VERUS_RVT_INPUTS_DIR="${VERUS_RVT_INPUTS_DIR:-$VERUS_SRC/target/debug/test_inputs}"
 VLIR_TESTS_DIR="$ROOT_DIR/tests/VerusFiles"
+RVT_DEBUG_INPUTS_DIR="$VERUS_SRC/target/debug/test_inputs"
+RVT_RELEASE_INPUTS_DIR="$VERUS_SRC/target/release/test_inputs"
 VERUS_BIN="$VERUS_SRC/target-verus/release/verus"
 VERUS_LEAN="$ROOT_DIR/.lake/build/bin/verus-lean"
 STRATA_DIR="$(cd "$ROOT_DIR/../Strata" && pwd -P)"
@@ -16,6 +16,7 @@ STRATA_DIR="$(cd "$ROOT_DIR/../Strata" && pwd -P)"
 JSON_BOOGIE_DIR="${JSON_BOOGIE_DIR:-$ROOT_DIR/tests/JSONFilesBoogie}"
 CORE_DIR="${CORE_DIR:-$ROOT_DIR/tests/BoogieFiles}"
 REGRESSION_LOGS_DIR="${REGRESSION_LOGS_DIR:-$ROOT_DIR/tests/RegressionLogs}"
+RVT_CURATED_LIST="${RVT_CURATED_LIST:-$ROOT_DIR/tests/rust_verify_generated_cases.txt}"
 
 verbose=false
 run_all_suites=false
@@ -23,25 +24,6 @@ declare -a selected_suites=()
 declare -a requested_examples=()
 STRATA_SOLVER="cvc5"
 STRATA_SOLVER_TIMEOUT=""
-declare -a rvt_expected_err_keys=()
-declare -a rvt_expected_rust_compile_error_keys=()
-# Bash 3 on macOS has no associative arrays; store deduped keys in temp files
-# for fast membership checks via `grep -Fx`.
-rvt_expected_err_keys_index=""
-rvt_expected_rust_compile_error_keys_index=""
-have_rvt_expected_rust_compile_errors=false
-skipped_expected_err_cases=0
-skipped_rust_compile_error_cases=0
-
-cleanup_regress_temp_files() {
-  if [ -n "${rvt_expected_err_keys_index:-}" ] && [ -f "$rvt_expected_err_keys_index" ]; then
-    rm -f "$rvt_expected_err_keys_index"
-  fi
-  if [ -n "${rvt_expected_rust_compile_error_keys_index:-}" ] && [ -f "$rvt_expected_rust_compile_error_keys_index" ]; then
-    rm -f "$rvt_expected_rust_compile_error_keys_index"
-  fi
-}
-trap cleanup_regress_temp_files EXIT
 
 usage() {
   cat <<'EOF'
@@ -54,8 +36,10 @@ Runs regression across 3 stages for each Verus example:
 
 Options:
   --verbose         Stream command output while also saving logs
-  --all-suites      Run vlir-tests + verus-examples + rust-verify-tests
-  --suite <name>    Add a suite: vlir-tests | verus-examples | rust-verify-tests
+  --all-suites      Run vlir-tests + verus-examples
+  --suite <name>    Add a suite: vlir-tests | verus-examples | rust-verify-generated
+  --rvt-list <file> Curated path list for rust-verify-generated suite
+                    (default: tests/rust_verify_generated_cases.txt)
   --solver <name>   StrataVerify solver (default: cvc5)
   --solver-timeout <sec>
                     StrataVerify timeout in seconds
@@ -64,10 +48,9 @@ Options:
 Examples:
   tests/regress_examples.sh /abs/path/to/verus/examples/assertions.rs
   tests/regress_examples.sh tests/VerusFiles/FindMax.rs
-  tests/regress_examples.sh ../verus/source/target/debug/test_inputs/basic-*/test.rs
   tests/regress_examples.sh --suite verus-examples
   tests/regress_examples.sh --suite vlir-tests
-  tests/regress_examples.sh --suite rust-verify-tests
+  tests/regress_examples.sh --suite rust-verify-generated
   tests/regress_examples.sh --all-suites
 
 EOF
@@ -75,7 +58,7 @@ EOF
 
 is_known_suite() {
   case "$1" in
-    vlir-tests|verus-examples|rust-verify-tests) return 0 ;;
+    vlir-tests|verus-examples|rust-verify-generated) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -84,13 +67,7 @@ suite_dir_of() {
   case "$1" in
     vlir-tests) (cd "$VLIR_TESTS_DIR" && pwd -P) ;;
     verus-examples) (cd "$VERUS_EXAMPLES_DIR" && pwd -P) ;;
-    rust-verify-tests)
-      if [ -d "$VERUS_RVT_INPUTS_DIR" ]; then
-        (cd "$VERUS_RVT_INPUTS_DIR" && pwd -P)
-      else
-        echo "$VERUS_RVT_INPUTS_DIR"
-      fi
-      ;;
+    rust-verify-generated) (cd "$VERUS_SRC/target" && pwd -P) ;;
     *) return 1 ;;
   esac
 }
@@ -99,7 +76,7 @@ add_selected_suite() {
   local suite="$1"
   if ! is_known_suite "$suite"; then
     echo "Unknown suite: $suite" >&2
-    echo "Valid suites: vlir-tests, verus-examples, rust-verify-tests" >&2
+    echo "Valid suites: vlir-tests, verus-examples, rust-verify-generated" >&2
     exit 1
   fi
   local s
@@ -114,18 +91,20 @@ add_selected_suite() {
 infer_suite_from_path() {
   local path="$1"
   local abs_dir abs_path
-  local vlir_root examples_root tests_root rvt_inputs_root
+  local vlir_root examples_root tests_root rvt_debug_root rvt_release_root
   abs_dir="$(cd "$(dirname "$path")" && pwd -P)"
   abs_path="$abs_dir/$(basename "$path")"
   vlir_root="$(suite_dir_of vlir-tests)"
   examples_root="$(suite_dir_of verus-examples)"
   tests_root="$(cd "$VERUS_TESTS_DIR" && pwd -P)"
-  rvt_inputs_root="$(suite_dir_of rust-verify-tests)"
+  rvt_debug_root="$(cd "$RVT_DEBUG_INPUTS_DIR" 2>/dev/null && pwd -P || true)"
+  rvt_release_root="$(cd "$RVT_RELEASE_INPUTS_DIR" 2>/dev/null && pwd -P || true)"
   case "$abs_path" in
     "$vlir_root"/*) echo "vlir-tests" ;;
     "$examples_root"/*) echo "verus-examples" ;;
     "$tests_root"/*) echo "vlir-tests" ;;
-    "$rvt_inputs_root"/*) echo "rust-verify-tests" ;;
+    "$rvt_debug_root"/*) echo "rust-verify-generated" ;;
+    "$rvt_release_root"/*) echo "rust-verify-generated" ;;
     *) echo "external" ;;
   esac
 }
@@ -160,176 +139,122 @@ resolve_example_arg() {
 
   local abs_dir
   local abs_path
-  local rvt_tests_root
   abs_dir="$(cd "$(dirname "$arg")" && pwd -P)"
   abs_path="$abs_dir/$(basename "$arg")"
-  rvt_tests_root="$(cd "$VERUS_RUST_VERIFY_TESTS_DIR" && pwd -P)"
-  if [[ "$abs_path" == "$rvt_tests_root/"* ]]; then
-    echo "rust-verify-tests-source|$abs_path"
-    return 0
-  fi
 
   local suite
   suite="$(infer_suite_from_path "$abs_path")"
   if [ "$suite" = "external" ]; then
     echo "ERROR: file must be under tests/VerusFiles, verus/examples, verus/tests," \
-      "or verus/source/target/debug/test_inputs: $abs_path" >&2
+      "or verus/source/target/*/test_inputs for rust-verify-generated suite: $abs_path" >&2
     exit 1
   fi
   echo "$suite|$abs_path"
 }
 
-collect_rust_verify_expected_rust_compile_errors() {
-  if $have_rvt_expected_rust_compile_errors; then
+resolve_rvt_case_path() {
+  local listed_path="$1"
+  if [[ "$listed_path" == *"::"* ]]; then
+    local test_file case_name
+    local pattern
+    local matches=()
+    test_file="${listed_path%%::*}"
+    case_name="${listed_path#*::}"
+    pattern="${test_file}-*-${case_name}"
+
+    if [ -d "$RVT_DEBUG_INPUTS_DIR" ]; then
+      while IFS= read -r d; do
+        matches+=("$d")
+      done < <(find "$RVT_DEBUG_INPUTS_DIR" -maxdepth 1 -type d -name "$pattern" | sort)
+    fi
+    if [ -d "$RVT_RELEASE_INPUTS_DIR" ]; then
+      while IFS= read -r d; do
+        matches+=("$d")
+      done < <(find "$RVT_RELEASE_INPUTS_DIR" -maxdepth 1 -type d -name "$pattern" | sort)
+    fi
+
+    if [ ${#matches[@]} -eq 0 ]; then
+      echo "No generated rust_verify_test input matches selector: $listed_path" >&2
+      echo "Expected a directory like: ${pattern}/test.rs under target/*/test_inputs" >&2
+      exit 1
+    fi
+    if [ ${#matches[@]} -gt 1 ]; then
+      local newest
+      newest="${matches[0]}"
+      local m
+      for m in "${matches[@]}"; do
+        if [ "$m" -nt "$newest" ]; then
+          newest="$m"
+        fi
+      done
+      echo "$newest/test.rs"
+      return
+    fi
+    local match_file="${matches[0]}/test.rs"
+    if [ ! -f "$match_file" ]; then
+      echo "Matched generated input has no test.rs: ${matches[0]}" >&2
+      exit 1
+    fi
+    echo "$match_file"
     return
   fi
-  # rust_verify_test contains many intentional negative tests (`=> Err(...)`).
-  # Exclude those from translation-differential stats. Also record the subset
-  # that explicitly expects Rust compile errors (`assert_rust_error_msg`).
-  local file file_base test_name pending_test in_matches_syntax_err_macro
-  while IFS= read -r file; do
-    file_base="$(basename "$file" .rs)"
-    pending_test=""
-    in_matches_syntax_err_macro=false
-    while IFS= read -r line; do
-      if [[ "$line" == *"test_matches_syntax_err! {"* ]]; then
-        in_matches_syntax_err_macro=true
-      fi
-      if [[ "$line" =~ \#\[test\][[:space:]]+([A-Za-z0-9_]+) ]]; then
-        pending_test="${BASH_REMATCH[1]}"
-        if $in_matches_syntax_err_macro; then
-          local macro_err_key="$file_base:$pending_test"
-          rvt_expected_err_keys+=("$macro_err_key")
-        fi
-        continue
-      fi
-      if [ -n "$pending_test" ] && [[ "$line" == *"=> Err("* ]]; then
-        local err_key="$file_base:$pending_test"
-        rvt_expected_err_keys+=("$err_key")
-      fi
-      if [ -n "$pending_test" ] && [[ "$line" == *"assert_rust_error_msg"* ]]; then
-        local key="$file_base:$pending_test"
-        rvt_expected_rust_compile_error_keys+=("$key")
-        pending_test=""
-      fi
-      if $in_matches_syntax_err_macro && [[ "$line" == *"}"* ]]; then
-        in_matches_syntax_err_macro=false
-      fi
-    done < "$file"
-  done < <(find "$VERUS_RUST_VERIFY_TESTS_DIR" -maxdepth 1 -type f -name '*.rs' | sort)
-  # Bash 3 on macOS has no associative arrays; use sorted lookup indexes.
-  if [ -n "$rvt_expected_err_keys_index" ] && [ -f "$rvt_expected_err_keys_index" ]; then
-    rm -f "$rvt_expected_err_keys_index"
-  fi
-  if [ -n "$rvt_expected_rust_compile_error_keys_index" ] && [ -f "$rvt_expected_rust_compile_error_keys_index" ]; then
-    rm -f "$rvt_expected_rust_compile_error_keys_index"
-  fi
-  rvt_expected_err_keys_index="$(mktemp "${TMPDIR:-/tmp}/rvt_expected_err_keys.XXXXXX")"
-  rvt_expected_rust_compile_error_keys_index="$(mktemp "${TMPDIR:-/tmp}/rvt_expected_rust_compile_error_keys.XXXXXX")"
-  if [ ${#rvt_expected_err_keys[@]} -gt 0 ]; then
-    printf '%s\n' "${rvt_expected_err_keys[@]}" | sort -u > "$rvt_expected_err_keys_index"
+
+  local candidate=""
+  if [ -f "$listed_path" ]; then
+    candidate="$listed_path"
+  elif [ -f "$ROOT_DIR/$listed_path" ]; then
+    candidate="$ROOT_DIR/$listed_path"
+  elif [ -f "$VERUS_DIR/$listed_path" ]; then
+    candidate="$VERUS_DIR/$listed_path"
+  elif [ -f "$VERUS_SRC/$listed_path" ]; then
+    candidate="$VERUS_SRC/$listed_path"
   else
-    : > "$rvt_expected_err_keys_index"
+    echo "Missing rust-verify-generated case path from list: $listed_path" >&2
+    exit 1
   fi
-  if [ ${#rvt_expected_rust_compile_error_keys[@]} -gt 0 ]; then
-    printf '%s\n' "${rvt_expected_rust_compile_error_keys[@]}" | sort -u > "$rvt_expected_rust_compile_error_keys_index"
-  else
-    : > "$rvt_expected_rust_compile_error_keys_index"
-  fi
-  have_rvt_expected_rust_compile_errors=true
-}
 
-rvt_expected_err_case() {
-  local key="$1"
-  [ -n "$rvt_expected_err_keys_index" ] || return 1
-  [ -f "$rvt_expected_err_keys_index" ] || return 1
-  grep -Fxq -- "$key" "$rvt_expected_err_keys_index"
-}
+  case "$candidate" in
+    *.rs) ;;
+    *)
+      echo "rust-verify-generated entry is not an .rs file: $candidate" >&2
+      exit 1
+      ;;
+  esac
 
-rvt_expected_rust_compile_error_case() {
-  local key="$1"
-  [ -n "$rvt_expected_rust_compile_error_keys_index" ] || return 1
-  [ -f "$rvt_expected_rust_compile_error_keys_index" ] || return 1
-  grep -Fxq -- "$key" "$rvt_expected_rust_compile_error_keys_index"
-}
-
-add_rust_verify_generated_cases_for_test_name() {
-  local test_name="$1"
-  local latest_entry latest_dir dir_base rest hash dir case_suffix
-  collect_rust_verify_expected_rust_compile_errors
-  latest_entry="$(
-    find "$VERUS_RVT_INPUTS_DIR" -maxdepth 1 -type d -name "${test_name}-*-*" | while IFS= read -r dir; do
-      mtime="$(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || echo 0)"
-      printf "%s %s\n" "$mtime" "$dir"
-    done | sort -nr | head -n 1
-  )"
-  if [ -z "$latest_entry" ]; then
-    return
-  fi
-  latest_dir="${latest_entry#* }"
-  dir_base="$(basename "$latest_dir")"
-  rest="${dir_base#${test_name}-}"
-  hash="${rest%%-*}"
-  while IFS= read -r dir; do
-    if [ -f "$dir/test.rs" ]; then
-      case_suffix="$(basename "$dir")"
-      case_suffix="${case_suffix#${test_name}-${hash}-}"
-      case_suffix="${case_suffix%__test}"
-      if rvt_expected_err_case "$test_name:$case_suffix"; then
-        skipped_expected_err_cases=$((skipped_expected_err_cases + 1))
-        if rvt_expected_rust_compile_error_case "$test_name:$case_suffix"; then
-          skipped_rust_compile_error_cases=$((skipped_rust_compile_error_cases + 1))
-        fi
-        continue
-      fi
-      if rvt_expected_rust_compile_error_case "$test_name:$case_suffix"; then
-        # Keep this as a fallback in case source parsing misses a surrounding
-        # `=> Err(...)` marker.
-        skipped_rust_compile_error_cases=$((skipped_rust_compile_error_cases + 1))
-        continue
-      fi
-      add_case "rust-verify-tests" "$dir/test.rs"
-    fi
-  done < <(find "$VERUS_RVT_INPUTS_DIR" -maxdepth 1 -type d -name "${test_name}-${hash}-*" | sort)
-}
-
-add_rust_verify_generated_cases_all() {
-  local test_file test_name
-  while IFS= read -r test_file; do
-    test_name="$(basename "$test_file" .rs)"
-    add_rust_verify_generated_cases_for_test_name "$test_name"
-  done < <(find "$VERUS_RUST_VERIFY_TESTS_DIR" -maxdepth 1 -type f -name '*.rs' | sort)
-}
-
-materialize_rust_verify_inputs() {
-  local rc
-  echo "Materializing rust_verify_test inputs under $VERUS_RVT_INPUTS_DIR ..."
-  set +e
-  (
-    cd "$VERUS_SRC"
-    # shellcheck disable=SC1091
-    source ../tools/activate
-    if $verbose; then
-      vargo test -p rust_verify_test --tests -- --nocapture
-    else
-      vargo test -p rust_verify_test --tests -- --nocapture > /dev/null 2>&1
-    fi
-  )
-  rc=$?
-  set -e
-  if [ "$rc" -ne 0 ]; then
-    echo "warning: rust_verify_test reported failures while generating inputs; continuing"
-  fi
+  local abs_dir
+  abs_dir="$(cd "$(dirname "$candidate")" && pwd -P)"
+  echo "$abs_dir/$(basename "$candidate")"
 }
 
 add_suite_files() {
   local suite="$1"
+  if [ "$suite" = "rust-verify-generated" ]; then
+    if [ ! -f "$RVT_CURATED_LIST" ]; then
+      echo "Missing rust-verify-generated list: $RVT_CURATED_LIST" >&2
+      echo "Create it with one .rs path per line (comments with # are allowed)." >&2
+      exit 1
+    fi
+    local line file count
+    count=0
+    while IFS= read -r line; do
+      line="$(echo "$line" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      [ -n "$line" ] || continue
+      file="$(resolve_rvt_case_path "$line")"
+      add_case "$suite" "$file"
+      count=$((count + 1))
+    done < "$RVT_CURATED_LIST"
+    if [ "$count" -eq 0 ]; then
+      echo "No rust-verify-generated cases found in $RVT_CURATED_LIST" >&2
+      exit 1
+    fi
+    return
+  fi
+
   local dir
   local file
   local base
-  local before after
   dir="$(suite_dir_of "$suite")"
-  if [ "$suite" != "rust-verify-tests" ] && [ ! -d "$dir" ]; then
+  if [ ! -d "$dir" ]; then
     echo "Missing suite directory: $dir" >&2
     exit 1
   fi
@@ -350,20 +275,6 @@ add_suite_files() {
       while IFS= read -r file; do
         add_case "$suite" "$file"
       done < <(find "$dir/guide" -type f -name '*.rs' | sort)
-    fi
-  elif [ "$suite" = "rust-verify-tests" ]; then
-    before=${#cases[@]}
-    add_rust_verify_generated_cases_all
-    after=${#cases[@]}
-    if [ "$after" -eq "$before" ]; then
-      materialize_rust_verify_inputs
-      add_rust_verify_generated_cases_all
-      after=${#cases[@]}
-    fi
-    if [ "$after" -eq "$before" ]; then
-      echo "No rust_verify_test generated inputs found under $VERUS_RVT_INPUTS_DIR" >&2
-      echo "Try running: (cd $VERUS_SRC && source ../tools/activate && vargo test -p rust_verify_test --tests -- --nocapture)" >&2
-      exit 1
     fi
   else
     # VLIR tests are a flat directory.
@@ -435,11 +346,48 @@ is_expected_mismatch_verus_fail_strata_pass() {
 }
 
 run_export() {
+  local dylib_ext dylib_prefix target_verus_dir
+  local builtin_rlib builtin_macros_dylib sm_macros_dylib vstd_rlib vstd_vir
   set +e
   (
     cd "$suite_json_dir"
-    # Some Verus examples are library-style (no `main`), so export in lib mode.
-    run_logged "$log_export" "$VERUS_BIN" --export-lean-all "$example" --crate-type=lib
+    if [ "$suite" = "rust-verify-generated" ]; then
+      case "$(uname -s)" in
+        Darwin) dylib_prefix="lib"; dylib_ext="dylib" ;;
+        Linux) dylib_prefix="lib"; dylib_ext="so" ;;
+        MINGW*|MSYS*|CYGWIN*) dylib_prefix=""; dylib_ext="dll" ;;
+        *)
+          echo "Unsupported platform for rust-verify-generated suite: $(uname -s)" >&2
+          exit 1
+          ;;
+      esac
+      target_verus_dir="$VERUS_SRC/target-verus/release"
+      builtin_rlib="$target_verus_dir/libverus_builtin.rlib"
+      builtin_macros_dylib="$target_verus_dir/${dylib_prefix}verus_builtin_macros.${dylib_ext}"
+      sm_macros_dylib="$target_verus_dir/${dylib_prefix}verus_state_machines_macros.${dylib_ext}"
+      vstd_rlib="$target_verus_dir/libvstd.rlib"
+      vstd_vir="$target_verus_dir/vstd.vir"
+      # Generated rust_verify_test inputs rely on the same internal-test harness
+      # extern setup used by Verus' own rust_verify_test harness.
+      run_logged "$log_export" "$VERUS_BIN" \
+        --internal-test-mode \
+        --crate-name "$base" \
+        --crate-type=lib \
+        --cfg vstd_todo \
+        --extern "builtin=$builtin_rlib" \
+        --extern "verus_builtin=$builtin_rlib" \
+        --extern "builtin_macros=$builtin_macros_dylib" \
+        --extern "verus_builtin_macros=$builtin_macros_dylib" \
+        --extern "state_machines_macros=$sm_macros_dylib" \
+        --extern "verus_state_machines_macros=$sm_macros_dylib" \
+        --extern "vstd=$vstd_rlib" \
+        --import "vstd=$vstd_vir" \
+        -L "dependency=$target_verus_dir" \
+        --export-lean-all "$example"
+    else
+      # Some Verus examples are library-style (no `main`), so export in lib mode.
+      run_logged "$log_export" "$VERUS_BIN" --export-lean-all "$example" --crate-type=lib
+    fi
   )
   verus_rc=$?
   set -e
@@ -602,6 +550,19 @@ while [ $# -gt 0 ]; do
       add_selected_suite "${1#*=}"
       shift
       ;;
+    --rvt-list)
+      if [ $# -lt 2 ]; then
+        echo "Missing value for --rvt-list"
+        usage
+        exit 1
+      fi
+      RVT_CURATED_LIST="$2"
+      shift 2
+      ;;
+    --rvt-list=*)
+      RVT_CURATED_LIST="${1#*=}"
+      shift
+      ;;
     --solver)
       if [ $# -lt 2 ]; then
         echo "Missing value for --solver"
@@ -646,7 +607,6 @@ fi
 if $run_all_suites; then
   add_selected_suite "vlir-tests"
   add_selected_suite "verus-examples"
-  add_selected_suite "rust-verify-tests"
 fi
 
 if [ ! -d "$VERUS_SRC" ]; then
@@ -659,10 +619,6 @@ if [ ! -d "$VERUS_EXAMPLES_DIR" ]; then
 fi
 if [ ! -d "$VERUS_TESTS_DIR" ]; then
   echo "Missing Verus tests dir: $VERUS_TESTS_DIR" >&2
-  exit 1
-fi
-if [ ! -d "$VERUS_RUST_VERIFY_TESTS_DIR" ]; then
-  echo "Missing rust_verify_test dir: $VERUS_RUST_VERIFY_TESTS_DIR" >&2
   exit 1
 fi
 if [ ! -d "$VLIR_TESTS_DIR" ]; then
@@ -701,24 +657,7 @@ declare -a cases=()
 if [ ${#requested_examples[@]} -gt 0 ]; then
   for req in "${requested_examples[@]}"; do
     resolved="$(resolve_example_arg "$req")"
-    if [[ "$resolved" == rust-verify-tests-source\|* ]]; then
-      test_source="${resolved#*|}"
-      test_name="$(basename "$test_source" .rs)"
-      before=${#cases[@]}
-      add_rust_verify_generated_cases_for_test_name "$test_name"
-      after=${#cases[@]}
-      if [ "$after" -eq "$before" ]; then
-        materialize_rust_verify_inputs
-        add_rust_verify_generated_cases_for_test_name "$test_name"
-        after=${#cases[@]}
-      fi
-      if [ "$after" -eq "$before" ]; then
-        echo "No generated inputs found for rust_verify_test '$test_name' under $VERUS_RVT_INPUTS_DIR" >&2
-        exit 1
-      fi
-    else
-      add_case "${resolved%%|*}" "${resolved#*|}"
-    fi
+    add_case "${resolved%%|*}" "${resolved#*|}"
   done
 elif [ ${#selected_suites[@]} -gt 0 ]; then
   for suite in "${selected_suites[@]}"; do
@@ -877,12 +816,6 @@ echo "  verify failures: ${#verify_failures[@]}"
 echo "  expected mismatches: ${#expected_mismatches[@]}"
 echo "  mismatch (Verus pass, Strata fail): ${#mismatch_verus_pass_strata_fail[@]}"
 echo "  mismatch (Verus fail, Strata pass): ${#mismatch_verus_fail_strata_pass[@]}"
-if [ "$skipped_expected_err_cases" -gt 0 ]; then
-  echo "  skipped expected rust_verify_test Err-cases: $skipped_expected_err_cases"
-fi
-if [ "$skipped_rust_compile_error_cases" -gt 0 ]; then
-  echo "  skipped expected Rust compile-error cases: $skipped_rust_compile_error_cases"
-fi
 
 if [ ${#ok_cases[@]} -gt 0 ]; then
   echo "  ok list: ${ok_cases[*]}"

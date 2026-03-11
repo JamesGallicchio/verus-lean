@@ -293,9 +293,13 @@ deriving Repr, Inhabited, DecidableEq, Hashable
 
 inductive CallFun where
   | Fun (fn : Ident) -- an optional resolved Fun for methods currently not implemented
-  -- | Recursive (name : Ident)
+  | Recursive (fn : Ident)
   -- | InternalFun (name : Ident)
 deriving Repr, Inhabited, DecidableEq, Hashable
+
+def CallFun.name : CallFun → Ident
+  | .Fun fn => fn
+  | .Recursive fn => fn
 
 mutual
 
@@ -457,6 +461,11 @@ structure SpecFn where
   returnType : Typ
   decreases : Option Stm
   body : Exp
+  -- Directly from Verus JSON `has.is_recursive`.
+  isRecursive : Bool := false
+  -- Optional structural recursion parameter index inferred from Verus
+  -- termination-check metadata when available.
+  recursiveCasesIdxHint : Option Nat := none
 deriving Repr, Inhabited, Hashable
 
 structure ProofFn where

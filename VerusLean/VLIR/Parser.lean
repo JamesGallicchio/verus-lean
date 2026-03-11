@@ -772,7 +772,7 @@ def CallFun.fromJson (j : Json) : m CallFun := do
     return .Fun name
   | ("Recursive", obj) =>
     let name ← pathedNameFromJson obj
-    return .Fun name
+    return .Recursive name
   | ("InternalFun", obj) =>
     return .Fun <| String.toName <| ← obj.getStrM
   | s => throw s!"unexpected {s}"
@@ -1362,11 +1362,40 @@ private def mutRefParamNamesFromDecl (j : Json) : VParser (List String) := do
         names := name :: names
     pure names.eraseDups
 
+private def firstIndexOfName? (names : List String) (target : String) : Option Nat :=
+  names.zipIdx.findSome? (fun (n, i) => if n == target then some i else none)
+
+private partial def peelDecreasesInitRhs : Exp → Exp
+  | .Unary (.Box _) e => peelDecreasesInitRhs e
+  | .Unary (.Unbox _) e => peelDecreasesInitRhs e
+  | .Unary (.Clip _ _) e => peelDecreasesInitRhs e
+  | .Unary (.HasType _) e => peelDecreasesInitRhs e
+  | e => e
+
+private def inputVarIdxFromDecreasesInitRhs?
+    (argNames : List String) (rhs : Exp) : Option Nat :=
+  match peelDecreasesInitRhs rhs with
+  | .Var x => firstIndexOfName? argNames x
+  | _ => none
+
+private def recursiveCasesIdxHintFromTermCheck
+    (argNames : List String) (termCheck : Json) : VParser (Option Nat) := do
+  match termCheck.getArrByPath? ["local_decls_decreases_init"] with
+  | .error _ => pure none
+  | .ok decInit =>
+    let stms ← decInit.mapM (fromJsonSpanned · Stm.fromJson)
+    -- Derive the hint only from the decreases-init assignment chain,
+    -- instead of scanning full ASTs.
+    pure <| stms.toList.findSome? (fun
+      | .Assign _ _ rhs _ => inputVarIdxFromDecreasesInitRhs? argNames rhs
+      | _ => none)
+
 
 def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
   let name ← pathedNameFromNameJson j
   if isVstdName name then return none else
   let args ← fnParseArgs j
+  let argNames := args.map Prod.fst
 
   -- TODO: This ignores other info about the return value, (a `Par` in Verus)
   let returnType ← Typ.fromJson <| ← j.getObjValByPathM ["ret", "x", "typ"]
@@ -1380,6 +1409,11 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
   -- Parse the body as an expression (stored under spec axioms).
   let bodyExp ← fromJsonSpanned bodyObj Exp.fromJson
 
+  let isRecursive :=
+    match Lean.Json.getObjValByPath j ["has", "is_recursive"] with
+    | .ok (.bool b) => b
+    | _ => false
+
   try
     -- let termCheckKind ← j.getObjValByPathM ["axioms", "spec_axioms", "termination_check", "post_condition", "kind"]
     -- if termCheckKind != "DecreasesImplicitLemma" then
@@ -1387,9 +1421,26 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
     -- Keep recursive-function decreases in VLIR even though current Core lowering
     -- cannot emit function-level measures yet (documented in `specFnToCore`).
     let decreases ← fromJsonSpanned (← termCheck.getObjValM "body") Stm.fromJson
-    return some <| SpecFn.mk name args returnType decreases bodyExp
+    let recursiveCasesIdxHint ← recursiveCasesIdxHintFromTermCheck argNames termCheck
+    return some <| {
+      name := name
+      inputs := args
+      returnType := returnType
+      decreases := some decreases
+      body := bodyExp
+      isRecursive := isRecursive
+      recursiveCasesIdxHint := recursiveCasesIdxHint
+    }
   catch _ =>
-    return some <| SpecFn.mk name args returnType none bodyExp
+    return some <| {
+      name := name
+      inputs := args
+      returnType := returnType
+      decreases := none
+      body := bodyExp
+      isRecursive := isRecursive
+      recursiveCasesIdxHint := none
+    }
 
 def localDeclsFromJson (j : Json) : VParser (List (String × Typ)) := do
   match j.getArrByPath? ["exec_proof_check", "local_decls"] with -- to be extended

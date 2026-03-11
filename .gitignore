@@ -8,8 +8,9 @@ verus-lean
 tests/JSONFilesBoogie/
 tests/BoogieFiles/vlir-tests/*.core.st
 tests/BoogieFiles/verus-examples/*.core.st
-tests/BoogieFiles/verus-tests/*.core.st
-tests/BoogieFiles/rust-verify-tests/*.core.st
+tests/BoogieFiles/rust-verify-generated/*.core.st
+tests/BoogieFiles/rust-verify-tests/
+tests/BoogieFiles/verus-examples-rec/
 tests/PrettyPrinterCompare/
 tests/check_official_pretty_roundtrip.sh
 tests/compare_pretty_printers.sh
@@ -17,8 +18,10 @@ tests/check_regression_gate.sh
 tests/tools/
 tests/waiting_for_strata.txt
 tests/integer_cast_occurrences_*.txt
+tests/rust_verify_generated_cases.txt
 tests/cast_pair_frequencies*.tsv
 tests/investigation_*.md
 tests/TESTING_INTERNAL.md
 tests/STRATA_TODOS_VERUS_PASS_STRATA_FAIL.md
 tests/STRATA_TYPE_FAILED_TRIAGE_20260227.md
+tests/core_todo_review.md

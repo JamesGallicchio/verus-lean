@@ -257,6 +257,7 @@ def BinaryOp.toTerm (b : BinaryOp) (lhs rhs : Term) : CoreM Term := do
 
 def CallFun.toIdent : CallFun → CoreM (Lean.Ident)
   | CallFun.Fun i => i.toIdent
+  | CallFun.Recursive i => i.toIdent
 
 private def VstdStr := "Vstd"
 
@@ -420,7 +421,7 @@ partial def Exp.toTerm (e : Exp) : CoreM Term := do
   | .Const c => c.toTerm
   | .Var i => i.toIdent
   | .Call fn _ exps =>
-    let fnName := match fn with | CallFun.Fun i => i
+    let fnName := CallFun.name fn
     if fnName.head = "Vstd" then
       VstdFnToTerm fnName exps
     else
@@ -725,7 +726,7 @@ def Assertion.toCommand (a : Assertion) : CoreM (TSyntax `command) := do
   `(command| theorem $ident $args:bracketedBinder* : $eTerm := by auto? )
 
 def SpecFn.toCommand (f : SpecFn) : CoreM (TSyntax `command) := do
-  let ⟨name, inputs, returnType, decreases, body⟩ := f
+  let ⟨name, inputs, returnType, decreases, body, _, _⟩ := f
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let returnType ← returnType.toTerm

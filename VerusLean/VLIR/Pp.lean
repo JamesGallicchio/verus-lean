@@ -146,8 +146,7 @@ partial def Exp.pp (e : Exp) : String :=
   | .Const c => Const.pp c
   | .Var ident => ident
   | .Call fn _ exps =>
-    let fn := match fn with
-      | CallFun.Fun fn => fn
+    let fn := CallFun.name fn
     let exps := exps.map Exp.pp
     let exps := String.intercalate ", " exps
     fn ++ "(" ++ exps ++ ")"
@@ -256,7 +255,7 @@ def Assertion.pp (a : Assertion) : String :=
   s!"{name} {decls.map Prod.fst} := {body}"
 
 def SpecFn.pp (f : SpecFn) : String :=
-  let ⟨name, args, ret, _, body⟩ := f -- todo: decreases clause
+  let ⟨name, args, ret, _, body, _, _⟩ := f -- todo: decreases clause
   if args.length > 0 then
     s!"def {name} {args} : {ret} := {body}"
   else
