@@ -433,10 +433,8 @@ def monoTyOfTyp : Typ → LMonoTy
   | .Tuple t1 t2 => .tcons "Tuple" [monoTyOfTyp t1, monoTyOfTyp t2]
   | .Bool => .bool
   | .Int => .int
-  -- TODO(Strata Nat support): preserve `nat` as a non-negative integer sort/refinement.
-  -- Current fallback erases the `nat` refinement (`nat -> int`), which can drop
-  -- proofs that rely on implicit non-negativity facts.
-  | .Nat => .int
+  -- Now we make `nat` a type in Core, but we will have a native `.nat` one day.
+  | .Nat => .tcons "nat" []
   -- Strata Core currently has built-in bitvector operators only for 1/8/16/32/64.
   -- For other widths (e.g. 128), lower as `int` to keep translation total.
   | .UInt w
@@ -474,9 +472,9 @@ def bitInfoOfTyp : Typ → Option (Nat × Bool)
   | .Decorated _ ty => bitInfoOfTyp ty
   | _ => none
 
-def isIntLikeTyp : Typ → Bool
-  | .Int | .Nat => true
-  | .Decorated _ ty => isIntLikeTyp ty
+def isIntTyp : Typ → Bool
+  | .Int => true
+  | .Decorated _ ty => isIntTyp ty
   | _ => false
 
 def isUnitLikeTyp : Typ → Bool
@@ -893,7 +891,7 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     Exp → Except String CoreExpr
   | .Var x =>
     let actualTy? := boundType? bound x <|> env.get? x
-    let asInt := expected?.map isIntLikeTyp |>.getD false
+    let asInt := expected?.map isIntTyp |>.getD false
     match boundIndex? bound x with
     | some idx =>
       let e := LExpr.bvar () idx
@@ -1068,6 +1066,8 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
           castExprToBitInfoIfNeeded innerInfo? (some (targetW, true)) x0
         else
           pure x0
+      | .Clip .Nat _ =>
+        expToCoreWithBound env bound (some .Nat) e
       -- Box(T, e): translate the inner expression with T as the expected
       -- type, so e.g. `Box(U64, Const(Int, 10))` produces `bv{64}(10)`
       -- instead of an untyped int literal.
@@ -1130,7 +1130,7 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
       let argExpected? :=
         match expected? with
         | some ty =>
-          if isIntLikeTyp ty then some Typ.Int else none
+          if isIntTyp ty then some Typ.Int else none
         | none => none
       let args' ← argsFiltered.mapM (expToCoreWithBound env bound argExpected?)
       let f := LExpr.op () (identToCore fname) none
@@ -2347,26 +2347,36 @@ def specFnToCore (noParamFns : List String)
 def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (f : ProofFn) : Except String Core.Procedure := do
   let inputNames := f.inputs.map Prod.fst
+  let hasRet :=
+    match f.returnType with
+    | .Unit | .Empty => false
+    | _ => true
+  let retDecls := if hasRet then [(f.retName, f.returnType)] else []
+  let retNames := if hasRet then [f.retName] else []
   let bodyStm? := f.body
   let setVars :=
     match bodyStm? with
     | some body => collectSetVars body
     | none => []
-  let declaredInInputsOrLocals := fun (n : String) =>
-    inputNames.any (fun x => x == n) || f.locals.any (fun (ln, _) => ln == n)
-  let implicitSetLocals := dedupLocals <| setVars.filter (fun (n, _) => !declaredInInputsOrLocals n)
+  let declaredInInputsRetOrLocals := fun (n : String) =>
+    inputNames.any (fun x => x == n) ||
+    retNames.any (fun x => x == n) ||
+    f.locals.any (fun (ln, _) => ln == n)
+  let implicitSetLocals := dedupLocals <| setVars.filter (fun (n, _) => !declaredInInputsRetOrLocals n)
   let localsAll := dedupLocals <| (f.locals.filter (fun (n, _) =>
-    !(inputNames.any (fun x => x == n))) ++ implicitSetLocals) -- avoid redeclaring inputs as local variables
+    !(inputNames.any (fun x => x == n) || retNames.any (fun x => x == n))) ++ implicitSetLocals)
   let localsAll := localsAll.filter (fun (n, t) =>
     !shouldDropForLoopScaffoldingLocal n && !isUnitLikeTyp t)
   let localsDecls := localsAll
-  let env := addNoParamFnMarkers (envFromDecls (expandVecDecls (f.inputs ++ localsAll))) noParamFns
-  let typeArgs := typeArgsFromDecls (f.inputs ++ localsAll)
+  let outputs := retDecls
+  let env := addNoParamFnMarkers (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns
+  let typeArgs := typeArgsFromDecls (f.inputs ++ outputs ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" f.ensures
+  let retVar? := if hasRet then some (f.retName, f.returnType) else none
   let body ←
     match bodyStm? with
-    | some stm => stmToCore env projLayouts mutArgMap none stm
+    | some stm => stmToCore env projLayouts mutArgMap retVar? stm
     | none => pure []
   let localDecls :=
     localsDecls.map (fun (n, t) =>
@@ -2376,7 +2386,7 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
       name := identToCore f.name
       typeArgs := typeArgs
       inputs := signatureOfVec f.inputs
-      outputs := []
+      outputs := signatureOfVec outputs
     }
     spec := {
       modifies := []
@@ -2898,6 +2908,11 @@ private def neededBvWidenCastDecls (decls : List Core.Decl) : List Core.Decl :=
   let needed := joinRefs <| decls.map declBvWidenCastRefs
   bvWidenCastDecls.filter (fun d => needed.contains (declNameString d))
 
+private def natTypeDecl : Core.Decl :=
+  -- Keep `nat` abstract at Core declaration level: this avoids injecting an
+  -- artificial constructor shape or int-encoding details into emitted programs.
+  Core.Decl.type (.con { name := "nat", params := [] })
+
 def declsToProgram (decls : List Decl) : Except String Core.Program := do
   let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
@@ -2908,7 +2923,7 @@ def declsToProgram (decls : List Decl) : Except String Core.Program := do
   -- and dropping them here can lose required declarations.
   let translated := pruneUnreferencedSyntheticHelpers parts.flatten
   let translated := pruneUnusedDeclOnlyLocals translated
-  let castDecls := neededBvToIntCastDecls translated ++ neededBvWidenCastDecls translated
+  let castDecls := [natTypeDecl] ++ neededBvToIntCastDecls translated ++ neededBvWidenCastDecls translated
   let flat :=
     dedupCoreDecls <| castDecls ++ translated
   let (typeDecls, otherDecls) := flat.partition (fun d => match d with | .type _ _ => true | _ => false)

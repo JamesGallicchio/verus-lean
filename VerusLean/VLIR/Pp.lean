@@ -262,7 +262,7 @@ def SpecFn.pp (f : SpecFn) : String :=
     s!"def {name} : {ret} := {body}"
 
 def ProofFn.pp (f : ProofFn) : String :=
-  let ⟨name, args, _requires, ensures, _body, _locals⟩ := f
+  let ⟨name, args, _retName, _retTy, _requires, ensures, _body, _locals⟩ := f
   if args.length > 0 then
     s!"theorem {name} {args} : {ensures} := by sorry"
   else

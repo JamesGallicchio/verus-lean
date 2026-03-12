@@ -471,6 +471,8 @@ deriving Repr, Inhabited, Hashable
 structure ProofFn where
   name : Ident
   inputs : List (String × Typ)
+  retName : String
+  returnType : Typ
   requires : List Exp
   ensures : List Exp
   body : Option Stm

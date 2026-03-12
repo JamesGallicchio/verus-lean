@@ -40,7 +40,7 @@ Stages:
   --boole          Generate Boole files (.rs -> JSON -> Core -> Boole, as needed)
   --lean           Run verus-lean on JSONFilesLean to generate LeanFiles
   --verify         Run StrataVerify on Core files
-  --all            Run Verus + Boogie + Verify
+  --all            Run Verus + Boogie + Verify across all suites
   --solver <name>  StrataVerify solver (default: cvc5)
   --solver-timeout <sec>
                    StrataVerify timeout in seconds
@@ -73,16 +73,23 @@ map_output_base() {
   esac
 }
 
+abs_file_path() {
+  local p="$1"
+  echo "$(cd "$(dirname "$p")" && pwd -P)/$(basename "$p")"
+}
+
 case_key_from_rs_path() {
   local p="$1"
   local p_real
-  p_real="$(cd "$(dirname "$p")" && pwd -P)/$(basename "$p")"
-  local vlir_root examples_root
+  p_real="$(abs_file_path "$p")"
+  local vlir_root verus_root examples_root
   vlir_root="$(cd "$VERUSFILES_DIR" && pwd -P)"
+  verus_root="$(cd "$VERUS_DIR" && pwd -P)"
   examples_root="$(cd "$VERUS_DIR/examples" && pwd -P)"
   local rel
   case "$p_real" in
     "$vlir_root"/*) rel="${p_real#$vlir_root/}" ;;
+    "$verus_root/tests"/*) rel="${p_real#$verus_root/}" ;;
     "$examples_root"/*) rel="${p_real#$examples_root/}" ;;
     *) rel="$(basename "$p_real")" ;;
   esac
@@ -135,15 +142,61 @@ module_shard_root() {
 infer_suite_from_rs_path() {
   local p="$1"
   local p_real
-  p_real="$(cd "$(dirname "$p")" && pwd -P)/$(basename "$p")"
-  local vlir_root examples_root
+  p_real="$(abs_file_path "$p")"
+  local vlir_root verus_tests_root examples_root
   vlir_root="$(cd "$VERUSFILES_DIR" && pwd -P)"
+  verus_tests_root="$(cd "$VERUS_DIR/tests" && pwd -P)"
   examples_root="$(cd "$VERUS_DIR/examples" && pwd -P)"
   case "$p_real" in
     "$vlir_root"/*) echo "vlir-tests" ;;
+    "$verus_tests_root"/*) echo "vlir-tests" ;;
     "$examples_root"/*) echo "verus-examples" ;;
     *) echo "verus-examples" ;;
   esac
+}
+
+collect_all_suite_rs_files() {
+  local file
+  local base
+
+  # Match the suite coverage used by regress_examples.sh.
+  while IFS= read -r file; do
+    printf '%s\n' "$file"
+  done < <(find "$VERUSFILES_DIR" -maxdepth 1 -type f -name '*.rs' | sort)
+
+  while IFS= read -r file; do
+    base="$(basename "$file")"
+    if [ -f "$VERUSFILES_DIR/$base" ]; then
+      continue
+    fi
+    printf '%s\n' "$file"
+  done < <(find "$VERUS_DIR/tests" -maxdepth 1 -type f -name '*.rs' | sort)
+
+  while IFS= read -r file; do
+    base="$(basename "$file" .rs)"
+    if [ "$base" = "verified_vec" ]; then
+      continue
+    fi
+    printf '%s\n' "$file"
+  done < <(find "$VERUS_DIR/examples" -maxdepth 1 -type f -name '*.rs' | sort)
+
+  if [ -d "$VERUS_DIR/examples/guide" ]; then
+    while IFS= read -r file; do
+      printf '%s\n' "$file"
+    done < <(find "$VERUS_DIR/examples/guide" -type f -name '*.rs' | sort)
+  fi
+}
+
+json_file_for_rs_path() {
+  local mode="$1"
+  local rs_path="$2"
+  local out_base
+  out_base="$(map_output_base "$(basename "$rs_path" .rs)")"
+  if [ "$mode" = "boogie" ]; then
+    echo "$(boogie_json_case_dir_for_rs_path "$rs_path")/${out_base}.json"
+  else
+    echo "$JSON_LEAN_DIR/${out_base}.json"
+  fi
 }
 
 boogie_json_dir_for_suite() {
@@ -189,6 +242,36 @@ resolve_core_file_for_case() {
   if [ -f "$candidate" ]; then
     echo "$candidate"
     return 0
+  fi
+  return 1
+}
+
+resolve_core_file_for_rs_path() {
+  local rs_path="$1"
+  local suite case_key
+  suite="$(infer_suite_from_rs_path "$rs_path")"
+  case_key="$(case_key_from_rs_path "$rs_path")"
+  resolve_core_file_for_case "$suite" "$case_key"
+}
+
+resolve_core_file_for_json_path() {
+  local json_path="$1"
+  local suite case_key
+  suite="$(infer_suite_from_json_path "$json_path")"
+  case_key="$(case_key_from_json_path "$json_path")"
+  resolve_core_file_for_case "$suite" "$case_key"
+}
+
+has_primary_module_artifact() {
+  local artifact_path="$1"
+  local suffix="$2"
+  local stem parent shard_root
+  stem="$(basename "$artifact_path" "$suffix")"
+  if shard_root="$(module_shard_root "$stem")"; then
+    # A primary artifact loads its sibling shards automatically.
+    parent="$(cd "$(dirname "$artifact_path")" && pwd -P)"
+    [ -f "$parent/${shard_root}${suffix}" ]
+    return
   fi
   return 1
 }
@@ -247,6 +330,25 @@ run_cmd_quiet_in_dir() {
     (cd "$dir" && "$@")
   else
     (cd "$dir" && "$@") >/dev/null 2>&1
+  fi
+}
+
+run_strata_verify() {
+  local core_file="$1"
+  local output_mode="${2:-concise}"
+  local base
+  base="$(basename "$core_file")"
+  if [ "$output_mode" = "full" ] || $verbose; then
+    (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$core_file")
+  else
+    if (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$core_file") >/dev/null 2>&1; then
+      echo "$base: ✅"
+      return 0
+    else
+      local rc=$?
+      echo "$base: ❌"
+      return $rc
+    fi
   fi
 }
 
@@ -312,7 +414,6 @@ run_verus_lean_jsons() {
   local out_ext="$5"
   local failures=()
   local json_files=()
-  local json_candidates=()
   local base
   local f
   local rc
@@ -336,21 +437,9 @@ run_verus_lean_jsons() {
       *) echo "Target is not a .json file: $target_json_path"; exit 1 ;;
     esac
   elif [ -n "$target_rs_path" ]; then
-    target_rs_base="$(basename "$target_rs_path" .rs)"
-    out_base=$(map_output_base "$target_rs_base")
-    if [ "$mode" = "boogie" ]; then
-      json_candidates+=("$(boogie_json_case_dir_for_rs_path "$target_rs_path")/${out_base}.json")
-      for json in "${json_candidates[@]}"; do
-        if [ -f "$json" ]; then
-          json_files=("$json")
-          break
-        fi
-      done
-    else
-      json="$json_dir/${out_base}.json"
-      if [ -f "$json" ]; then
-        json_files=("$json")
-      fi
+    json="$(json_file_for_rs_path "$mode" "$target_rs_path")"
+    if [ -f "$json" ]; then
+      json_files=("$json")
     fi
     if [ ${#json_files[@]} -eq 0 ]; then
       echo "Missing JSON input for target: $target_rs_path"
@@ -358,15 +447,35 @@ run_verus_lean_jsons() {
     fi
   else
     if [ "$mode" = "boogie" ]; then
-      for d in "$JSON_BOOGIE_VLIR_DIR" "$JSON_BOOGIE_EXAMPLES_DIR"; do
-        [ -d "$d" ] || continue
-        while IFS= read -r f; do
-          [ -f "$f" ] || continue
-          json_files+=("$f")
-        done < <(find "$d" -mindepth 2 -maxdepth 2 -type f -name '*.json' | sort)
-      done
+      if $run_all_flag; then
+        local rs_path expected_json
+        for rs_path in "${all_suite_rs_files[@]}"; do
+          expected_json="$(json_file_for_rs_path "$mode" "$rs_path")"
+          if [ -f "$expected_json" ]; then
+            json_files+=("$expected_json")
+          fi
+        done
+      else
+        for d in "$JSON_BOOGIE_VLIR_DIR" "$JSON_BOOGIE_EXAMPLES_DIR"; do
+          [ -d "$d" ] || continue
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            json_files+=("$f")
+          done < <(find "$d" -mindepth 2 -maxdepth 2 -type f -name '*.json' | sort)
+        done
+      fi
     else
-      json_files=("$json_dir"/*.json)
+      if $run_all_flag; then
+        local rs_path expected_json
+        for rs_path in "${all_suite_rs_files[@]}"; do
+          expected_json="$(json_file_for_rs_path "$mode" "$rs_path")"
+          if [ -f "$expected_json" ]; then
+            json_files+=("$expected_json")
+          fi
+        done
+      else
+        json_files=("$json_dir"/*.json)
+      fi
     fi
   fi
 
@@ -376,15 +485,10 @@ run_verus_lean_jsons() {
     fi
     base=$(basename "$f" .json)
     if [ "$mode" = "boogie" ] && [ -z "$target_json_path" ] && [ -z "$target_rs_path" ]; then
-      local shard_root
-      if shard_root="$(module_shard_root "$base")"; then
-        local parent
-        parent="$(cd "$(dirname "$f")" && pwd -P)"
-        if [ -f "$parent/${shard_root}.json" ]; then
-          # Translate the primary JSON once; `Main.genCoreFromFile` will load
-          # sibling shards (`base_*.json`) automatically.
-          continue
-        fi
+      if has_primary_module_artifact "$f" ".json"; then
+        # Translate the primary JSON once; `Main.genCoreFromFile` will load
+        # sibling shards (`base_*.json`) automatically.
+        continue
       fi
     fi
     any_json=true
@@ -426,9 +530,17 @@ run_verus_lean_jsons() {
     fi
     if ! $any_json; then
       if [ "$mode" = "boogie" ]; then
-        echo "No JSON files found in $JSON_BOOGIE_VLIR_DIR or $JSON_BOOGIE_EXAMPLES_DIR"
+        if $run_all_flag; then
+          echo "No Boogie JSON files found for the selected suites."
+        else
+          echo "No JSON files found in $JSON_BOOGIE_VLIR_DIR or $JSON_BOOGIE_EXAMPLES_DIR"
+        fi
       else
-        echo "No JSON files found in $json_dir"
+        if $run_all_flag; then
+          echo "No Lean JSON files found for the selected suites."
+        else
+          echo "No JSON files found in $json_dir"
+        fi
       fi
     fi
   fi
@@ -439,11 +551,13 @@ run_boogie=false
 run_boole=false
 run_lean=false
 run_verify=false
+run_all_flag=false
 target_rs_path=""
 target_json_path=""
 target_core_path=""
 custom_out_path=""
 custom_out_mode=""
+declare -a all_suite_rs_files=()
 
 if [ $# -eq 0 ]; then
   usage
@@ -503,7 +617,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --verbose) verbose=true; shift ;;
-    --all) run_verus=true; run_boogie=true; run_verify=true; shift ;;
+    --all) run_verus=true; run_boogie=true; run_verify=true; run_all_flag=true; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; while [ $# -gt 0 ]; do positional+=("$1"); shift; done ;;
     --*) echo "Unknown option: $1"; usage; exit 1 ;;
@@ -531,8 +645,7 @@ if [ ${#positional[@]} -eq 1 ]; then
     echo "Target must be an existing file path: $candidate"
     exit 1
   fi
-  candidate_dir="$(cd "$(dirname "$candidate")" && pwd -P)"
-  candidate_abs="$candidate_dir/$(basename "$candidate")"
+  candidate_abs="$(abs_file_path "$candidate")"
   case "$candidate_abs" in
     *.rs) target_rs_path="$candidate_abs" ;;
     *.json) target_json_path="$candidate_abs" ;;
@@ -583,6 +696,13 @@ if ! $run_verus && ! $run_boogie && ! $run_boole && ! $run_lean && ! $run_verify
   exit 1
 fi
 
+if $run_all_flag && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ] && [ -z "$target_core_path" ]; then
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    all_suite_rs_files+=("$file")
+  done < <(collect_all_suite_rs_files)
+fi
+
 mkdir -p "$JSON_LEAN_DIR" "$JSON_BOOGIE_DIR" "$JSON_BOOGIE_EXAMPLES_DIR" "$JSON_BOOGIE_VLIR_DIR" \
   "$BOOGIE_DIR" "$CORE_EXAMPLES_DIR" "$CORE_VLIR_DIR" "$BOOLE_DIR" "$LEAN_DIR"
 
@@ -626,10 +746,6 @@ if $run_verus; then
     if $need_verus_build; then
       source ../tools/activate
       vargo build --release --features lean
-    else
-      if $verbose; then
-        echo "Using existing Verus binary: $VERUS_BIN"
-      fi
     fi
 
     if [ -n "$target_rs_path" ]; then
@@ -637,11 +753,17 @@ if $run_verus; then
         *.rs) files=("$target_rs_path") ;;
         *) echo "Target is not a .rs file: $target_rs_path"; exit 1 ;;
       esac
+    elif $run_all_flag; then
+      files=("${all_suite_rs_files[@]}")
     else
       files=("$VERUSFILES_DIR"/*.rs)
     fi
     if [ ! -e "${files[0]}" ]; then
-      echo "No Verus test files found in $VERUSFILES_DIR"
+      if $run_all_flag; then
+        echo "No Verus test files found in the selected suites."
+      else
+        echo "No Verus test files found in $VERUSFILES_DIR"
+      fi
       exit 1
     fi
 
@@ -699,13 +821,9 @@ if $run_boole; then
     esac
   elif [ -n "$target_rs_path" ] || [ -n "$target_json_path" ]; then
     if [ -n "$target_rs_path" ]; then
-      suite="$(infer_suite_from_rs_path "$target_rs_path")"
-      case_key="$(case_key_from_rs_path "$target_rs_path")"
-      file="$(resolve_core_file_for_case "$suite" "$case_key" || true)"
+      file="$(resolve_core_file_for_rs_path "$target_rs_path" || true)"
     else
-      suite="$(infer_suite_from_json_path "$target_json_path")"
-      case_key="$(case_key_from_json_path "$target_json_path")"
-      file="$(resolve_core_file_for_case "$suite" "$case_key" || true)"
+      file="$(resolve_core_file_for_json_path "$target_json_path" || true)"
     fi
     if [ -z "$file" ]; then
       echo "Missing Core input for target path."
@@ -729,11 +847,8 @@ if $run_boole; then
     [ -f "$core" ] || continue
     base="$(basename "$core" .core.st)"
     if [ -z "$target_core_path" ] && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ]; then
-      if shard_root="$(module_shard_root "$base")"; then
-        parent="$(cd "$(dirname "$core")" && pwd -P)"
-        if [ -f "$parent/${shard_root}.core.st" ]; then
-          continue
-        fi
+      if has_primary_module_artifact "$core" ".core.st"; then
+        continue
       fi
     fi
     any=true
@@ -771,16 +886,13 @@ if $run_verify; then
         ;;
       *) echo "Target is not a .core.st/.boogie.st file: $target_core_path"; exit 1 ;;
     esac
-    (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$verify_path")
+    echo "Verify: $(basename "$verify_path")"
+    run_strata_verify "$verify_path" "full"
   elif [ -n "$target_rs_path" ] || [ -n "$target_json_path" ]; then
     if [ -n "$target_rs_path" ]; then
-      suite="$(infer_suite_from_rs_path "$target_rs_path")"
-      case_key="$(case_key_from_rs_path "$target_rs_path")"
-      file="$(resolve_core_file_for_case "$suite" "$case_key" || true)"
+      file="$(resolve_core_file_for_rs_path "$target_rs_path" || true)"
     else
-      suite="$(infer_suite_from_json_path "$target_json_path")"
-      case_key="$(case_key_from_json_path "$target_json_path")"
-      file="$(resolve_core_file_for_case "$suite" "$case_key" || true)"
+      file="$(resolve_core_file_for_json_path "$target_json_path" || true)"
     fi
     if [ -z "$file" ]; then
       echo "Missing Core input for target path."
@@ -790,31 +902,59 @@ if $run_verify; then
       /*) verify_path="$file" ;;
       *) verify_path="$ROOT_DIR/$file" ;;
     esac
-    (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$verify_path")
+    echo "Verify: $(basename "$verify_path")"
+    run_strata_verify "$verify_path" "full"
   else
     any=false
-    for scan_dir in "$CORE_VLIR_DIR" "$CORE_EXAMPLES_DIR"; do
-      [ -d "$scan_dir" ] || continue
-      for file in "$scan_dir"/*.core.st; do
-        if [ ! -f "$file" ]; then
-          break
+    verify_rc=0
+    if $run_all_flag; then
+      for rs_path in "${all_suite_rs_files[@]}"; do
+        suite="$(infer_suite_from_rs_path "$rs_path")"
+        case_key="$(case_key_from_rs_path "$rs_path")"
+        file="$(resolve_core_file_for_case "$suite" "$case_key" || true)"
+        any=true
+        if [ -z "$file" ] || [ ! -f "$file" ]; then
+          echo "${case_key}.core.st: missing"
+          verify_rc=1
+          continue
         fi
-        if [ -z "$target_core_path" ] && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ]; then
-          base="$(basename "$file" .core.st)"
-          if shard_root="$(module_shard_root "$base")"; then
-            parent="$(cd "$(dirname "$file")" && pwd -P)"
-            if [ -f "$parent/${shard_root}.core.st" ]; then
+        set +e
+        run_strata_verify "$file" "concise"
+        rc=$?
+        set -e
+        if [ $rc -ne 0 ]; then
+          verify_rc=1
+        fi
+      done
+    else
+      for scan_dir in "$CORE_VLIR_DIR" "$CORE_EXAMPLES_DIR"; do
+        [ -d "$scan_dir" ] || continue
+        for file in "$scan_dir"/*.core.st; do
+          if [ ! -f "$file" ]; then
+            break
+          fi
+          if [ -z "$target_core_path" ] && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ]; then
+            if has_primary_module_artifact "$file" ".core.st"; then
               continue
             fi
           fi
-        fi
-        any=true
-        (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$file")
+          any=true
+          set +e
+          run_strata_verify "$file" "concise"
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
+            verify_rc=1
+          fi
+        done
       done
-    done
+    fi
     if ! $any; then
       echo "No Core files found in $BOOGIE_DIR"
       exit 1
+    fi
+    if [ $verify_rc -ne 0 ]; then
+      exit $verify_rc
     fi
   fi
 fi

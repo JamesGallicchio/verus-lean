@@ -9,7 +9,7 @@ Solver success is **not** used to classify faithfulness.
 ## Data Sources
 - Full run:
   - command: `./tests/regress_examples.sh --all-suites`
-  - run id: `20260310_135328`
+  - run id: `20260311_005016`
   - solver: `cvc5`
 
 ## Raw Regression Summary (Full Run)
@@ -20,9 +20,9 @@ Primary statuses (sum to 117):
 - expected empty exports: 1
 - translate failures: 0
 - strata parse failures: 0
-- strata type failures: 82
+- strata type failures: 83
 - verify failures: 16
-- verify success: 17
+- verify success: 16
 - expected mismatches: 1
 
 Additional counters (do not affect total):
@@ -34,11 +34,10 @@ Additional counters (do not affect total):
 - `faithful but different from Verus output`: translation is faithful, but Verus/Strata outcomes differ or Strata lacks support.
 - `not faithful translation`: translation currently drops/changes important semantics compared to source-level intent.
 
-## passing (21)
+## passing (20)
 - `vlir-tests:datatypes`
 - `vlir-tests:proof_fn`
 - `vlir-tests:quant`
-- `vlir-tests:rec_adt_structural`
 - `vlir-tests:test_requires`
 - `vlir-tests:test_specfn`
 - `vlir-tests:basic_failure` (fail as expected)
@@ -57,11 +56,13 @@ Additional counters (do not affect total):
 - `verus-examples:guide/requires_ensures`
 - `verus-examples:guide/requires_ensures_edit`
 
-## faithful but different from Verus output (11)
+## faithful but different from Verus output (13)
 - `vlir-tests:FindMax` (cvc5 default gives one VC unknown)
 - `vlir-tests:LoopSimple` (expected mismatch bucket)
+- `vlir-tests:matching` (Strata currently fails on nat assertions)
 - `vlir-tests:demo_while` (same as FindMax)
 - `vlir-tests:demo_while_loop_isolation` (same as FindMax)
+- `vlir-tests:rec_adt_structural` (emit nat as a dataype; waiting for Strata native support for nat)
 - `verus-examples:bitvector_basic` (Core translation is semantically faithful but Strata SMT encoding panics on indexed bitvector literal `(_ bv0 32)` while discharging `bit_and32_auto_ensures_3`)
 - `verus-examples:fun_ext` (blocked by higher-order/extensional support)
 - `verus-examples:generics` (2 goals hit Strata "Unimplemented encoding for type var"; 1 goal needs `reveal`)
@@ -70,12 +71,11 @@ Additional counters (do not affect total):
 - `verus-examples:guide/overflow` (blocked by missing arithmetic-overflow/cast support in Strata)
 - `verus-examples:statements` (mixed-width bitvector arithmetic lowered with explicit width extension, e.g. `bv8_to_bv64_u`)
 
-## not faithful translation (6)
-- `vlir-tests:matching` (`nat` lowered as `int`, losing non-negativity semantics)
+## not faithful translation (5)
 - `verus-examples:datatypes` (decrease/recursion artifacts are not source-close enough yet)
 - `verus-examples:doubly_linked` (pointer-heavy translation not source-faithful yet)
 - `verus-examples:external` (`Ghost<int>` erased to plain `int`; `println!` in `external_body` fn not translated)
-- `verus-examples:integers` (`nat`/cast semantics not source-faithful yet)
+- `verus-examples:integers` (remaining non-faithful call-argument coercion shape)
 - `verus-examples:modules` (`closed` visibility not preserved: other modules cannot see the function's body)
 
 ## others (79) [WIP]
@@ -180,7 +180,9 @@ Additional counters (do not affect total):
   (RevealString)
 
 ### Missing Strata Core/Boole types and primitives
-- No native `.Nat` type.
+- Native `Nat` typing/arithmetic support is still incomplete in Strata/Boole.
+  The translator now emits nat as a datatype (without conversion from/to int), 
+  which is more faithful to the Verus source but wouldn't be parsed by Strata.
 - No cast/coercion primitives or semantics for `bv*_to_int_{u,s}`.
 - Missing model types: `Tuple`, `Cell`, `Atomic`, `Set`, `arrow`, `Unit`, etc.
 - Missing stdlib/pervasive symbols used by Verus exports: `Seq_*`, `Map_*`, `Pervasive_*`, etc.

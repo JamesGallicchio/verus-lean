@@ -740,7 +740,7 @@ def SpecFn.toCommand (f : SpecFn) : CoreM (TSyntax `command) := do
         termination_by $dec)
 
 def ProofFn.toCommand (f : ProofFn) : CoreM (TSyntax `command) := do
-  let ⟨name, inputs, requires, ensures, body, _locals⟩ := f
+  let ⟨name, inputs, _retName, _returnType, requires, ensures, body, _locals⟩ := f
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let _ ← -- Currently we ignore the proof body if the whole proof function is marked with `by(lean)`

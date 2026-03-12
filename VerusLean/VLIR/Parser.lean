@@ -1467,11 +1467,17 @@ def localDeclsFromJson (j : Json) : VParser (List (String × Typ)) := do
 def ProofFn.fromJson (j : Json) : VParser ProofFn := do
   let name ← pathedNameFromNameJson j
   let args ← fnParseArgs j
+  let (retName, returnType) ←
+    match Lean.Json.getObjValByPath j ["ret", "x"] with
+    | .ok retObj =>
+      VarBinder.fromJson retObj
+    | .error _ =>
+      pure ("%return", .Unit)
   match Lean.Json.getObjValByPath j ["exec_proof_check"] with
   | .ok .null =>
-    return ProofFn.mk name args [] [] none []
+    return ProofFn.mk name args retName returnType [] [] none []
   | .error _ =>
-    return ProofFn.mk name args [] [] none []
+    return ProofFn.mk name args retName returnType [] [] none []
   | .ok _ =>
     pure ()
 
@@ -1510,7 +1516,7 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
   let bodyObj ← j.getObjValByPathM ["exec_proof_check", "body", "x"]
   let bodyStm ← Stm.fromJson bodyObj
   let locals ← localDeclsFromJson j
-  return ProofFn.mk name args requires.toList ensures bodyStm locals
+  return ProofFn.mk name args retName returnType requires.toList ensures bodyStm locals
   --else
     --return ProofFn.mk name args requires.toList ensures.toList none
 
