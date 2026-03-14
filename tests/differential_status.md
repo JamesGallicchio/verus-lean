@@ -34,12 +34,13 @@ Additional counters (do not affect total):
 - `faithful but different from Verus output`: translation is faithful, but Verus/Strata outcomes differ or Strata lacks support.
 - `not faithful translation`: translation currently drops/changes important semantics compared to source-level intent.
 
-## passing (20)
+## passing (21)
 - `vlir-tests:datatypes`
 - `vlir-tests:proof_fn`
 - `vlir-tests:quant`
 - `vlir-tests:test_requires`
 - `vlir-tests:test_specfn`
+- `vlir-tests:test_opaque_reveal` (opaque function declaration-only + reveal as assume)
 - `vlir-tests:basic_failure` (fail as expected)
 - `vlir-tests:by_lean` (fail as expected)
 - `verus-examples:adts_eq`
@@ -65,7 +66,7 @@ Additional counters (do not affect total):
 - `vlir-tests:rec_adt_structural` (emit nat as a dataype; waiting for Strata native support for nat)
 - `verus-examples:bitvector_basic` (Core translation is semantically faithful but Strata SMT encoding panics on indexed bitvector literal `(_ bv0 32)` while discharging `bit_and32_auto_ensures_3`)
 - `verus-examples:fun_ext` (blocked by higher-order/extensional support)
-- `verus-examples:generics` (2 goals hit Strata "Unimplemented encoding for type var"; 1 goal needs `reveal`)
+- `verus-examples:generics` (2 goals hit Strata "Unimplemented encoding for type var"; generic `reveal(g)` dropped — see Gaps)
 - `verus-examples:guide/modes` (blocked by missing `Tuple`/`Tuple_ctor_2` support)
 - `verus-examples:guide/datatypes` (datatype-constructor/selector VCs currently fail in Strata despite faithful emission)
 - `verus-examples:guide/overflow` (blocked by missing arithmetic-overflow/cast support in Strata)
@@ -138,11 +139,24 @@ Additional counters (do not affect total):
 
 ## Gaps
 
-### `opaque` / `reveal` not supported
-- Functions marked `#[verifier::opaque]` have their bodies **fully visible** in Core.
-  `reveal(f)` calls are silently dropped. A downstream verifier can prove facts that
-  Verus would reject because the body should be hidden until explicitly revealed.
-- Affects: `verus-examples:generics` (`g` is opaque but body is emitted; `reveal(g)` dropped)
+### `opaque` / `reveal` partial support
+- Non-generic opaque spec functions are now emitted **declaration-only** (no body)
+  in Core. `reveal(f)` is emitted as
+  `assume forall params :: f(params) == body;` which faithfully models Verus's
+  reveal semantics.
+- **Generic reveals are currently dropped**: `reveal(g)` where `g` has type
+  parameters is silently skipped. The Fuel JSON currently contains only the
+  function path and fuel amount, with no type arguments (Verus erases the
+  `<u8>` from `reveal(g::<u8>)` at the SST level). To emit the correct Core
+  (`procedure test_g1<A>(...) { assume forall a: A :: g(a) == a; ... }`)
+  we need to (1) recover the type parameter `A` for the enclosing procedure
+  signature, and (2) thread it into the assume. Two paths forward:
+  - **Modify Verus export**: add type arguments to the `Fuel` SST variant and
+    serialize them in the JSON, giving the translator direct access.
+  - **Infer from call sites**: VLIR `Call` nodes carry `typs : List Typ`, so
+    we can scan the procedure body for calls to the revealed function and
+    extract the type instantiation from there.
+- Affects: `verus-examples:generics` (generic `g` reveal dropped)
 
 ### `closed` spec fn visibility not enforced
 - `pub closed spec fn` is translated with the body visible. Callers in other modules
@@ -172,12 +186,13 @@ Additional counters (do not affect total):
   collection types this loses the extensional semantics.
 - Affects: `verus-examples:guide/ext_equal`, tests using `=~=` on sequences/sets
 
-### `Fuel` / `RevealString` / `Air` statements erased
-- `Fuel` (controlling recursive function unrolling), `RevealString` (string-keyed
-  reveal), and `Air` (backend-specific directives) statements are all parsed as
-  empty blocks. Related to but distinct from the opaque/reveal gap above.
-- Affects: `verus-examples:generics` (fuel), `verus-examples:guide/strings`
-  (RevealString)
+### `RevealString` / `Air` statements erased
+- `RevealString` (string-keyed reveal) and `Air` (backend-specific directives)
+  statements are parsed as empty blocks.
+- `Fuel` statements are now parsed into `Stm.Reveal` and lowered to `assume`
+  equations for non-generic spec functions (see opaque/reveal section above).
+  Generic-function Fuel statements are still dropped.
+- Affects: `verus-examples:guide/strings` (RevealString)
 
 ### Missing Strata Core/Boole types and primitives
 - Native `Nat` typing/arithmetic support is still incomplete in Strata/Boole.

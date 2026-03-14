@@ -255,7 +255,10 @@ def Assertion.pp (a : Assertion) : String :=
   s!"{name} {decls.map Prod.fst} := {body}"
 
 def SpecFn.pp (f : SpecFn) : String :=
-  let ⟨name, args, ret, _, body, _, _⟩ := f -- todo: decreases clause
+  let name := f.name
+  let args := f.inputs
+  let ret := f.returnType
+  let body := f.body
   if args.length > 0 then
     s!"def {name} {args} : {ret} := {body}"
   else

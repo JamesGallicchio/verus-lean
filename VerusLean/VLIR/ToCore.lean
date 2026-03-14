@@ -1575,6 +1575,7 @@ partial def substStm (name : String) (rhs : Exp) : Stm → Stm
   | .OpenInvariant stm => .OpenInvariant (substStm name rhs stm)
   | .ClosureInner body => .ClosureInner (substStm name rhs body)
   | .Block stms => .Block (stms.map (substStm name rhs))
+  | .Reveal fn fuel => .Reveal fn fuel
 
 private def renameLValueVar (src dst : String) : LValue → LValue
   | .Var name =>
@@ -1608,6 +1609,7 @@ partial def renameStmVar (src dst : String) : Stm → Stm
   | .OpenInvariant stm => .OpenInvariant (renameStmVar src dst stm)
   | .ClosureInner body => .ClosureInner (renameStmVar src dst body)
   | .Block stms => .Block (stms.map (renameStmVar src dst))
+  | .Reveal fn fuel => .Reveal fn fuel
 
 def applyNameSubstsExp (subs : List (String × String)) (e : Exp) : Exp :=
   subs.foldl (fun acc (src, dst) => substExp src (.Var dst) acc) e
@@ -1668,6 +1670,7 @@ private partial def stmMentionsVar (target : String) : Stm → Bool
   | .OpenInvariant s
   | .ClosureInner s =>
     stmMentionsVar target s
+  | .Reveal .. => false
   | .Return e? =>
     e?.map (expMentionsVar target) |>.getD false
   | .BreakOrContinue _ _ => false
@@ -1707,6 +1710,7 @@ partial def inlineTempsInStm : Stm → Stm
   | .OpenInvariant stm => .OpenInvariant (inlineTempsInStm stm)
   | .ClosureInner body => .ClosureInner (inlineTempsInStm body)
   | .Block stms => .Block (inlineTemps stms)
+  | .Reveal fn fuel => .Reveal fn fuel
   | s => s
 
 partial def inlineTemps : List Stm → List Stm
@@ -1863,6 +1867,7 @@ private partial def hasUnlabeledLoopControl : Stm → Bool
   | .AssertQuery _ body => hasUnlabeledLoopControl body
   | .Block stms => stms.any hasUnlabeledLoopControl
   | .Loop .. => false
+  | .Reveal .. => false
   | _ => false
 
 partial def bindUnlabeledLoopControlTo (loopLabel : String) : Stm → Stm
@@ -2093,6 +2098,10 @@ mutual
     stmToCore env projLayouts mutArgMap retVar? body
   | .Block stms =>
     stmListToCore env projLayouts mutArgMap retVar? stms
+  | .Reveal .. =>
+    -- All Reveal nodes should be rewritten by `expandReveals` before reaching
+    -- `stmToCore`; otherwise drop it silently.
+    return []
 
   partial def stmListToCore (env : VarEnv) (projLayouts : List ProjLayout)
       (mutArgMap : MutArgMap)
@@ -2258,6 +2267,73 @@ private partial def collectNoParamFnNamesFromDecls : List Decl → List String
       | _ => []
     (here ++ collectNoParamFnNamesFromDecls rest).eraseDups
 
+/-! ### Opaque/Reveal: SpecFn lookup table
+
+`reveal(f)` in Verus is lowered to `Fuel(f, 1)` in the SST JSON.  We parse
+it as `Stm.Reveal fn fuel`.  To translate it to Strata Core we need the
+defining equation of `f` — i.e. its parameter list and body — so we build a
+lookup table from the declaration list before translating procedure bodies.
+-/
+
+/-- Map from spec-function identifiers to their VLIR definitions. -/
+abbrev SpecFnMap := Std.HashMap Ident SpecFn
+
+private partial def collectSpecFns : List Decl → SpecFnMap
+  | [] => ∅
+  | d :: rest =>
+    let here :=
+      match d with
+      | Decl.specFn f => [(f.name, f)]
+      | Decl.mutualBlock ds =>
+        ds.filterMap (fun d => match d with | Decl.specFn f => some (f.name, f) | _ => none)
+      | _ => []
+    let m := collectSpecFns rest
+    here.foldl (init := m) (fun acc (k, v) => acc.insert k v)
+
+/-- True when the spec function has type-parameter variables in its signature. -/
+private def specFnIsGeneric (f : SpecFn) : Bool :=
+  !(typeArgsFromDecls f.inputs ++ typeArgsFromTyps [f.returnType]).isEmpty
+
+/-- Build the defining-equation assumption for `reveal(f)`.
+
+For a spec function `f(x₁: T₁, …, xₙ: Tₙ): R { body }`:
+- 0 params → `assume [reveal_f]: f() == body;`
+- n params → `assume [reveal_f]: (forall x₁: T₁, …, xₙ: Tₙ :: f(x₁, …, xₙ) == body);`
+
+Returns `none` for generic spec fns because the Fuel JSON does not carry the
+type-argument instantiation (e.g. `reveal(g::<u8>)` loses the `<u8>` part).
+-/
+private def mkRevealAssume (f : SpecFn) : Option Stm :=
+  if specFnIsGeneric f then none
+  else
+    let callArgs := f.inputs.map (fun (x, _) => Exp.Var x)
+    let call := Exp.Call (.Fun f.name) [] callArgs
+    let eq := Exp.Binary (.Eq .Spec) call f.body
+    let equation :=
+      if f.inputs.isEmpty then eq
+      else Exp.Bind (.Quant .Forall f.inputs []) eq
+    some (.Assume equation)
+
+/-- Recursively rewrite `Stm.Reveal fn fuel` into `Stm.Assume` using the
+spec-fn lookup table.  Unknown or generic functions are silently dropped
+(generic reveals need type-argument instantiation we don't yet have). -/
+partial def expandReveals (sfMap : SpecFnMap) : Stm → Stm
+  | .Reveal fn _fuel =>
+    match sfMap.get? fn with
+    | some f => (mkRevealAssume f).getD (.Block [])
+    | none => .Block []  -- unknown function; drop silently
+  | .Block stms => .Block (stms.map (expandReveals sfMap))
+  | .If cond b1 b2 =>
+    .If cond (expandReveals sfMap b1) (b2.map (expandReveals sfMap))
+  | .DeadEnd stm => .DeadEnd (expandReveals sfMap stm)
+  | .OpenInvariant stm => .OpenInvariant (expandReveals sfMap stm)
+  | .ClosureInner body => .ClosureInner (expandReveals sfMap body)
+  | .AssertQuery mode body => .AssertQuery mode (expandReveals sfMap body)
+  | .Loop isFor label cond body invs dec =>
+    let cond' := cond.map (fun (s, e) => (expandReveals sfMap s, e))
+    .Loop isFor label cond' (expandReveals sfMap body) invs dec
+  | s => s
+
 def mkChecks (env : VarEnv) (checkPrefix : String) (exps : List Exp) :
     Except String (ListMap CoreLabel Procedure.Check) := do
   let exprs ← exps.mapM (expToCore env (some .Bool))
@@ -2345,7 +2421,7 @@ def specFnToCore (noParamFns : List String)
   }
 
 def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
-    (f : ProofFn) : Except String Core.Procedure := do
+    (sfMap : SpecFnMap) (f : ProofFn) : Except String Core.Procedure := do
   let inputNames := f.inputs.map Prod.fst
   let hasRet :=
     match f.returnType with
@@ -2353,7 +2429,7 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
     | _ => true
   let retDecls := if hasRet then [(f.retName, f.returnType)] else []
   let retNames := if hasRet then [f.retName] else []
-  let bodyStm? := f.body
+  let bodyStm? := f.body.map (expandReveals sfMap)
   let setVars :=
     match bodyStm? with
     | some body => collectSetVars body
@@ -2399,12 +2475,12 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
   return { proc with spec := { proc.spec with modifies := modifies } }
 
 def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
-    (f : ExecFn) : Except String Core.Procedure := do
+    (sfMap : SpecFnMap) (f : ExecFn) : Except String Core.Procedure := do
   let mutOutDecls :=
     f.inputs.filterMap (fun (n, t) =>
       (mutRefPayload? t).map (fun payloadTy => (n, s!"{n}_out", payloadTy)))
   let mutRenames := mutOutDecls.map (fun (n, outName, _) => (n, outName))
-  let rewrittenBody := applyNameSubstsStm mutRenames f.body
+  let rewrittenBody := expandReveals sfMap (applyNameSubstsStm mutRenames f.body)
   let rewrittenEnsures := f.ensures.map (applyNameSubstsExp mutRenames)
   let hasRet :=
     match f.returnType with
@@ -2548,7 +2624,7 @@ def enumToCoreTypeDecl (e : Enum) : Except String Core.TypeDecl := do
     return .data [d]
 
 partial def declToCore (noParamFns : List String)
-    (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) :
+    (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) (sfMap : SpecFnMap) :
     Decl → Except String (List Core.Decl)
   | .assertion _ =>
     -- Drop top-level `DeclType: Assert` wrappers for Core emission.
@@ -2556,10 +2632,10 @@ partial def declToCore (noParamFns : List String)
     -- (These declarations remain useful in the Verus->Lean pipeline.)
     return []
   | .specFn f => do
-    let fn ← specFnToCore noParamFns true f
+    let fn ← specFnToCore noParamFns (!f.isOpaque) f
     return [Core.Decl.func fn]
   | .proofFn f => do
-    let p ← proofFnToCore noParamFns projLayouts mutArgMap f
+    let p ← proofFnToCore noParamFns projLayouts mutArgMap sfMap f
     return [Core.Decl.proc p]
   | .execFn f => do
     let isDeclOnly := match f.body with | .Block [] => true | _ => false
@@ -2577,7 +2653,7 @@ partial def declToCore (noParamFns : List String)
         spec := { modifies := [], preconditions := [], postconditions := [] }
         body := []
       }]
-    let p ← execFnToCore noParamFns projLayouts mutArgMap f
+    let p ← execFnToCore noParamFns projLayouts mutArgMap sfMap f
     return [Core.Decl.proc p]
   | .func f => do
     let p ← funcCheckSstToCore noParamFns f
@@ -2591,9 +2667,9 @@ partial def declToCore (noParamFns : List String)
     let parts ← ds.mapM (fun d =>
       match d with
       | .specFn f => do
-        let fn ← specFnToCore noParamFns true f
+        let fn ← specFnToCore noParamFns (!f.isOpaque) f
         return [Core.Decl.func fn]
-      | _ => declToCore noParamFns projLayouts mutArgMap d)
+      | _ => declToCore noParamFns projLayouts mutArgMap sfMap d)
     -- TODO: mutual recursion?
     return parts.flatten
 
@@ -2917,7 +2993,8 @@ def declsToProgram (decls : List Decl) : Except String Core.Program := do
   let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
   let mutArgMap := collectMutArgMapFromDecls decls
-  let parts ← decls.mapM (declToCore noParamFns projLayouts mutArgMap)
+  let sfMap := collectSpecFns decls
+  let parts ← decls.mapM (declToCore noParamFns projLayouts mutArgMap sfMap)
   -- Keep declaration-only procedure stubs unless a stronger reachability proof
   -- is implemented. Some Verus shards reference helpers only through specs,
   -- and dropping them here can lose required declarations.

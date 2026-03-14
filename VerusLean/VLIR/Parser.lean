@@ -1283,8 +1283,20 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     let stmts ← arr.mapM (do Stm.fromJson <| ← xJsonFromSpanned ·)
     return .Block stmts.toList
 
-  | ("Fuel", _) =>
-    return .Block []
+  | ("Fuel", obj) =>
+    -- `Fuel` JSON is `[{path: {krate, segments}}, amount]`.
+    -- `reveal(f)` emits amount=1; `reveal_with_fuel(f, n)` emits amount=n.
+    match obj with
+    | .arr elems =>
+      if elems.size ≥ 2 then
+        let fnName ← pathedNameFromJson elems[0]!
+        let fuel := match elems[1]! with
+          | .num n => n.mantissa.toNat
+          | _ => 1
+        return .Reveal fnName fuel
+      else
+        return .Block []
+    | _ => return .Block []
 
   | ("RevealString", _) =>
     return .Block []
@@ -1414,6 +1426,12 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
     | .ok (.bool b) => b
     | _ => false
 
+  -- Parse opaqueness: `"Opaque"` vs `{"Revealed": {...}}`.
+  let isOpaque :=
+    match j.getObjVal? "opaqueness" with
+    | .ok (.str "Opaque") => true
+    | _ => false
+
   try
     -- let termCheckKind ← j.getObjValByPathM ["axioms", "spec_axioms", "termination_check", "post_condition", "kind"]
     -- if termCheckKind != "DecreasesImplicitLemma" then
@@ -1430,6 +1448,7 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       body := bodyExp
       isRecursive := isRecursive
       recursiveCasesIdxHint := recursiveCasesIdxHint
+      isOpaque := isOpaque
     }
   catch _ =>
     return some <| {
@@ -1440,6 +1459,7 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       body := bodyExp
       isRecursive := isRecursive
       recursiveCasesIdxHint := none
+      isOpaque := isOpaque
     }
 
 def localDeclsFromJson (j : Json) : VParser (List (String × Typ)) := do

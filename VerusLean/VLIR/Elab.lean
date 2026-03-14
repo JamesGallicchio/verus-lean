@@ -726,7 +726,7 @@ def Assertion.toCommand (a : Assertion) : CoreM (TSyntax `command) := do
   `(command| theorem $ident $args:bracketedBinder* : $eTerm := by auto? )
 
 def SpecFn.toCommand (f : SpecFn) : CoreM (TSyntax `command) := do
-  let ⟨name, inputs, returnType, decreases, body, _, _⟩ := f
+  let { name, inputs, returnType, decreases, body, .. } := f
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let returnType ← returnType.toTerm

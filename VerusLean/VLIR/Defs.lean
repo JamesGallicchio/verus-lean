@@ -406,6 +406,13 @@ inductive Stm where
   | OpenInvariant (stm : Stm)
   | ClosureInner (body : Stm) -- missing typ_inv_vars
   | Block (stms : List Stm)
+  /-- `reveal(f)` / `reveal_with_fuel(f, n)`.
+      Represented in Verus JSON as `Fuel(path, amount)`.
+      `amount = 1` corresponds to plain `reveal(f)`.
+      `amount > 1` corresponds to `reveal_with_fuel(f, amount)`.
+      For Core emission we approximate both as a full reveal (assume the
+      defining equation), with a comment noting fuel when amount > 1. -/
+  | Reveal (fn : Ident) (fuel : Nat)
 deriving Repr, Inhabited, Hashable
 
 --------------------------------------------------------------------------------
@@ -466,6 +473,10 @@ structure SpecFn where
   -- Optional structural recursion parameter index inferred from Verus
   -- termination-check metadata when available.
   recursiveCasesIdxHint : Option Nat := none
+  -- True when the Verus JSON `opaqueness` field is `"Opaque"`.
+  -- Opaque spec functions will be emitted declaration-only (no body)
+  -- unless a `reveal` makes them visible.
+  isOpaque : Bool := false
 deriving Repr, Inhabited, Hashable
 
 structure ProofFn where
