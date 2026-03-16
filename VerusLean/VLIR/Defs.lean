@@ -308,8 +308,10 @@ mutual
 
   Introduces bound variables of different types.
 
-  Triggers are stored as a list of trigger groups, each group being a list
-  of expressions. Verus exports these in the `Quant` JSON node.
+  Quantifier triggers are stored as a list of trigger groups, each group being
+  a list of expressions. The parser preserves only user-written trigger groups;
+  Verus auto-generated trigger groups are dropped so the emitted Strata stays
+  closer to the source `.rs` file.
 -/
 inductive Bind where
   -- CC: Verus says this is a `VarBinders`, but for now, we say that each `let x := e` has a single variable binding

@@ -131,8 +131,11 @@ case_key_from_json_path() {
 }
 
 module_shard_root() {
+  # Given a stem like "quants_M" or "broadcast_proof_m1", return the root
+  # stem ("quants" or "broadcast_proof") by stripping the last `_segment`.
+  # The caller (has_primary_module_artifact) will verify the primary exists.
   local stem="$1"
-  if [[ "$stem" =~ ^(.+)_M[[:alnum:]_]+$ ]]; then
+  if [[ "$stem" =~ ^(.+)_[^_]+$ ]]; then
     echo "${BASH_REMATCH[1]}"
     return 0
   fi
@@ -265,14 +268,17 @@ resolve_core_file_for_json_path() {
 has_primary_module_artifact() {
   local artifact_path="$1"
   local suffix="$2"
-  local stem parent shard_root
+  local stem parent candidate
   stem="$(basename "$artifact_path" "$suffix")"
-  if shard_root="$(module_shard_root "$stem")"; then
-    # A primary artifact loads its sibling shards automatically.
-    parent="$(cd "$(dirname "$artifact_path")" && pwd -P)"
-    [ -f "$parent/${shard_root}${suffix}" ]
-    return
-  fi
+  parent="$(cd "$(dirname "$artifact_path")" && pwd -P)"
+  # Try progressively shorter prefixes by stripping trailing `_segment`
+  # components until we find a sibling primary artifact.
+  candidate="$stem"
+  while candidate="$(module_shard_root "$candidate")"; do
+    if [ -f "$parent/${candidate}${suffix}" ]; then
+      return 0
+    fi
+  done
   return 1
 }
 

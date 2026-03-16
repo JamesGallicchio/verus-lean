@@ -114,8 +114,14 @@ def isVecIndexExecName (name : Ident) : Bool :=
 def isViewName (name : Ident) : Bool :=
   name.toString.endsWith ".view"
 
+/-- Strata Core reserves these type names internally. We prefix Verus types
+    that collide to avoid "reserved type name" errors. -/
+private def strataReservedTypeNames : List String :=
+  ["Seq", "Set", "Map", "Multiset", "Triggers", "TriggerGroup"]
+
 def datatypeNameOf (dt : Ident) : String :=
-  sanitizeIdent (stripLeadingNamespace dt.toString)
+  let name := sanitizeIdent (stripLeadingNamespace dt.toString)
+  if strataReservedTypeNames.contains name then s!"Verus_{name}" else name
 
 def structCtorNameOf (dt : Ident) : String :=
   -- Keep a suffix to avoid collisions with the datatype type symbol (e.g. `point_ctor` vs `point`).
@@ -3259,9 +3265,104 @@ private def natTypeDecl : Core.Decl :=
   -- artificial constructor shape or int-encoding details into emitted programs.
   Core.Decl.type (.con { name := "nat", params := [] })
 
+/-- Abstract type declarations for Verus stdlib collection types, prefixed
+    with `Verus_` to avoid clashing with Strata's reserved type names. -/
+private def stdlibTypeDecls : List Core.Decl :=
+  let oneParam := ["Verus_Seq", "Verus_Set", "Verus_Multiset"]
+  let twoParam := ["Verus_Map"]
+  let mkOneParam (name : String) : Core.Decl :=
+    Core.Decl.type (.con { name := name, params := ["T"] })
+  let mkTwoParam (name : String) : Core.Decl :=
+    Core.Decl.type (.con { name := name, params := ["K", "V"] })
+  oneParam.map mkOneParam ++ twoParam.map mkTwoParam
+
+/-- Collect `(name, maxArgCount)` pairs for all call sites in Core declarations.
+    Tracks procedure calls (explicit arg lists) and expression-level function
+    applications (counted by spine length in the `app` chain). -/
+private partial def collectExprArity : CoreExpr → Std.HashMap String Nat → Std.HashMap String Nat
+  | .app _ fn arg, acc =>
+    -- Count spine length: walk left through `app` to find the head and arg count.
+    let rec countApps (e : CoreExpr) (n : Nat) : (String × Nat) × CoreExpr :=
+      match e with
+      | .app _ f a => countApps f (n + 1)
+      | .op _ id _ => ((CoreIdent.toPretty id, n), .const () (.boolConst true))
+      | .fvar _ id _ => ((CoreIdent.toPretty id, n), .const () (.boolConst true))
+      | other => (("", n), other)
+    let ((name, arity), _) := countApps (.app () fn arg) 0
+    let acc := if name != "" then
+      match acc.get? name with
+      | some existing => if arity > existing then acc.insert name arity else acc
+      | none => acc.insert name arity
+    else acc
+    -- Also recurse into subexpressions for nested calls.
+    collectExprArity arg (collectExprArity fn acc)
+  | .abs _ _ _ body, acc => collectExprArity body acc
+  | .quant _ _ _ _ _ body, acc => collectExprArity body acc
+  | .ite _ c t e, acc => collectExprArity e (collectExprArity t (collectExprArity c acc))
+  | _, acc => acc
+
+private partial def collectStmtArity : Core.Statement → Std.HashMap String Nat → Std.HashMap String Nat
+  | .cmd (.cmd (.init _ _ (some e) _)), acc => collectExprArity e acc
+  | .cmd (.cmd (.set _ e _)), acc => collectExprArity e acc
+  | .cmd (.cmd (.assert _ e _)), acc => collectExprArity e acc
+  | .cmd (.cmd (.assume _ e _)), acc => collectExprArity e acc
+  | .cmd (.cmd (.cover _ e _)), acc => collectExprArity e acc
+  | .cmd (.call _ f args _), acc =>
+    let acc := match acc.get? f with
+      | some existing => if args.length > existing then acc.insert f args.length else acc
+      | none => acc.insert f args.length
+    args.foldl (init := acc) (fun a e => collectExprArity e a)
+  | .block _ ss _, acc => ss.foldl (init := acc) (fun a s => collectStmtArity s a)
+  | .ite cond t e _, acc =>
+    let acc := collectExprArity cond acc
+    let acc := t.foldl (init := acc) (fun a s => collectStmtArity s a)
+    e.foldl (init := acc) (fun a s => collectStmtArity s a)
+  | .loop guard measure invs body _, acc =>
+    let acc := collectExprArity guard acc
+    let acc := match measure with | some m => collectExprArity m acc | none => acc
+    let acc := invs.foldl (init := acc) (fun a e => collectExprArity e a)
+    body.foldl (init := acc) (fun a s => collectStmtArity s a)
+  | _, acc => acc
+
+/-- Collect procedure names and their max LHS count from `call` statements.
+    Names with 0 LHS captures → void procedures (no outputs). -/
+private partial def collectCallProcInfo : List Core.Statement → List (String × Nat)
+  | [] => []
+  | .cmd (.call lhs f _ _) :: rest => (f, lhs.length) :: collectCallProcInfo rest
+  | .block _ ss _ :: rest => collectCallProcInfo ss ++ collectCallProcInfo rest
+  | .ite _ t e _ :: rest => collectCallProcInfo t ++ collectCallProcInfo e ++ collectCallProcInfo rest
+  | .loop _ _ _ body _ :: rest => collectCallProcInfo body ++ collectCallProcInfo rest
+  | _ :: rest => collectCallProcInfo rest
+
+/-- Map from procedure name → max LHS capture count. -/
+private def collectAllCallProcInfo (decls : List Core.Decl) : Std.HashMap String Nat :=
+  let all := decls.flatMap (fun d => match d with
+    | .proc p _ => collectCallProcInfo p.body
+    | _ => [])
+  all.foldl (init := ∅) (fun acc (name, lhsCount) =>
+    match acc.get? name with
+    | some existing => if lhsCount > existing then acc.insert name lhsCount else acc
+    | none => acc.insert name lhsCount)
+
+private def collectRefsWithArity (decls : List Core.Decl) : List (String × Nat) :=
+  let acc : Std.HashMap String Nat := ∅
+  let acc := decls.foldl (init := acc) (fun acc d => match d with
+    | .func f _ => match f.body with
+      | some body => collectExprArity body acc
+      | none => acc
+    | .proc p _ =>
+      let acc := (p.spec.preconditions.values ++ p.spec.postconditions.values).foldl
+        (init := acc) (fun a c => collectExprArity c.expr a)
+      p.body.foldl (init := acc) (fun a s => collectStmtArity s a)
+    | .ax a _ => collectExprArity a.e acc
+    | _ => acc)
+  acc.toList
+
 /-- Translates VLIR declarations to a Core program and a side map of
     function-name → decreases Core expressions (for the pretty-printer). -/
-def declsToProgram (decls : List Decl) : Except String (Core.Program × Std.HashMap String (List CoreExpr)) := do
+def declsToProgram (decls : List Decl)
+    (callSiteTypes : Std.HashMap Ident (List Typ × Typ) := {}) :
+    Except String (Core.Program × Std.HashMap String (List CoreExpr)) := do
   let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
   let mutArgMap := collectMutArgMapFromDecls decls
@@ -3272,10 +3373,104 @@ def declsToProgram (decls : List Decl) : Except String (Core.Program × Std.Hash
   -- and dropping them here can lose required declarations.
   let translated := pruneUnreferencedSyntheticHelpers parts.flatten
   let translated := pruneUnusedDeclOnlyLocals translated
-  let castDecls := [natTypeDecl] ++ neededBvToIntCastDecls translated ++ neededBvToNatCastDecls translated ++ neededBvWidenCastDecls translated
+  let castDecls := [natTypeDecl] ++ stdlibTypeDecls ++ neededBvToIntCastDecls translated ++ neededBvToNatCastDecls translated ++ neededBvWidenCastDecls translated
   let flat :=
     dedupCoreDecls <| castDecls ++ translated
+  -- Auto-stub pass: emit uninterpreted function stubs for referenced-but-
+  -- undeclared identifiers (stdlib/pervasive symbols not in the VLIR).
+  -- We collect (name, maxArgCount) pairs so stubs have the right arity.
+  let allRefsWithArity := collectRefsWithArity flat
+  -- Also collect bare identifier references (arity 0) from all ops/fvars.
+  let bareRefs := joinRefs <| flat.map (declRefsBy (exprOpRefsBy (fun _ => true)) (fun n => [n]))
+  let allRefsWithArity := allRefsWithArity ++ bareRefs.map (fun n => (n, (0 : Nat)))
+  -- Collect names introduced by datatype declarations (constructors, testers,
+  -- destructors) so we don't emit duplicate stubs for them.
+  let datatypeNames := flat.flatMap (fun d => match d with
+    | .type (.data ds) _ => ds.flatMap (fun dt =>
+      dt.constrs.flatMap (fun c =>
+        let ctorName := CoreIdent.toPretty c.name
+        let testerName := CoreIdent.toPretty c.testerName
+        let fieldNames := c.args.map (fun (f, _) => CoreIdent.toPretty f)
+        [ctorName, testerName] ++ fieldNames))
+    | _ => [])
+  let builtinPrefixes := ["Int.", "Bv1.", "Bv8.", "Bv16.", "Bv32.", "Bv64.",
+    "Bool.", "true", "false", "Map.", "__decreases", "Unsupported."]
+  -- Strata Core built-in identifiers that must not be stubbed.
+  let strataBuiltins := ["select", "store", "ite"]
+  let hasDotDot (n : String) : Bool := (n.splitOn "..").length != 1
+  let isBuiltin (n : String) :=
+    builtinPrefixes.any (fun p => n.startsWith p) || hasDotDot n ||
+    strataBuiltins.contains n
+  -- Collect declared names with their arities for comparison.
+  let declaredArities : Std.HashMap String Nat := flat.foldl (init := ∅) (fun acc d =>
+    match d with
+    | .func f _ => acc.insert (CoreIdent.toPretty f.name) f.inputs.length
+    | .proc p _ => acc.insert (CoreIdent.toPretty p.header.name) p.header.inputs.length
+    | _ => acc)
+  -- A reference needs a stub if: (a) not declared at all, or
+  -- (b) declared with 0 params but referenced with >0 args (wrong arity).
+  let needsStub (n : String) (arity : Nat) : Bool :=
+    if isBuiltin n || isBvToIntCastName n || isBvToNatCastName n ||
+       isBvWidenCastName n || n == "nat" || datatypeNames.contains n then false
+    else match declaredArities.get? n with
+    | none => true  -- not declared at all
+    | some 0 => arity > 0  -- declared with 0 params but called with args
+    | _ => false  -- already has correct declaration
+  -- Deduplicate by name, keeping the maximum arity for each.
+  let refsByName := allRefsWithArity.foldl (init := (∅ : Std.HashMap String Nat))
+    (fun acc (n, arity) => match acc.get? n with
+      | some existing => if arity > existing then acc.insert n arity else acc
+      | none => acc.insert n arity)
+  -- Convert Ident-keyed callSiteTypes to Core-sanitized string keys for lookup.
+  let callSiteTypesByName : Std.HashMap String (List Typ × Typ) :=
+    callSiteTypes.fold (init := ∅) (fun acc ident sig =>
+      let key := CoreIdent.toPretty (identToCore ident)
+      if acc.contains key then acc else acc.insert key sig)
+  let undeclaredWithArity := refsByName.toList.filter (fun (n, arity) => needsStub n arity)
+  -- Determine which undeclared symbols are called as procedures (via `call`)
+  -- vs used as expression-level functions.
+  let procCallInfo := collectAllCallProcInfo flat
+  let autoStubs := undeclaredWithArity.flatMap (fun (name, arity) =>
+    -- Use type signatures from JSON call sites when available;
+    -- fall back to `int` placeholders otherwise.
+    let (params, retTy) := match callSiteTypesByName.get? name with
+      | some (argTypes, retType) =>
+        let ps := argTypes.zipIdx.map (fun ((ty : Typ), (i : Nat)) =>
+          (CoreIdent.unres s!"x{i}", monoTyOfTyp ty))
+        (ps, monoTyOfTyp retType)
+      | none =>
+        let ps := (List.range arity).map (fun i =>
+          (CoreIdent.unres s!"x{i}", LMonoTy.int))
+        (ps, LMonoTy.int)
+    match procCallInfo.get? name with
+    | some lhsCount =>
+      -- Emit a procedure stub for `call` targets.
+      let outputs : @Lambda.LMonoTySignature Visibility :=
+        if lhsCount > 0 then [(CoreIdent.unres "_ret", retTy)] else []
+      [Core.Decl.proc {
+        header := { name := CoreIdent.unres name, typeArgs := [],
+                     inputs := params, outputs := outputs }
+        spec := { modifies := [], preconditions := [], postconditions := [] }
+        body := []
+      }]
+    | none =>
+      -- Emit a function stub for expression-level references.
+      [Core.Decl.func {
+        name := CoreIdent.unres name
+        typeArgs := []
+        inputs := params
+        output := retTy
+        body := none
+      }])
+  -- Remove 0-arity declarations that are being replaced by auto-stubs
+  -- with correct arities.
+  let autoStubNameSet : Std.HashSet String := autoStubs.foldl (init := ∅)
+    (fun acc d => acc.insert (declNameString d))
+  let flat := flat.filter (fun d => !autoStubNameSet.contains (declNameString d))
   let (typeDecls, otherDecls) := flat.partition (fun d => match d with | .type _ _ => true | _ => false)
+  -- Place auto-stubs BEFORE other declarations so Strata's sequential
+  -- parser can resolve forward references to stdlib/pervasive symbols.
+  let otherDecls := autoStubs ++ otherDecls
   -- Build a side map of function-name → decreases comment string from the
   -- VLIR SpecFn.decreases field.  This avoids polluting Core's semantic
   -- `Func.axioms`.  We extract `decrease%init*` RHS expressions from
@@ -3687,7 +3882,11 @@ def funcToString (f : Core.Function) (fnDecreasesMap : Std.HashMap String (List 
   | none => header ++ ";" ++ decComment
   | some body =>
     let bodyStr := exprToString body
-    String.intercalate "\n" [header ++ decComment ++ " {", "  " ++ bodyStr, "}"]
+    if decComment.isEmpty then
+      String.intercalate "\n" [header ++ " {", "  " ++ bodyStr, "}"]
+    else
+      -- Put `{` on a new line so the `// decreases` comment doesn't swallow it.
+      String.intercalate "\n" [header ++ decComment, "{", "  " ++ bodyStr, "}"]
 
 def declToString (d : Core.Decl) (fnDecreasesMap : Std.HashMap String (List CoreExpr) := ∅) : String :=
   match d with

@@ -57,7 +57,7 @@ Additional counters (do not affect total):
 - `verus-examples:guide/requires_ensures`
 - `verus-examples:guide/requires_ensures_edit`
 
-## faithful but different from Verus output (24)
+## faithful but different from Verus output (26)
 - `vlir-tests:FindMax` (cvc5 default gives one VC unknown)
 - `vlir-tests:LoopSimple` (expected mismatch bucket)
 - `vlir-tests:matching` (Strata currently fails on nat assertions)
@@ -82,6 +82,8 @@ Additional counters (do not affect total):
 - `verus-examples:rw2022_script` (prime testing with quantifiers/triggers, fibo with decreases, coercions at call sites)
 - `verus-examples:trigger_loops` (uninterpreted fns with `nat` params, multi-triggers, coercions in triggers; TODO: `choose` — see Gaps)
 - `vlir-tests:tests/LoopSimpleWithSpec` (loop with spec, `triangle0` recursive spec, coercions at call sites)
+- `verus-examples:imo_1988_6` (parses and type-checks; nonlinear arithmetic proofs with decreases)
+- `verus-examples:power_of_2` (Strata type error: `int` literals in `pow2` body where `nat` expected — nat literals not yet supported)
 
 
 ## not faithful translation (8)
@@ -94,19 +96,43 @@ Additional counters (do not affect total):
 - `verus-examples:debug_expand` (`hide(is_good_integer_11)` in `test_hide` not emitted; `closed` spec fn `M3_is_good_integer` body visible to `M4_test_publish` — see Gaps)
 - `verus-examples:recursion` (`reveal_with_fuel` loses fuel amount; for-loop desugaring introduces ghost iterator complexity — see Gaps)
 
-## others (64) [WIP]
+
+## others (62) [WIP]
 - manual review of generated `.core.st` (logs are secondary and may only show the first downstream error)
 
-### missing Strata categories/model types (15)
+### missing Strata categories/model types (17)
 - Potential roadblock/todo: add missing category/model support in Strata/Boole and keep translation faithful in the meantime.
 - Observed blocker patterns include: `Undeclared type or category Unit/Atomic/Cell/Simple_pptr/Ops_Arith_add_Output/String_string/Arithmetic_overflow/Rwlock/Thread/Set`.
 - `Invariant` type also clashes with Strata Core's `invariant` loop-invariant keyword, causing "Unexpected argument to Invariant" parse errors. Needs renaming in translator output.
-- Tests: `verus-examples:atomics`, `verus-examples:basic_lock1`, `verus-examples:basic_lock2`, `verus-examples:cells`, `verus-examples:doubly_linked_xor`, `verus-examples:even_cell`, `verus-examples:float`, `verus-examples:guide/interior_mutability`, `verus-examples:guide/strings`, `verus-examples:invariants` (Invariant type + keyword clash + missing stdlib fns), `verus-examples:overflow`, `verus-examples:rwlock_vstd`, `verus-examples:statics`, `verus-examples:thread`, `vlir-tests:sets`
+- Tests: `verus-examples:atomics`, `verus-examples:basic_lock1`, `verus-examples:basic_lock2`, `verus-examples:cells`, `verus-examples:doubly_linked_xor`, `verus-examples:even_cell`, `verus-examples:float`, `verus-examples:guide/interior_mutability`, `verus-examples:guide/strings`, `verus-examples:invariants` (Invariant type + keyword clash + missing stdlib fns), `verus-examples:overflow`, `verus-examples:rwlock_vstd`, `verus-examples:statics`, `verus-examples:thread`, `vlir-tests:sets`, `verus-examples:exec_termination_example` (blocked by `Std_specs_range`), `verus-examples:syntax_attr` (blocked by `Tuple`)
 
-### missing stdlib/pervasive symbols (22)
-- Potential roadblock/todo: add/prelude-bind missing symbols and preserve them in translation (`Seq_*`, `Map_*`, `Set_*`, `Pervasive_*`, tuple selectors, etc.).
-- Observed blocker patterns include: `Unknown expr identifier Seq_empty/Layout_size_of/Pervasive_arbitrary/sqrt` and `Unknown variable Seq_len/Seq_push/Map_index/Set_contains/Tuple_2_0/Pervasive_exec_invariant`.
-- Tests: `verus-examples:broadcast_proof`, `verus-examples:guide/const`, `verus-examples:guide/exec_attr`, `verus-examples:guide/higher_order_fns`, `verus-examples:guide/invariants`, `verus-examples:guide/lib_examples`, `verus-examples:guide/quants`, `verus-examples:imo_1988_6`, `verus-examples:mergesort`, `verus-examples:nevd_script`, `verus-examples:rfmig_script`, `verus-examples:set_from_vec`, `verus-examples:syntax`, `verus-examples:traits` (uninterpreted fn decls now emitted; blocked by `Pervasive_print_u64`), `vlir-tests:demo`, `vlir-tests:demo_for`, `vlir-tests:maps`, `vlir-tests:nonlinear`, `vlir-tests:seqs`, `vlir-tests:test_array`, `vlir-tests:test_vstd`, `vlir-tests:tests/mini_c`
+### missing stdlib/pervasive symbols (19)
+- Auto-stub pass now emits uninterpreted function declarations for
+  referenced-but-undeclared stdlib/pervasive symbols. Stubs use **typed
+  signatures from JSON call-site annotations** (e.g. `Seq_len(x0: Seq int): nat`)
+  instead of `int` placeholders.
+- Verus collection types (`Seq`, `Set`, `Map`, `Multiset`) are renamed to
+  `Verus_Seq`, `Verus_Set`, etc. to avoid clashing with Strata's reserved
+  type names. Abstract type declarations are emitted (e.g.
+  `type Verus_Seq (T: Type);`).
+- Remaining blockers: missing types (`Std_specs_range`, `A` type vars,
+  `Cell`, etc.), `Unsupported.lambda` for choose/closures, type mismatches
+  in procedure bodies, and procedure stubs needed for `call` sites
+  (auto-stubs only emit function stubs).
+- `broadcast_proof`: full content now emitted (all modules, proofs, spec
+  fns); blocked by `Undeclared type or category A` (generic type var).
+- `guide/quants`: full content now emitted (52 declarations including
+  `is_even`, `all_evens`, `binary_search`, etc.); blocked by
+  `Expected category` on `Seq int` in auto-stub signatures — Strata
+  does not recognize `Seq` as a type category.
+- Current per-test blockers:
+  - Blocked by `Undeclared type or category Std_specs_range`: `guide/exec_attr`, `guide/invariants`, `mergesort`, `set_from_vec`, `demo`, `demo_for`
+  - Blocked by `Undeclared type or category A/T` (generic type vars): `broadcast_proof`, `guide/lib_examples`, `guide/quants`, `nevd_script`, `rfmig_script`, `syntax`, `test_vstd`
+  - Blocked by `Undeclared type or category impl_*`: `guide/higher_order_fns`
+  - Blocked by type mismatch (`nat`/`bv64`/`int`): `guide/const`, `nonlinear`, `seqs`, `test_array`
+  - Blocked by `Unsupported.lambda`: `maps`
+  - Blocked by parse error (`unexpected 'if'`): `tests/mini_c`
+  - `traits`: parses, 0 type-check errors but body type mismatch (`bv64` vs `int`)
 
 ### generic/category typing mismatch (18)
 - Potential roadblock/todo: align category/type-arg handling across parser/lowering and Strata typing, especially around projection/generic category expectations.
@@ -120,13 +146,6 @@ Additional counters (do not affect total):
   Type-directed coercion insertion now covers function/procedure call sites.
   Remaining gaps: non-call contexts (comparisons, quantifier bodies).
 - All tests previously in this bucket have been reclassified.
-
-### missing decrease helpers (4)
-- `CheckDecreaseInt`/`CheckDecreaseHeight`/etc. are now stripped from the
-  translated output (replaced by `// decreases` comments). These tests
-  previously failed with `Unknown variable CheckDecreaseInt` and may now
-  have a different blocker or may pass — needs re-triage.
-- Tests: `verus-examples:bitvector_equivalence`, `verus-examples:exec_termination_example`, `verus-examples:power_of_2`, `verus-examples:syntax_attr`
 
 ### higher-order/lambda support gap (1)
 - Potential roadblock/todo: add Strata support for lambda/arrow constructs (or equivalent encoding accepted by Strata verifier).

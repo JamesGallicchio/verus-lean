@@ -81,7 +81,7 @@ unsafe def genFromDir' (dirPath : String) : IO String := do
 
 unsafe def genFromFile (path : String) (printFn : String → IO Unit) : IO Unit := do
   match ← Decls.fromFile? path with
-  | .ok (ns, defs, thms) =>
+  | .ok (ns, defs, thms, _callTypes) =>
     match ← Decl.toFormat ns defs thms with
     | .ok str => printFn str
     | .error e => IO.println s!"Error: {e}"
@@ -109,10 +109,15 @@ unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit)
   let target := System.FilePath.mk path
   let bundleFiles ← collectJsonBundleFiles target
   let mut allDecls : List Decl := []
+  let mut allCallSiteTypes : CallSiteTypes := {}
   for f in bundleFiles do
     match ← Decls.fromFile? f.toString with
-    | .ok (_ns, defs, thms) =>
+    | .ok (_ns, defs, thms, callTypes) =>
       allDecls := allDecls ++ defs ++ thms
+      -- Merge call-site type signatures, keeping the first seen for each name.
+      for (name, sig) in callTypes.toList do
+        if !allCallSiteTypes.contains name then
+          allCallSiteTypes := allCallSiteTypes.insert name sig
     | .error e =>
       if f == target then
         -- Primary file failure is fatal.
@@ -121,7 +126,7 @@ unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit)
       else
         -- Keep translating other shards so one unsupported module does not block output.
         IO.eprintln s!"warning: skipping shard {f}: {e}"
-  match ToCore.declsToProgram allDecls with
+  match ToCore.declsToProgram allDecls allCallSiteTypes with
   | .ok (p, fnDecMap) =>
     if useOfficialPrinter then
       -- Use Strata's official DDM-based pretty-printer (Core.formatProgram).

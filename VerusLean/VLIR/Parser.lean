@@ -47,6 +47,11 @@ structure ParserState where
   thms : DeclMap := {}
   defsInRevOrder : List Ident := []
   thmsInRevOrder : List Ident := []
+  /-- Call-site type signatures collected during parsing.
+      Maps function Ident → (argTypes, returnType) for calls to
+      undeclared functions (stdlib/pervasive symbols). Used by
+      the auto-stub pass in ToCore to emit correctly-typed stubs. -/
+  callSiteTypes : Std.HashMap Ident (List Typ × Typ) := {}
 deriving Inhabited, Repr
 
 abbrev VParser := EStateM String ParserState
@@ -804,6 +809,68 @@ def VarBinder.typBindersFromJson (j : Json) : m (List (String × Typ)) := do
 def Var.fromJson (j : Json) : m String := do
   decodeVarNameJson j
 
+private def isExplicitTriggerAnnotation : Json → Bool
+  | .str "AutoTrigger" => false
+  | .str "AllTriggers" => false
+  | _ => true
+
+/--
+  Returns true iff the raw expression JSON for the current quantifier body
+  contains explicit user-written trigger syntax.
+
+  Verus always serializes the final trigger groups on `Bind.Quant`, including
+  auto-trigger inference. To keep the Strata output closer to the source, we
+  only preserve those trigger groups when the body itself still carries
+  explicit trigger syntax (`#[trigger] ...` or `#![trigger ...]`).
+
+  Nested quantifiers are treated as their own scope, so an inner manual trigger
+  does not cause us to keep the outer quantifier's auto-generated triggers.
+-/
+private partial def expJsonHasUserTriggerSyntax (j : Json) : Bool :=
+  let nestedQuantBody :=
+    match j.getObjVal? "Bind" with
+    | .ok bindJson =>
+      match bindJson.getArr? with
+      | .ok arr =>
+        match arr.toList with
+        | bindNode :: _ =>
+          match Json.getObjVal? bindNode "x" with
+          | .ok bindX =>
+            match Json.getObjVal? bindX "Quant" with
+            | .ok _ => true
+            | .error _ => false
+          | .error _ => false
+        | [] => false
+      | .error _ => false
+    | .error _ => false
+  if nestedQuantBody then
+    false
+  else
+    let hasWithTriggers :=
+      match j.getObjVal? "WithTriggers" with
+      | .ok _ => true
+      | .error _ => false
+    let hasExplicitTriggerUnary :=
+      match j.getObjVal? "Unary" with
+      | .ok unaryJson =>
+        match unaryJson.getArr? with
+        | .ok arr =>
+          match arr.toList with
+          | opJson :: _ =>
+            match Json.getObjVal? opJson "Trigger" with
+            | .ok payload => isExplicitTriggerAnnotation payload
+            | .error _ => false
+          | [] => false
+        | .error _ => false
+      | .error _ => false
+    if hasWithTriggers || hasExplicitTriggerUnary then
+      true
+    else
+      match j with
+      | .arr arr => arr.toList.any expJsonHasUserTriggerSyntax
+      | .obj obj => obj.toList.any (fun entry => expJsonHasUserTriggerSyntax entry.2)
+      | _ => false
+
 
 mutual /- {Bind, Exp}.fromJson -/
 
@@ -885,10 +952,26 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     -- Should be an object with a function name and arguments
     -- The function's name is the 0th element, the arguments the 2nd element (an array)
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 3
+    -- Capture the return type set by `fromJsonSpanned` before inner parsing.
+    let retType ← getTyp
     let callFn ← CallFun.fromJson arr[0]
     let expsJson ← arr[2].getArrM
-    let exps : Array Exp ← expsJson.mapM (fromJsonSpanned · Exp.fromJson)
-    return .Call callFn [] exps.toList
+    -- Parse each argument and capture its type annotation.
+    let mut argTypes : List Typ := []
+    let mut exps : List Exp := []
+    for argJson in expsJson do
+      let exp ← fromJsonSpanned argJson Exp.fromJson
+      let argTy ← getTyp
+      argTypes := argTypes ++ [argTy]
+      exps := exps ++ [exp]
+    -- Record the call-site type signature for auto-stub generation.
+    let fnName := CallFun.name callFn
+    modify fun st => { st with callSiteTypes :=
+      -- Keep the first observed signature (later calls may have different
+      -- instantiations for generic functions).
+      if st.callSiteTypes.contains fnName then st.callSiteTypes
+      else st.callSiteTypes.insert fnName (argTypes, retType) }
+    return .Call callFn [] exps
 
   | ("CallLambda", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
@@ -1027,12 +1110,20 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
       return parsed.foldr (fun (name, typ, exp) acc => .Bind (.Let name typ exp) acc) body
     | _ =>
       let bind ← Bind.fromJson arr[0]
+      let bind :=
+        match bind with
+        | .Quant q vars trigs =>
+          if trigs.isEmpty || expJsonHasUserTriggerSyntax arr[1] then
+            bind
+          else
+            .Quant q vars []
+        | _ => bind
       let exp ← withBoundVars bind.idents (fromJsonSpanned arr[1] Exp.fromJson)
       return .Bind bind exp
 
   | ("WithTriggers", obj) =>
-    -- Keep the underlying expression and ignore explicit trigger payloads for now.
-    -- TODO: preserve trigger payloads once solver-facing pipeline consumes them.
+    -- `WithTriggers` still matters for trigger provenance, but the wrapper
+    -- itself is erased from VLIR after parsing.
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
     fromJsonSpanned arr[1] Exp.fromJson
 
@@ -1769,11 +1860,15 @@ partial def Decls.fromJson? (j : Json) : VParser (String × List Decl × List De
   let thms ← getThms
   return (krate, defs, thms)
 
-partial def Decls.fromFile? (path : String) : IO (Except String (String × List Decl × List Decl)) := do
+/-- Type alias for call-site type signatures collected during parsing. -/
+abbrev CallSiteTypes := Std.HashMap Ident (List Typ × Typ)
+
+partial def Decls.fromFile? (path : String) :
+    IO (Except String (String × List Decl × List Decl × CallSiteTypes)) := do
   let jsonStr ← IO.FS.readFile path
   let json ← IO.ofExcept <| Json.parse jsonStr
   match Decls.fromJson? json default with
-  | .ok decls _ => return .ok decls
+  | .ok (krate, defs, thms) st => return .ok (krate, defs, thms, st.callSiteTypes)
   | .error e _ => return .error e
 
 end VerusLean
