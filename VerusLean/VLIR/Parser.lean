@@ -1413,13 +1413,13 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
   let returnType ← Typ.fromJson <| ← j.getObjValByPathM ["ret", "x", "typ"]
   setTyp returnType
 
-  -- Uninterpreted spec functions can have `spec_axioms = null`; skip them for now.
-  let bodyObj ←
+  -- Uninterpreted spec functions have `spec_axioms = null` and no body.
+  -- We still emit them as declaration-only (body := none) so downstream
+  -- code can reference them.
+  let bodyExp? ←
     match Lean.Json.getObjValByPath j ["axioms", "spec_axioms", "body_exp"] with
-    | .ok v => pure v
-    | .error _ => return none
-  -- Parse the body as an expression (stored under spec axioms).
-  let bodyExp ← fromJsonSpanned bodyObj Exp.fromJson
+    | .ok v => some <$> fromJsonSpanned v Exp.fromJson
+    | .error _ => pure none
 
   let isRecursive :=
     match Lean.Json.getObjValByPath j ["has", "is_recursive"] with
@@ -1445,7 +1445,7 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       inputs := args
       returnType := returnType
       decreases := some decreases
-      body := bodyExp
+      body := bodyExp?
       isRecursive := isRecursive
       recursiveCasesIdxHint := recursiveCasesIdxHint
       isOpaque := isOpaque
@@ -1456,7 +1456,7 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       inputs := args
       returnType := returnType
       decreases := none
-      body := bodyExp
+      body := bodyExp?
       isRecursive := isRecursive
       recursiveCasesIdxHint := none
       isOpaque := isOpaque

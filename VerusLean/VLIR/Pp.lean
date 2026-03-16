@@ -258,11 +258,13 @@ def SpecFn.pp (f : SpecFn) : String :=
   let name := f.name
   let args := f.inputs
   let ret := f.returnType
-  let body := f.body
+  let bodyStr := match f.body with
+    | some body => s!" := {body}"
+    | none => " (uninterpreted)"
   if args.length > 0 then
-    s!"def {name} {args} : {ret} := {body}"
+    s!"def {name} {args} : {ret}{bodyStr}"
   else
-    s!"def {name} : {ret} := {body}"
+    s!"def {name} : {ret}{bodyStr}"
 
 def ProofFn.pp (f : ProofFn) : String :=
   let ⟨name, args, _retName, _retTy, _requires, ensures, _body, _locals⟩ := f

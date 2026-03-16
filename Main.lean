@@ -122,14 +122,14 @@ unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit)
         -- Keep translating other shards so one unsupported module does not block output.
         IO.eprintln s!"warning: skipping shard {f}: {e}"
   match ToCore.declsToProgram allDecls with
-  | .ok p =>
+  | .ok (p, fnDecMap) =>
     if useOfficialPrinter then
       -- Use Strata's official DDM-based pretty-printer (Core.formatProgram).
       -- Note: output does not include the "program Core;" header.
       let formatted := Std.Format.pretty (Strata.Core.formatProgram p) 100
       printFn ("program Core;\n\n" ++ formatted ++ "\n")
     else
-      printFn (ToCore.Pretty.programToString p)
+      printFn (ToCore.Pretty.programToString p fnDecMap)
   | .error e => IO.println s!"Error: {e}"
 
 unsafe def main : List String → IO Unit

@@ -730,14 +730,19 @@ def SpecFn.toCommand (f : SpecFn) : CoreM (TSyntax `command) := do
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let returnType ← returnType.toTerm
-  let body ← body.toTerm
-  match decreases with
+  match body with
   | none =>
-    `(command| def $ident $args:bracketedBinder* : $returnType := $body )
-  | some decreases =>
-    let dec ← decreases.toTerm
-    `(command| def $ident $args:bracketedBinder* : $returnType := $body
-        termination_by $dec)
+    -- Uninterpreted: use `axiom` to avoid pulling in Inhabited/default.
+    `(command| axiom $ident $args:bracketedBinder* : $returnType )
+  | some bodyExp =>
+    let body ← bodyExp.toTerm
+    match decreases with
+    | none =>
+      `(command| def $ident $args:bracketedBinder* : $returnType := $body )
+    | some decreases =>
+      let dec ← decreases.toTerm
+      `(command| def $ident $args:bracketedBinder* : $returnType := $body
+          termination_by $dec)
 
 def ProofFn.toCommand (f : ProofFn) : CoreM (TSyntax `command) := do
   let ⟨name, inputs, _retName, _returnType, requires, ensures, body, _locals⟩ := f

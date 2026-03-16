@@ -467,7 +467,7 @@ structure SpecFn where
   inputs : List (String × Typ)
   returnType : Typ
   decreases : Option Stm
-  body : Exp
+  body : Option Exp
   -- Directly from Verus JSON `has.is_recursive`.
   isRecursive : Bool := false
   -- Optional structural recursion parameter index inferred from Verus

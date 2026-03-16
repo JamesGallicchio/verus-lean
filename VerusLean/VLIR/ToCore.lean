@@ -213,6 +213,26 @@ def mkIteStmt (cond : CoreExpr) (thenb elseb : List Core.Statement) : Core.State
 def mkBlockStmt (label : String) (body : List Core.Statement) : Core.Statement :=
   Imperative.Stmt.block label body emptyStmtMeta
 
+/-- True when a Core statement is `assume false`. -/
+private def isCoreAssumeFalse : Core.Statement → Bool
+  | .cmd (.cmd (.assume _ e _)) =>
+    match e with
+    | .const _ (.boolConst false) => true
+    | _ => false
+  | _ => false
+
+/-- Strip `assume false` from Core statement lists, recursing into blocks/ite/loops. -/
+private partial def stripCoreAssumeFalse : List Core.Statement → List Core.Statement
+  | [] => []
+  | s :: rest =>
+    let s' := match s with
+      | .block label body md => .block label (stripCoreAssumeFalse body) md
+      | .ite cond tb eb md => .ite cond (stripCoreAssumeFalse tb) (stripCoreAssumeFalse eb) md
+      | .loop g m invs body md => .loop g m invs (stripCoreAssumeFalse body) md
+      | other => other
+    if isCoreAssumeFalse s' then stripCoreAssumeFalse rest
+    else s' :: stripCoreAssumeFalse rest
+
 def identToCore (i : Ident) : CoreIdent :=
   CoreIdent.unres (sanitizeIdent (stripLeadingNamespace i.toString))
 
@@ -270,6 +290,22 @@ private def addNoParamFnMarkers (env : VarEnv) (noParamFns : List String) : VarE
 
 private def hasNoParamFnMarker (env : VarEnv) (fname : String) : Bool :=
   env.contains (noParamMarkerKey fname)
+
+/-- Key convention for storing spec function return types in `VarEnv`. -/
+private def fnRetKey (fname : String) : String :=
+  s!"__verus_fnret__{fname}"
+
+/-- Look up the return type of a spec function stored in the `VarEnv`. -/
+private def lookupFnRetType (env : VarEnv) (fname : String) : Option Typ :=
+  env.get? (fnRetKey fname)
+
+/-- Key convention for storing the i-th parameter type of a spec function. -/
+private def fnParamKey (fname : String) (idx : Nat) : String :=
+  s!"__verus_fnparam__{fname}__{idx}"
+
+/-- Look up the i-th parameter type of a spec function. -/
+private def lookupFnParamType (env : VarEnv) (fname : String) (idx : Nat) : Option Typ :=
+  env.get? (fnParamKey fname idx)
 
 private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : List Exp) : List Exp :=
   let fnameStr := CoreIdent.toPretty (identToCore fname)
@@ -568,8 +604,29 @@ def chooseBitArgTyForCmp
 def bvToIntCastName (w : Nat) (signed : Bool) : String :=
   if signed then s!"bv{w}_to_int_s" else s!"bv{w}_to_int_u"
 
+def bvToNatCastName (w : Nat) (signed : Bool) : String :=
+  if signed then s!"bv{w}_to_nat_s" else s!"bv{w}_to_nat_u"
+
 def isBvToIntCastName (s : String) : Bool :=
   s.endsWith "_to_int_u" || s.endsWith "_to_int_s"
+
+def isBvToNatCastName (s : String) : Bool :=
+  s.endsWith "_to_nat_u" || s.endsWith "_to_nat_s"
+
+/-- Wrap a bitvector expression in a coercion cast to the target type when needed.
+    Returns `none` if no coercion is needed (types match or can't determine). -/
+def mkCoercionCast (argInfo? : Option (Nat × Bool)) (targetTy : Typ) (e : CoreExpr) : Option CoreExpr :=
+  match argInfo? with
+  | some (w, signed) =>
+    match targetTy with
+    | .Int =>
+      -- bv → int: use bv*_to_int_*
+      some (LExpr.mkApp () (LExpr.op () (CoreIdent.unres (bvToIntCastName w signed)) none) [e])
+    | .Nat =>
+      -- bv → nat: use bv*_to_nat_*
+      some (LExpr.mkApp () (LExpr.op () (CoreIdent.unres (bvToNatCastName w signed)) none) [e])
+    | _ => none
+  | none => none
 
 def bvToIntCastOp (w : Nat) (signed : Bool) : CoreExpr :=
   LExpr.op () (CoreIdent.unres (bvToIntCastName w signed)) none
@@ -763,7 +820,11 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
         | none => none
       | _ => none
     else
-      none
+      -- Look up the spec function's return type so that function-call results
+      -- are correctly recognized as bitvectors (avoids spurious bv→int casts
+      -- in comparisons like `mul(d, k) == v`).
+      let fnStr := CoreIdent.toPretty (identToCore name)
+      (lookupFnRetType env fnStr).bind bitInfoOfTyp
   | .Unary (.BitNot (some w)) e =>
     inferBitInfo env bound e <|>
       (if isSupportedBvWidth w then some (w, false) else none)
@@ -1127,12 +1188,24 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     let fname := CallFun.name fn
     let argsFiltered := normalizeCallArgsForCallee env fname args
     let mkFallback := do
-      let argExpected? :=
-        match expected? with
-        | some ty =>
-          if isIntTyp ty then some Typ.Int else none
-        | none => none
-      let args' ← argsFiltered.mapM (expToCoreWithBound env bound argExpected?)
+      let fnStr := CoreIdent.toPretty (identToCore fname)
+      -- Translate arguments with per-parameter expected types when available.
+      let args' ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
+        -- Look up the declared parameter type for this position.
+        let paramTy? := lookupFnParamType env fnStr idx
+        let argExpected? := paramTy? <|> (match expected? with
+          | some ty => if isIntTyp ty then some Typ.Int else none
+          | none => none)
+        let argExpr ← expToCoreWithBound env bound argExpected? arg
+        -- Insert coercion if the argument is a bitvector but the parameter
+        -- expects `nat` or `int` (widening cast that Verus erases).
+        let argInfo? := inferBitInfo env bound arg
+        match paramTy? with
+        | some paramTy =>
+          match mkCoercionCast argInfo? paramTy argExpr with
+          | some coerced => pure coerced
+          | none => pure argExpr
+        | none => pure argExpr)
       let f := LExpr.op () (identToCore fname) none
       return LExpr.mkApp () f args'
     if isViewName fname then
@@ -1395,7 +1468,16 @@ private def lowerMutCallArgs (env : VarEnv) (projLayouts : List ProjLayout)
   --   post: write tmp back into the projected root.
   let rewrites ← collectMutArgProjectionRewrites mutArgMap callee argsFiltered
   let argsFiltered' := replaceMutArgProjectionArgs argsFiltered rewrites
-  let argsCore ← argsFiltered'.mapM (expToCore env none)
+  let argsCore ← argsFiltered'.zipIdx.mapM (fun (arg, idx) => do
+    let paramTy? := lookupFnParamType env callee idx
+    let argExpr ← expToCore env none arg
+    let argInfo? := inferBitInfo env [] arg
+    match paramTy? with
+    | some paramTy =>
+      match mkCoercionCast argInfo? paramTy argExpr with
+      | some coerced => pure coerced
+      | none => pure argExpr
+    | none => pure argExpr)
   let mutOuts ← mutCallOutputs mutArgMap callee argsFiltered'
   let (pre, post) ← mutArgProjectionBridgeStmts env projLayouts rewrites
   pure { argsFiltered := argsFiltered', argsCore := argsCore, mutOuts := mutOuts, pre := pre, post := post }
@@ -1993,11 +2075,12 @@ mutual
     | some e, some (retName, retTy) =>
       -- Unit-like returns (empty tuple/struct/enum) carry no payload.
       match e with
-      | .EnumCtor _ "tuple%0" [] | .TupleCtor 0 [] | .StructCtor _ [] => return []
+      | .EnumCtor _ "tuple%0" [] | .TupleCtor 0 [] | .StructCtor _ [] =>
+        return [mkExitToLabelStmt "__return__"]
       | _ =>
         let rhs ← expToCore env (some retTy) e
-        return [mkSetStmt (varToCore retName) rhs]
-    | _, _ => return []
+        return [mkSetStmt (varToCore retName) rhs, mkExitToLabelStmt "__return__"]
+    | _, _ => return [mkExitToLabelStmt "__return__"]
   | .BreakOrContinue label isBreak =>
     match label with
     | some l => return [mkExitToLabelStmt (sanitizeIdent l)]
@@ -2278,6 +2361,33 @@ lookup table from the declaration list before translating procedure bodies.
 /-- Map from spec-function identifiers to their VLIR definitions. -/
 abbrev SpecFnMap := Std.HashMap Ident SpecFn
 
+/-- Add spec-function return and parameter types to a `VarEnv` so that
+    `inferBitInfo` can determine bitvector widths and `expToCoreWithBound`
+    can insert coercions at call sites. -/
+private def addFnRetTypes (env : VarEnv) (sfMap : SpecFnMap) : VarEnv :=
+  sfMap.fold (init := env) (fun acc name sf =>
+    let fnStr := CoreIdent.toPretty (identToCore name)
+    let acc := acc.insert (fnRetKey fnStr) sf.returnType
+    -- Store each parameter type for call-site coercion insertion.
+    sf.inputs.zipIdx.foldl (init := acc) (fun acc ((_, ty), idx) =>
+      acc.insert (fnParamKey fnStr idx) ty))
+
+/-- Add parameter types from all declarations (proof fns, exec fns) so that
+    procedure call sites can also get coercion insertion. -/
+private partial def addAllFnParamTypes (env : VarEnv) (decls : List Decl) : VarEnv :=
+  decls.foldl (init := env) (fun acc d =>
+    match d with
+    | .proofFn f =>
+      let fnStr := CoreIdent.toPretty (identToCore f.name)
+      f.inputs.zipIdx.foldl (init := acc) (fun acc ((_, ty), idx) =>
+        acc.insert (fnParamKey fnStr idx) ty)
+    | .execFn f =>
+      let fnStr := CoreIdent.toPretty (identToCore f.name)
+      f.inputs.zipIdx.foldl (init := acc) (fun acc ((_, ty), idx) =>
+        acc.insert (fnParamKey fnStr idx) ty)
+    | .mutualBlock ds => addAllFnParamTypes acc ds
+    | _ => acc)
+
 private partial def collectSpecFns : List Decl → SpecFnMap
   | [] => ∅
   | d :: rest =>
@@ -2305,10 +2415,12 @@ type-argument instantiation (e.g. `reveal(g::<u8>)` loses the `<u8>` part).
 -/
 private def mkRevealAssume (f : SpecFn) : Option Stm :=
   if specFnIsGeneric f then none
-  else
+  else match f.body with
+  | none => none  -- uninterpreted function; nothing to reveal
+  | some body =>
     let callArgs := f.inputs.map (fun (x, _) => Exp.Var x)
     let call := Exp.Call (.Fun f.name) [] callArgs
-    let eq := Exp.Binary (.Eq .Spec) call f.body
+    let eq := Exp.Binary (.Eq .Spec) call body
     let equation :=
       if f.inputs.isEmpty then eq
       else Exp.Bind (.Quant .Forall f.inputs []) eq
@@ -2387,9 +2499,99 @@ private def inferProcModifies (p : Core.Procedure) : List CoreIdent :=
   let disallowed := (ListMap.keys p.header.inputs ++ ListMap.keys p.header.outputs ++ locals).eraseDups
   written.filter (fun v => !disallowed.contains v) |>.eraseDups
 
+/-- Extract the decreases measure expression(s) from a function/procedure body.
+    Verus encodes `decreases n` as an `Assign` statement
+    `decrease%init0 := n` at the start of the body `Block`.
+    We collect the RHS of every such assignment. -/
+private def collectDecreasesExps : Stm → List Exp
+  | .Assign (.Var name) _ rhs _ =>
+    if name.startsWith "decrease" then [rhs] else []
+  | .Block stms => stms.flatMap collectDecreasesExps
+  | _ => []
+
+/-- True when a statement is a decrease-related artifact that should be stripped
+    from the translated output for faithful source-level representation.
+    Matches: `decrease%init*` assignments and `CheckDecreaseInt` assertions. -/
+private def isDecreaseArtifact : Stm → Bool
+  | .Assign (.Var name) _ _ _ => name.startsWith "decrease"
+  | .Call fn _ _ => toString fn |>.startsWith "CheckDecrease"
+  | .Assert (.Call fn _ _) => -- assert CheckDecreaseInt(...)
+    toString (CallFun.name fn) |>.startsWith "CheckDecrease"
+  | .Assert (.Var name) => name.startsWith "CheckDecrease"
+  | _ => false
+
+/-- True when a VLIR statement tree contains a `Return` node. -/
+private partial def hasReturnStm : Stm → Bool
+  | .Return _ => true
+  | .Block stms => stms.any hasReturnStm
+  | .If _ b1 b2 => hasReturnStm b1 || (b2.map hasReturnStm |>.getD false)
+  | .DeadEnd stm => hasReturnStm stm
+  | _ => false
+
+/-- True when a statement is `Assume(false)` — used to strip dead-code
+    markers that Verus inserts after `Return`. -/
+private def isAssumeFalse : Stm → Bool
+  | .Assume (.Const (.Bool false)) => true
+  | _ => false
+
+/-- Strip `Assume(false)` statements that follow `Return` in a block.
+    Verus SST inserts these to mark unreachable code after early returns.
+    Since we emit `exit __return__`, these are no longer needed. -/
+private partial def blockHasReturn : List Stm → Bool
+  | [] => false
+  | (.Return _) :: _ => true
+  | (.Block stms) :: rest => blockHasReturn stms || blockHasReturn rest
+  | (.If _ b1 b2) :: rest =>
+    hasReturnStm b1 || (b2.map hasReturnStm |>.getD false) || blockHasReturn rest
+  | _ :: rest => blockHasReturn rest
+
+private partial def stripReturnAssumeFalse : List Stm → List Stm
+  | [] => []
+  | (.Return e) :: rest =>
+    -- Drop all trailing Assume(false) after a Return.
+    .Return e :: (rest.filter (!isAssumeFalse ·) |> stripReturnAssumeFalse)
+  | (.Block stms) :: rest =>
+    let stripped := .Block (stripReturnAssumeFalse stms)
+    -- If the block contained a Return, also strip trailing Assume(false).
+    if blockHasReturn stms then
+      stripped :: (rest.filter (!isAssumeFalse ·) |> stripReturnAssumeFalse)
+    else
+      stripped :: stripReturnAssumeFalse rest
+  | (.If cond b1 b2) :: rest =>
+    let b1' := stripReturnDeep b1
+    let b2' := b2.map stripReturnDeep
+    let ifHasRet := hasReturnStm b1 || (b2.map hasReturnStm |>.getD false)
+    let stripped := .If cond b1' b2'
+    if ifHasRet then
+      stripped :: (rest.filter (!isAssumeFalse ·) |> stripReturnAssumeFalse)
+    else
+      stripped :: stripReturnAssumeFalse rest
+  | s :: rest => s :: stripReturnAssumeFalse rest
+where
+  stripReturnDeep : Stm → Stm
+    | .Block stms => .Block (stripReturnAssumeFalse stms)
+    | .If cond b1 b2 => .If cond (stripReturnDeep b1) (b2.map stripReturnDeep)
+    | .DeadEnd stm => .DeadEnd (stripReturnDeep stm)
+    | .Loop isFor label cond body invs dec =>
+      .Loop isFor label cond (stripReturnDeep body) invs dec
+    | s => s
+
+/-- Strip decrease-related artifacts from a statement tree.
+    Removes `decrease%init*` assigns and `CheckDecreaseInt` assertions
+    while preserving the rest of the body structure. -/
+private partial def stripDecreaseArtifacts : Stm → Stm
+  | .Block stms =>
+    .Block (stms.filter (!isDecreaseArtifact ·) |>.map stripDecreaseArtifacts)
+  | .If cond b1 b2 =>
+    .If cond (stripDecreaseArtifacts b1) (b2.map stripDecreaseArtifacts)
+  | .DeadEnd stm => .DeadEnd (stripDecreaseArtifacts stm)
+  | .Loop isFor label cond body invs dec =>
+    .Loop isFor label cond (stripDecreaseArtifacts body) invs dec
+  | stm => stm
+
 def specFnToCore (noParamFns : List String)
-    (emitBody : Bool) (f : SpecFn) : Except String Core.Function := do
-  let env := addNoParamFnMarkers (envFromDecls f.inputs) noParamFns
+    (emitBody : Bool) (f : SpecFn) (sfMap : SpecFnMap := (∅ : SpecFnMap)) : Except String Core.Function := do
+  let env := addFnRetTypes (addNoParamFnMarkers (envFromDecls f.inputs) noParamFns) sfMap
   let typeArgs := (typeArgsFromDecls f.inputs ++ typeArgsFromTyps [f.returnType]).eraseDups
   -- Recursion metadata comes directly from Verus JSON (`has.is_recursive`) and
   -- parsed termination-check hints (`recursiveCasesIdxHint`).
@@ -2399,17 +2601,18 @@ def specFnToCore (noParamFns : List String)
     match recCasesIdx? with
     | some idx => #[.inlineIfConstr idx]
     | none => #[]
-  -- `SpecFn.decreases` is preserved in VLIR, but currently dropped here.
-  -- Strata Core supports loop-level measures in the AST, but has no
-  -- function-level `decreases` slot/syntax yet.
-  -- TODO(strata): add function-level termination-measure support so
-  -- recursive spec-fn decreases clauses can be emitted faithfully.
-  let _ := f.decreases
+  -- `SpecFn.decreases` is preserved in VLIR but not stored in the Core `Func`
+  -- AST (which has no function-level decreases slot).  The decreases comment
+  -- is built in `declsToProgram` from a side map and injected by the
+  -- pretty-printer, avoiding misuse of the semantic `axioms` field.
   let body? ←
-    if emitBody then
-      some <$> expToCore env (some f.returnType) f.body
-    else
-      pure none
+    match f.body with
+    | none => pure none  -- uninterpreted: always declaration-only
+    | some bodyExp =>
+      if emitBody then
+        some <$> expToCore env (some f.returnType) bodyExp
+      else
+        pure none
   return {
     name := identToCore f.name
     typeArgs := typeArgs
@@ -2421,7 +2624,7 @@ def specFnToCore (noParamFns : List String)
   }
 
 def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
-    (sfMap : SpecFnMap) (f : ProofFn) : Except String Core.Procedure := do
+    (sfMap : SpecFnMap) (f : ProofFn) (allDecls : List Decl := []) : Except String Core.Procedure := do
   let inputNames := f.inputs.map Prod.fst
   let hasRet :=
     match f.returnType with
@@ -2429,7 +2632,14 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
     | _ => true
   let retDecls := if hasRet then [(f.retName, f.returnType)] else []
   let retNames := if hasRet then [f.retName] else []
-  let bodyStm? := f.body.map (expandReveals sfMap)
+  -- Extract decreases expressions before stripping artifacts.
+  let decreasesExps : List Exp := match f.body with
+    | some body => collectDecreasesExps body
+    | none => []
+  let bodyStm? := f.body.map (fun b =>
+    let b := expandReveals sfMap b
+    let b := stripDecreaseArtifacts b
+    match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s)
   let setVars :=
     match bodyStm? with
     | some body => collectSetVars body
@@ -2445,18 +2655,28 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
     !shouldDropForLoopScaffoldingLocal n && !isUnitLikeTyp t)
   let localsDecls := localsAll
   let outputs := retDecls
-  let env := addNoParamFnMarkers (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns
+  let env := addAllFnParamTypes (addFnRetTypes (addNoParamFnMarkers (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns) sfMap) allDecls
   let typeArgs := typeArgsFromDecls (f.inputs ++ outputs ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" f.ensures
   let retVar? := if hasRet then some (f.retName, f.returnType) else none
+  -- Translate decreases expressions for the comment.
+  let decreasesCoreExprs ← decreasesExps.mapM (expToCore env none)
   let body ←
     match bodyStm? with
     | some stm => stmToCore env projLayouts mutArgMap retVar? stm
     | none => pure []
+  -- Filter out `decrease%init*` local declarations.
   let localDecls :=
-    localsDecls.map (fun (n, t) =>
+    localsDecls.filter (fun (n, _) => !n.startsWith "decrease") |>.map (fun (n, t) =>
       mkInitStmt (varToCore n) (.forAll [] (monoTyOfTyp t)) declSentinel)
+  -- Build a `// decreases (expr)` comment statement.  We encode this as an
+  -- `assume __decreases_comment__(e₁, …)` sentinel that the pretty-printer
+  -- recognises and renders as a comment.
+  let decreasesStmts := if decreasesCoreExprs.isEmpty then [] else
+    let marker := LExpr.op () (CoreIdent.unres "__decreases_comment__") none
+    let e := LExpr.mkApp () marker decreasesCoreExprs
+    [mkAssumeStmt "__decreases__" e]
   let proc : Core.Procedure := {
     header := {
       name := identToCore f.name
@@ -2469,18 +2689,32 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
       preconditions := pre
       postconditions := post
     }
-    body := localDecls ++ body
+    body :=
+      let inner := localDecls ++ body
+      -- If the body contains early returns (exit __return__), wrap in a
+      -- labeled block so the exit has a target.
+      let hasReturn := f.body.map (fun b => hasReturnStm b) |>.getD false
+      -- Strip any remaining `assume false` that the VLIR pass missed.
+      let inner := if hasReturn then stripCoreAssumeFalse inner else inner
+      let wrapped := if hasReturn then [mkBlockStmt "__return__" inner] else inner
+      -- Keep decreases sentinels outside the __return__ block so the
+      -- pretty-printer can extract them into the spec block.
+      decreasesStmts ++ wrapped
   }
   let modifies := inferProcModifies proc
   return { proc with spec := { proc.spec with modifies := modifies } }
 
 def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
-    (sfMap : SpecFnMap) (f : ExecFn) : Except String Core.Procedure := do
+    (sfMap : SpecFnMap) (f : ExecFn) (allDecls : List Decl := []) : Except String Core.Procedure := do
   let mutOutDecls :=
     f.inputs.filterMap (fun (n, t) =>
       (mutRefPayload? t).map (fun payloadTy => (n, s!"{n}_out", payloadTy)))
   let mutRenames := mutOutDecls.map (fun (n, outName, _) => (n, outName))
-  let rewrittenBody := expandReveals sfMap (applyNameSubstsStm mutRenames f.body)
+  -- Extract decreases expressions before stripping artifacts.
+  let decreasesExps : List Exp := collectDecreasesExps f.body
+  let rewrittenBody :=
+    let b := stripDecreaseArtifacts (expandReveals sfMap (applyNameSubstsStm mutRenames f.body))
+    match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s
   let rewrittenEnsures := f.ensures.map (applyNameSubstsExp mutRenames)
   let hasRet :=
     match f.returnType with
@@ -2502,12 +2736,14 @@ def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mut
     !shouldDropForLoopScaffoldingLocal n && !isUnitLikeTyp t)
   let localsDecls := localsAll
   let outputs := retDecls ++ mutOutputDecls
-  let env := addNoParamFnMarkers
-    (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns
+  let env := addAllFnParamTypes (addFnRetTypes (addNoParamFnMarkers
+    (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns) sfMap) allDecls
   let typeArgs := typeArgsFromDecls (f.inputs ++ outputs ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" rewrittenEnsures
   let retVar? := if hasRet then some (f.retName, f.returnType) else none
+  -- Translate decreases expressions for the comment.
+  let decreasesCoreExprs ← decreasesExps.mapM (expToCore env none)
   let body ← stmToCore env projLayouts mutArgMap retVar? rewrittenBody
   let mutOutInits :=
     mutOutDecls.map (fun (inName, outName, payloadTy) =>
@@ -2516,7 +2752,12 @@ def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mut
   -- Declaration-only locals are represented with a sentinel RHS and rendered
   -- by the pretty-printer as `var x : T;`
   let localDecls :=
-    localsDecls.map (fun (n, t) => mkInitStmt (varToCore n) (.forAll [] (monoTyOfTyp t)) declSentinel)
+    localsDecls.filter (fun (n, _) => !n.startsWith "decrease") |>.map (fun (n, t) =>
+      mkInitStmt (varToCore n) (.forAll [] (monoTyOfTyp t)) declSentinel)
+  let decreasesStmts := if decreasesCoreExprs.isEmpty then [] else
+    let marker := LExpr.op () (CoreIdent.unres "__decreases_comment__") none
+    let e := LExpr.mkApp () marker decreasesCoreExprs
+    [mkAssumeStmt "__decreases__" e]
   let proc : Core.Procedure := {
     header := {
       name := identToCore f.name
@@ -2529,7 +2770,12 @@ def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mut
       preconditions := pre
       postconditions := post
     }
-    body := localDecls ++ mutOutInits ++ body
+    body :=
+      let inner := localDecls ++ mutOutInits ++ body
+      let hasReturn := hasReturnStm f.body
+      let inner := if hasReturn then stripCoreAssumeFalse inner else inner
+      let wrapped := if hasReturn then [mkBlockStmt "__return__" inner] else inner
+      decreasesStmts ++ wrapped
   }
   let modifies := inferProcModifies proc
   return { proc with spec := { proc.spec with modifies := modifies } }
@@ -2624,7 +2870,8 @@ def enumToCoreTypeDecl (e : Enum) : Except String Core.TypeDecl := do
     return .data [d]
 
 partial def declToCore (noParamFns : List String)
-    (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) (sfMap : SpecFnMap) :
+    (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) (sfMap : SpecFnMap)
+    (allDecls : List Decl := []) :
     Decl → Except String (List Core.Decl)
   | .assertion _ =>
     -- Drop top-level `DeclType: Assert` wrappers for Core emission.
@@ -2632,10 +2879,10 @@ partial def declToCore (noParamFns : List String)
     -- (These declarations remain useful in the Verus->Lean pipeline.)
     return []
   | .specFn f => do
-    let fn ← specFnToCore noParamFns (!f.isOpaque) f
+    let fn ← specFnToCore noParamFns (!f.isOpaque) f sfMap
     return [Core.Decl.func fn]
   | .proofFn f => do
-    let p ← proofFnToCore noParamFns projLayouts mutArgMap sfMap f
+    let p ← proofFnToCore noParamFns projLayouts mutArgMap sfMap f allDecls
     return [Core.Decl.proc p]
   | .execFn f => do
     let isDeclOnly := match f.body with | .Block [] => true | _ => false
@@ -2653,7 +2900,7 @@ partial def declToCore (noParamFns : List String)
         spec := { modifies := [], preconditions := [], postconditions := [] }
         body := []
       }]
-    let p ← execFnToCore noParamFns projLayouts mutArgMap sfMap f
+    let p ← execFnToCore noParamFns projLayouts mutArgMap sfMap f allDecls
     return [Core.Decl.proc p]
   | .func f => do
     let p ← funcCheckSstToCore noParamFns f
@@ -2667,9 +2914,9 @@ partial def declToCore (noParamFns : List String)
     let parts ← ds.mapM (fun d =>
       match d with
       | .specFn f => do
-        let fn ← specFnToCore noParamFns (!f.isOpaque) f
+        let fn ← specFnToCore noParamFns (!f.isOpaque) f sfMap
         return [Core.Decl.func fn]
-      | _ => declToCore noParamFns projLayouts mutArgMap sfMap d)
+      | _ => declToCore noParamFns projLayouts mutArgMap sfMap allDecls d)
     -- TODO: mutual recursion?
     return parts.flatten
 
@@ -2941,6 +3188,19 @@ def bvToIntCastDecls : List Core.Decl :=
   [1, 8, 16, 32, 64].flatMap (fun w =>
     [mkBvToIntCastDecl w false, mkBvToIntCastDecl w true])
 
+def mkBvToNatCastDecl (w : Nat) (signed : Bool) : Core.Decl :=
+  let f : Core.Function :=
+    { name := CoreIdent.unres (bvToNatCastName w signed)
+      typeArgs := []
+      inputs := [(CoreIdent.unres "x", .bitvec w)]
+      output := .tcons "nat" []
+      body := none }
+  Core.Decl.func f
+
+def bvToNatCastDecls : List Core.Decl :=
+  [1, 8, 16, 32, 64].flatMap (fun w =>
+    [mkBvToNatCastDecl w false, mkBvToNatCastDecl w true])
+
 def mkBvWidenCastDecl (fromW toW : Nat) (signed : Bool) : Core.Decl :=
   let f : Core.Function :=
     { name := CoreIdent.unres (bvWidenCastName fromW toW signed)
@@ -2972,8 +3232,18 @@ private def exprBvWidenCastRefs (e : CoreExpr) : List String :=
 private def declBvWidenCastRefs : Core.Decl → List String
   := declRefsBy exprBvWidenCastRefs noCallNameRefs
 
+private def exprBvToNatCastRefs (e : CoreExpr) : List String :=
+  exprOpRefsBy isBvToNatCastName e
+
+private def declBvToNatCastRefs : Core.Decl → List String
+  := declRefsBy exprBvToNatCastRefs noCallNameRefs
+
 -- Keep cast stubs only when the translated program actually references them.
 -- This avoids cluttering Core files that never mix bitvectors and integers.
+private def neededBvToNatCastDecls (decls : List Core.Decl) : List Core.Decl :=
+  let needed := joinRefs <| decls.map declBvToNatCastRefs
+  bvToNatCastDecls.filter (fun d => needed.contains (declNameString d))
+
 private def neededBvToIntCastDecls (decls : List Core.Decl) : List Core.Decl :=
   let needed := joinRefs <| decls.map declBvToIntCastRefs
   bvToIntCastDecls.filter (fun d => needed.contains (declNameString d))
@@ -2989,22 +3259,42 @@ private def natTypeDecl : Core.Decl :=
   -- artificial constructor shape or int-encoding details into emitted programs.
   Core.Decl.type (.con { name := "nat", params := [] })
 
-def declsToProgram (decls : List Decl) : Except String Core.Program := do
+/-- Translates VLIR declarations to a Core program and a side map of
+    function-name → decreases Core expressions (for the pretty-printer). -/
+def declsToProgram (decls : List Decl) : Except String (Core.Program × Std.HashMap String (List CoreExpr)) := do
   let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
   let mutArgMap := collectMutArgMapFromDecls decls
   let sfMap := collectSpecFns decls
-  let parts ← decls.mapM (declToCore noParamFns projLayouts mutArgMap sfMap)
+  let parts ← decls.mapM (declToCore noParamFns projLayouts mutArgMap sfMap decls)
   -- Keep declaration-only procedure stubs unless a stronger reachability proof
   -- is implemented. Some Verus shards reference helpers only through specs,
   -- and dropping them here can lose required declarations.
   let translated := pruneUnreferencedSyntheticHelpers parts.flatten
   let translated := pruneUnusedDeclOnlyLocals translated
-  let castDecls := [natTypeDecl] ++ neededBvToIntCastDecls translated ++ neededBvWidenCastDecls translated
+  let castDecls := [natTypeDecl] ++ neededBvToIntCastDecls translated ++ neededBvToNatCastDecls translated ++ neededBvWidenCastDecls translated
   let flat :=
     dedupCoreDecls <| castDecls ++ translated
   let (typeDecls, otherDecls) := flat.partition (fun d => match d with | .type _ _ => true | _ => false)
-  return { decls := typeDecls ++ otherDecls }
+  -- Build a side map of function-name → decreases comment string from the
+  -- VLIR SpecFn.decreases field.  This avoids polluting Core's semantic
+  -- `Func.axioms`.  We extract `decrease%init*` RHS expressions from
+  -- each spec function's termination-check body.
+  let fnDecEntries ← sfMap.toArray.toList.filterMapM (fun (name, sf) => do
+    match sf.decreases with
+    | some decStm =>
+      let decExps := collectDecreasesExps decStm
+      if !decExps.isEmpty then
+        let env := addNoParamFnMarkers (envFromDecls sf.inputs) noParamFns
+        let coreExprs ← decExps.mapM (expToCore env none)
+        let fnStr := CoreIdent.toPretty (identToCore name)
+        pure (some (fnStr, coreExprs))
+      else
+        pure none
+    | none => pure none)
+  let fnDecMap := fnDecEntries.foldl (init := (∅ : Std.HashMap String (List CoreExpr)))
+    (fun acc (k, v) => acc.insert k v)
+  return ({ decls := typeDecls ++ otherDecls }, fnDecMap)
 
 
 /-! ## Strata Core pretty-printer (temp) -/
@@ -3350,16 +3640,29 @@ def procToString (p : Core.Procedure) : String :=
   let outputs := sigToString p.header.outputs
   let header :=
     s!"procedure {CoreIdent.toPretty p.header.name}{typeArgsToString p.header.typeArgs}({inputs}) returns ({outputs})"
+  -- Extract `__decreases__` sentinels from the body and render in the spec block.
+  let (decreasesStmts, bodyStmts) := p.body.partition (fun s =>
+    match s with
+    | .cmd (.cmd (.assume label _ _)) => label == "__decreases__"
+    | _ => false)
+  let decreasesLines := decreasesStmts.filterMap (fun s =>
+    match s with
+    | .cmd (.cmd (.assume _ e _)) =>
+      let inner := exprToString e
+      let args := inner.dropWhile (· != '(')
+      some s!"  // decreases {args}"
+    | _ => none)
   let specLines :=
     (p.spec.modifies.map (fun v => s!"  modifies {CoreIdent.toPretty v};"))
     ++ (p.spec.preconditions.map (fun (_, c) => s!"  requires ({exprToString c.expr});"))
     ++ (p.spec.postconditions.map (fun (_, c) => s!"  ensures ({exprToString c.expr});"))
+    ++ decreasesLines
   let specBlock :=
     if specLines.isEmpty then
       []
     else
       ["spec {"] ++ specLines ++ ["}"]
-  let bodyLines := stmtsToLines 1 p.body
+  let bodyLines := stmtsToLines 1 bodyStmts
   let body := ["{"] ++ bodyLines ++ ["};"]
   String.intercalate "\n" ([header] ++ specBlock ++ body)
 where
@@ -3367,7 +3670,7 @@ where
     String.intercalate ", " (sig.map (fun (id, ty) =>
       s!"{CoreIdent.toPretty id}: {tyToString (.forAll [] ty)}"))
 
-def funcToString (f : Core.Function) : String :=
+def funcToString (f : Core.Function) (fnDecreasesMap : Std.HashMap String (List CoreExpr) := ∅) : String :=
   let recCasesIdx? :=
     if f.isRecursive then Strata.DL.Util.FuncAttr.findInlineIfConstr f.attr else none
   let inputs := String.intercalate ", " (f.inputs.zipIdx.map (fun ((id, ty), i) =>
@@ -3375,16 +3678,21 @@ def funcToString (f : Core.Function) : String :=
     s!"{ann}{CoreIdent.toPretty id}: {tyToString (.forAll [] ty)}"))
   let recPrefix := if f.isRecursive then "rec " else ""
   let header := s!"{recPrefix}function {CoreIdent.toPretty f.name}{typeArgsToString f.typeArgs}({inputs}): {tyToString (.forAll [] f.output)}"
+  let decComment := match fnDecreasesMap.get? (CoreIdent.toPretty f.name) with
+    | some exprs =>
+      let exprsStr := String.intercalate ", " (exprs.map exprToString)
+      s!"\n    // decreases ({exprsStr})"
+    | none => ""
   match f.body with
-  | none => header ++ ";"
+  | none => header ++ ";" ++ decComment
   | some body =>
     let bodyStr := exprToString body
-    String.intercalate "\n" [header ++ " {", "  " ++ bodyStr, "}"]
+    String.intercalate "\n" [header ++ decComment ++ " {", "  " ++ bodyStr, "}"]
 
-def declToString (d : Core.Decl) : String :=
+def declToString (d : Core.Decl) (fnDecreasesMap : Std.HashMap String (List CoreExpr) := ∅) : String :=
   match d with
   | .proc p _ => procToString p
-  | .func f _ => funcToString f
+  | .func f _ => funcToString f fnDecreasesMap
   | .type t _ =>
     match t with
     | .con c => s!"type {c.name}{typeParamsToString c.numargs};"
@@ -3399,8 +3707,8 @@ def declToString (d : Core.Decl) : String :=
     let esStr := String.intercalate ", " (es.map exprToString)
     s!"distinct [{lbl}] {esStr};"
 
-def programToString (p : Core.Program) : String :=
-  let decls := p.decls.map declToString
+def programToString (p : Core.Program) (fnDecreasesMap : Std.HashMap String (List CoreExpr) := ∅) : String :=
+  let decls := p.decls.map (declToString · fnDecreasesMap)
   let body := String.intercalate "\n\n" decls
   if body.isEmpty then
     "program Core;\n"
@@ -3410,8 +3718,8 @@ def programToString (p : Core.Program) : String :=
 end Pretty
 
 def declsToCoreString (decls : List Decl) : Except String String := do
-  let p ← declsToProgram decls
-  return Pretty.programToString p
+  let (p, fnDecMap) ← declsToProgram decls
+  return Pretty.programToString p fnDecMap
 
 end ToCore
 
