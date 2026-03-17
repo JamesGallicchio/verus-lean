@@ -213,16 +213,25 @@ def mkCallStmt (lhs : List CoreIdent) (pname : String) (args : List CoreExpr) : 
 def mkExitToLabelStmt (label : String) : Core.Statement :=
   Imperative.Stmt.exit (some label) emptyStmtMeta
 
+/-- Emit a return statement.  Encoded as `assume [__return__]: false` which
+    cuts off execution on this path (semantically correct for early return).
+    The local pretty-printer merges `ret := expr; assume [__return__]: false`
+    into `// return expr;`.  The official printer shows `assume false;` which
+    is semantically honest.  Replace with native `return` when Strata adds
+    support. -/
+def mkReturnStmt : Core.Statement :=
+  Core.Statement.assume "__return__" (LExpr.boolConst () false) emptyStmtMeta
+
 def mkIteStmt (cond : CoreExpr) (thenb elseb : List Core.Statement) : Core.Statement :=
   Imperative.Stmt.ite cond thenb elseb emptyStmtMeta
 
 def mkBlockStmt (label : String) (body : List Core.Statement) : Core.Statement :=
   Imperative.Stmt.block label body emptyStmtMeta
 
-/-- True when a Core statement is `assume false`. -/
+/-- True when a Core statement is `assume false` (but NOT a return or decreases sentinel). -/
 private def isCoreAssumeFalse : Core.Statement → Bool
-  | .cmd (.cmd (.assume _ e _)) =>
-    match e with
+  | .cmd (.cmd (.assume label e _)) =>
+    label != "__decreases__" && label != "__return__" && match e with
     | .const _ (.boolConst false) => true
     | _ => false
   | _ => false
@@ -2082,11 +2091,11 @@ mutual
       -- Unit-like returns (empty tuple/struct/enum) carry no payload.
       match e with
       | .EnumCtor _ "tuple%0" [] | .TupleCtor 0 [] | .StructCtor _ [] =>
-        return [mkExitToLabelStmt "__return__"]
+        return [mkReturnStmt]
       | _ =>
         let rhs ← expToCore env (some retTy) e
-        return [mkSetStmt (varToCore retName) rhs, mkExitToLabelStmt "__return__"]
-    | _, _ => return [mkExitToLabelStmt "__return__"]
+        return [mkSetStmt (varToCore retName) rhs, mkReturnStmt]
+    | _, _ => return [mkReturnStmt]
   | .BreakOrContinue label isBreak =>
     match label with
     | some l => return [mkExitToLabelStmt (sanitizeIdent l)]
@@ -2174,7 +2183,12 @@ mutual
     let measureExpr? ← match decrease with
       | [] => pure none
       | e :: _ => do
-        let ce ← expToCore env none e
+        -- Strata's loop measure slot is `int`-typed, so lower the selected
+        -- Verus decreases expression with an explicit `int` expectation. When
+        -- the expression still lowers through bitvector arithmetic (e.g.
+        -- `usize` loop counters), cast the final result to `int`.
+        let ce0 ← expToCore env (some .Int) e
+        let ce := castExprToIntIfBitInfo (inferBitInfo env [] e) ce0
         pure (some ce)
     let bodyBound := match loopLabel? with | some l => bindUnlabeledLoopControlTo l body' | none => body'
     let bodyStms ← stmToCore env projLayouts mutArgMap retVar? bodyBound
@@ -2542,7 +2556,7 @@ private def isAssumeFalse : Stm → Bool
 
 /-- Strip `Assume(false)` statements that follow `Return` in a block.
     Verus SST inserts these to mark unreachable code after early returns.
-    Since we emit `exit __return__`, these are no longer needed. -/
+    Since we emit a return sentinel, these are no longer needed. -/
 private partial def blockHasReturn : List Stm → Bool
   | [] => false
   | (.Return _) :: _ => true
@@ -2698,14 +2712,10 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
     body :=
       let inner := localDecls ++ body
       -- If the body contains early returns (exit __return__), wrap in a
-      -- labeled block so the exit has a target.
       let hasReturn := f.body.map (fun b => hasReturnStm b) |>.getD false
-      -- Strip any remaining `assume false` that the VLIR pass missed.
       let inner := if hasReturn then stripCoreAssumeFalse inner else inner
-      let wrapped := if hasReturn then [mkBlockStmt "__return__" inner] else inner
-      -- Keep decreases sentinels outside the __return__ block so the
-      -- pretty-printer can extract them into the spec block.
-      decreasesStmts ++ wrapped
+      -- Return is encoded as `assert [__return__]: true`, rendered as `// return;`.
+      decreasesStmts ++ inner
   }
   let modifies := inferProcModifies proc
   return { proc with spec := { proc.spec with modifies := modifies } }
@@ -2780,8 +2790,7 @@ def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mut
       let inner := localDecls ++ mutOutInits ++ body
       let hasReturn := hasReturnStm f.body
       let inner := if hasReturn then stripCoreAssumeFalse inner else inner
-      let wrapped := if hasReturn then [mkBlockStmt "__return__" inner] else inner
-      decreasesStmts ++ wrapped
+      decreasesStmts ++ inner
   }
   let modifies := inferProcModifies proc
   return { proc with spec := { proc.spec with modifies := modifies } }
@@ -3268,12 +3277,12 @@ private def natTypeDecl : Core.Decl :=
 /-- Abstract type declarations for Verus stdlib collection types, prefixed
     with `Verus_` to avoid clashing with Strata's reserved type names. -/
 private def stdlibTypeDecls : List Core.Decl :=
-  let oneParam := ["Verus_Seq", "Verus_Set", "Verus_Multiset"]
-  let twoParam := ["Verus_Map"]
+  let oneParam := ["Verus_Seq", "Verus_Set", "Verus_Multiset", "Std_specs_range"]
+  let twoParam := ["Verus_Map", "Tuple"]
   let mkOneParam (name : String) : Core.Decl :=
     Core.Decl.type (.con { name := name, params := ["T"] })
   let mkTwoParam (name : String) : Core.Decl :=
-    Core.Decl.type (.con { name := name, params := ["K", "V"] })
+    Core.Decl.type (.con { name := name, params := ["T0", "T1"] })
   oneParam.map mkOneParam ++ twoParam.map mkTwoParam
 
 /-- Collect `(name, maxArgCount)` pairs for all call sites in Core declarations.
@@ -3286,7 +3295,10 @@ private partial def collectExprArity : CoreExpr → Std.HashMap String Nat → S
       match e with
       | .app _ f a => countApps f (n + 1)
       | .op _ id _ => ((CoreIdent.toPretty id, n), .const () (.boolConst true))
-      | .fvar _ id _ => ((CoreIdent.toPretty id, n), .const () (.boolConst true))
+      -- Only track .op heads for global functions, not .fvar (local variables)
+      -- to avoid misclassifying applied higher-order local variables as
+      -- missing global functions.
+      | .fvar _ _ _ => (("", n), .const () (.boolConst true))
       | other => (("", n), other)
     let ((name, arity), _) := countApps (.app () fn arg) 0
     let acc := if name != "" then
@@ -3358,6 +3370,17 @@ private def collectRefsWithArity (decls : List Core.Decl) : List (String × Nat)
     | _ => acc)
   acc.toList
 
+/-- Collect free type variable names from a monomorphic type. -/
+private def collectFtvars : LMonoTy → List String
+  | .ftvar n => [n]
+  | .tcons _ args => args.flatMap collectFtvars
+  | _ => []
+
+/-- Collect type constructor names (e.g. `Verus_Seq`, `Tuple`) from a monomorphic type. -/
+private def collectTcons : LMonoTy → List String
+  | .tcons name args => [name] ++ args.flatMap collectTcons
+  | _ => []
+
 /-- Translates VLIR declarations to a Core program and a side map of
     function-name → decreases Core expressions (for the pretty-printer). -/
 def declsToProgram (decls : List Decl)
@@ -3373,7 +3396,16 @@ def declsToProgram (decls : List Decl)
   -- and dropping them here can lose required declarations.
   let translated := pruneUnreferencedSyntheticHelpers parts.flatten
   let translated := pruneUnusedDeclOnlyLocals translated
-  let castDecls := [natTypeDecl] ++ stdlibTypeDecls ++ neededBvToIntCastDecls translated ++ neededBvToNatCastDecls translated ++ neededBvWidenCastDecls translated
+  -- Only emit stdlib type declarations when referenced in signatures.
+  let allTypeRefs := translated.flatMap (fun d => match d with
+    | .func f _ =>
+      f.inputs.flatMap (fun (_, ty) => collectTcons ty) ++ collectTcons f.output
+    | .proc p _ =>
+      p.header.inputs.flatMap (fun (_, ty) => collectTcons ty) ++
+      p.header.outputs.flatMap (fun (_, ty) => collectTcons ty)
+    | _ => [])
+  let neededStdlibTypes := stdlibTypeDecls.filter (fun d => allTypeRefs.contains (declNameString d))
+  let castDecls := [natTypeDecl] ++ neededStdlibTypes ++ neededBvToIntCastDecls translated ++ neededBvToNatCastDecls translated ++ neededBvWidenCastDecls translated
   let flat :=
     dedupCoreDecls <| castDecls ++ translated
   -- Auto-stub pass: emit uninterpreted function stubs for referenced-but-
@@ -3394,7 +3426,8 @@ def declsToProgram (decls : List Decl)
         [ctorName, testerName] ++ fieldNames))
     | _ => [])
   let builtinPrefixes := ["Int.", "Bv1.", "Bv8.", "Bv16.", "Bv32.", "Bv64.",
-    "Bool.", "true", "false", "Map.", "__decreases", "Unsupported."]
+    "Bool.", "true", "false", "Map.", "__decreases", "Unsupported.",
+    "TriggerGroup.", "Triggers."]
   -- Strata Core built-in identifiers that must not be stubbed.
   let strataBuiltins := ["select", "store", "ite"]
   let hasDotDot (n : String) : Bool := (n.splitOn "..").length != 1
@@ -3462,12 +3495,34 @@ def declsToProgram (decls : List Decl)
         output := retTy
         body := none
       }])
+  -- Collect free type variables from auto-stubs and emit `type X;`
+  -- declarations for any that aren't already declared.
+  let stubFtvars := autoStubs.flatMap (fun d => match d with
+    | .func f _ =>
+      let inputFtvars := f.inputs.flatMap (fun (_, ty) => collectFtvars ty)
+      let outputFtvars := collectFtvars f.output
+      inputFtvars ++ outputFtvars
+    | .proc p _ =>
+      let inputFtvars := p.header.inputs.flatMap (fun (_, ty) => collectFtvars ty)
+      let outputFtvars := p.header.outputs.flatMap (fun (_, ty) => collectFtvars ty)
+      inputFtvars ++ outputFtvars
+    | _ => []) |>.eraseDups
+  -- Collect already-declared type names (from type decls and datatype decls).
+  let declaredTypeNames := flat.flatMap (fun d => match d with
+    | .type (.con c) _ => [c.name]
+    | .type (.data ds) _ => ds.map (·.name)
+    | _ => [])
+  let knownTypeNames := declaredTypeNames ++ stdlibTypeDecls.map declNameString ++ ["nat", "int", "bool", "string", "bitvec"]
+  let freeTypeVarDecls := stubFtvars.filter (fun n => !knownTypeNames.contains n)
+    |>.map (fun name => Core.Decl.type (.con { name := name, params := [] }))
   -- Remove 0-arity declarations that are being replaced by auto-stubs
   -- with correct arities.
   let autoStubNameSet : Std.HashSet String := autoStubs.foldl (init := ∅)
     (fun acc d => acc.insert (declNameString d))
   let flat := flat.filter (fun d => !autoStubNameSet.contains (declNameString d))
   let (typeDecls, otherDecls) := flat.partition (fun d => match d with | .type _ _ => true | _ => false)
+  -- Add free type variable declarations to type decls.
+  let typeDecls := typeDecls ++ freeTypeVarDecls
   -- Place auto-stubs BEFORE other declarations so Strata's sequential
   -- parser can resolve forward references to stdlib/pervasive symbols.
   let otherDecls := autoStubs ++ otherDecls
@@ -3728,7 +3783,13 @@ def indentString (n : Nat) : String :=
 
 mutual
 partial def stmtsToLines (indent : Nat) (ss : List Core.Statement) : List String :=
-  ss.foldl (init := []) (fun acc s => acc ++ stmtToLines indent s)
+  match ss with
+  | [] => []
+  -- Merge `ret := expr; // return` into `// return expr`
+  | .cmd (.cmd (.set _name e _)) :: .cmd (.cmd (.assume "__return__" _ _)) :: rest =>
+    let pad := indentString indent
+    [s!"{pad}// return {exprToString e};"] ++ stmtsToLines indent rest
+  | s :: rest => stmtToLines indent s ++ stmtsToLines indent rest
 
 partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
   let pad := indentString indent
@@ -3753,7 +3814,9 @@ partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
     else
       [s!"{pad}assert [{label}]: {exprToString e};"]
   | .cmd (.cmd (.assume label e _)) =>
-    if label.isEmpty then
+    if label == "__return__" then
+      [s!"{pad}// return;"]
+    else if label.isEmpty then
       [s!"{pad}assume {exprToString e};"]
     else
       [s!"{pad}assume [{label}]: {exprToString e};"]
@@ -3783,14 +3846,13 @@ partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
       let elseLines := stmtsToLines (indent + 1) e
       [head] ++ thenLines ++ [pad ++ "} else {"] ++ elseLines ++ [pad ++ "}"]
   | .loop guard measure invs body _ =>
-    let invLine := invs.map (fun i => s!"{pad}  invariant ({exprToString i})")
-    -- Strata Core's parser has no `decreases` keyword; emit as a comment for now to pass regression tests.
     let measureLine := match measure with
-      | some m => [s!"{pad}  // decreases ({exprToString m})"]
+      | some m => [s!"{pad}  decreases {exprToString m}"]
       | none => []
+    let invLine := invs.map (fun i => s!"{pad}  invariant {exprToString i}")
     let head := s!"{pad}while ({exprToString guard})"
     let bodyLines := stmtsToLines (indent + 1) body
-    [head] ++ invLine ++ measureLine ++ [pad ++ "{"] ++ bodyLines ++ [pad ++ "}"]
+    [head] ++ measureLine ++ invLine ++ [pad ++ "{"] ++ bodyLines ++ [pad ++ "}"]
   | .exit lbl _ =>
     match lbl with
     | some l => [s!"{pad}exit {l};"]

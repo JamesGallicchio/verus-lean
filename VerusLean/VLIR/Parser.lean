@@ -969,6 +969,9 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     modify fun st => { st with callSiteTypes :=
       -- Keep the first observed signature (later calls may have different
       -- instantiations for generic functions).
+      -- TODO: this is an approximation; a generic function called at multiple
+      -- type instantiations will only get one stub signature.  A proper fix
+      -- would track all instantiations or use type parameters.
       if st.callSiteTypes.contains fnName then st.callSiteTypes
       else st.callSiteTypes.insert fnName (argTypes, retType) }
     return .Call callFn [] exps
