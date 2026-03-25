@@ -9,6 +9,41 @@ open VerusLean
 open Lean PrettyPrinter
 open VName
 
+/-- Strip the standard `program Core;\n\n` header so we can prepend another
+    textual prelude without duplicating the program header. -/
+private def stripCoreProgramHeader (text : String) : String :=
+  let header := "program Core;\n\n"
+  if text.startsWith header then
+    (text.drop header.length).toString
+  else
+    text
+
+/-- The Seq prelude keeps source comments for maintainability, but generated
+    `.core.st` files should stay concise. Drop standalone `// ...` lines before
+    prepending the prelude text. -/
+private def stripLineComments (text : String) : String :=
+  String.intercalate "\n" <|
+    (text.splitOn "\n").filter (fun line =>
+      let trimmed := line.trimAscii.toString
+      !trimmed.startsWith "//")
+
+/-- Read `prelude/Seq.core.st` relative to the `verus-boogie` repo root.
+    If the file is absent, translation still proceeds without textual prelude
+    insertion and falls back to internal typed stubs. -/
+private def readSeqPreludeBody? : IO (Option String) := do
+  let cwd ← IO.currentDir
+  let path := cwd / "prelude" / "Seq.core.st"
+  if ← path.pathExists then
+    let text ← IO.FS.readFile path
+    pure <| some <| stripLineComments (stripCoreProgramHeader text)
+  else
+    pure none
+
+/-- Prepend the textual Seq prelude while keeping exactly one `program Core;`
+    header in the final output. -/
+private def prependSeqPrelude (prelude body : String) : String :=
+  s!"program Core;\n\n{prelude.trimAsciiEnd.toString}\n\n{stripCoreProgramHeader body}"
+
 /-
 def genFromDir (dirPath : String) : IO String := do
   -- For each file in the directory
@@ -108,6 +143,7 @@ unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit)
     (useOfficialPrinter : Bool := false) : IO Unit := do
   let target := System.FilePath.mk path
   let bundleFiles ← collectJsonBundleFiles target
+  let seqPreludeBody? ← readSeqPreludeBody?
   let mut allDecls : List Decl := []
   let mut allCallSiteTypes : CallSiteTypes := {}
   for f in bundleFiles do
@@ -126,15 +162,24 @@ unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit)
       else
         -- Keep translating other shards so one unsupported module does not block output.
         IO.eprintln s!"warning: skipping shard {f}: {e}"
-  match ToCore.declsToProgram allDecls allCallSiteTypes with
-  | .ok (p, fnDecMap) =>
+  match ToCore.declsToProgram allDecls allCallSiteTypes (useTextSeqPrelude := seqPreludeBody?.isSome) with
+  | .ok (p, fnDecMap, seqPreludeNeeded) =>
     if useOfficialPrinter then
       -- Use Strata's official DDM-based pretty-printer (Core.formatProgram).
       -- Note: output does not include the "program Core;" header.
       let formatted := Std.Format.pretty (Strata.Core.formatProgram p) 100
-      printFn ("program Core;\n\n" ++ formatted ++ "\n")
+      let output :=
+        match seqPreludeNeeded, seqPreludeBody? with
+        | true, some prelude => prependSeqPrelude prelude (formatted ++ "\n")
+        | _, _ => "program Core;\n\n" ++ formatted ++ "\n"
+      printFn output
     else
-      printFn (ToCore.Pretty.programToString p fnDecMap)
+      let body := ToCore.Pretty.programToString p fnDecMap
+      let output :=
+        match seqPreludeNeeded, seqPreludeBody? with
+        | true, some prelude => prependSeqPrelude prelude body
+        | _, _ => body
+      printFn output
   | .error e => IO.println s!"Error: {e}"
 
 unsafe def main : List String → IO Unit

@@ -25,3 +25,4 @@ tests/TESTING_INTERNAL.md
 tests/STRATA_TODOS_VERUS_PASS_STRATA_FAIL.md
 tests/STRATA_TYPE_FAILED_TRIAGE_20260227.md
 tests/core_todo_review.md
+prelude/Seq.future.core.st

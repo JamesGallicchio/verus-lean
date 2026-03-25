@@ -550,16 +550,20 @@ instance ExecFn.instVName : VName ExecFn := ⟨ExecFn.name⟩
 instance Struct.instVName : VName Struct := ⟨Struct.name⟩
 instance Enum.instVName : VName Enum := ⟨Enum.name⟩
 instance FuncCheckSst.instVName : VName FuncCheckSst := ⟨FuncCheckSst.name⟩
+
+partial def Decl.name : Decl → Ident
+  | .assertion a => a.name
+  | .specFn f => f.name
+  | .proofFn f => f.name
+  | .execFn f => f.name
+  | .struct s => s.name
+  | .enum e => e.name
+  | .func f => f.name
+  | .mutualBlock (d :: _) => d.name
+  | .mutualBlock [] => .anonymous
+
 instance Decl.instVName : VName Decl where
-  name := fun d => match d with
-    | .assertion a => a.name
-    | .specFn f => f.name
-    | .proofFn f => f.name
-    | .execFn f => f.name
-    | .struct s => s.name
-    | .enum e => e.name
-    | .func f => f.name
-    | .mutualBlock _d => .anonymous -- todo
+  name := Decl.name
 
 --------------------------------------------------------------------------------
 

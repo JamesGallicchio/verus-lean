@@ -792,7 +792,14 @@ private def decodeVarNameJson (j : Json) : m String := do
     match arr[1].getObjVal? "VirRenumbered" with
     | .ok renObj => return s!"tmp_ren{← renObj.getNatUnderKeyM "id"}"
     | .error _ => return "tmp_ren"
-  | _ => return ident
+  | _ =>
+    match arr[1] with
+    | .str "VirExprNoNumber" =>
+      -- Keep internal expression binders distinct from source-level params/locals.
+      -- Some exports reuse names like `ret` here, and collapsing them causes
+      -- later let-inlining to capture the real return variable.
+      return s!"{ident}__expr"
+    | _ => return ident
 
 def VarBinder.fromJson (j : Json) (key : String := "typ") : m (String × Typ) := do
   -- Decode binder names through `Var.fromJson` so renumbered temporaries like
@@ -997,11 +1004,20 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     | .ok tupleObj =>
       let size ← tupleObj.getNatM
       let items ← arr[2].getArrM
-      let parsedItems ← items.mapM (fun fObj => do
+      let retType ← getTyp
+      let mut argTypes : List Typ := []
+      let mut parsedItems : List Exp := []
+      for fObj in items do
         let a ← Json.getObjValM fObj "a"
         let exp ← fromJsonSpanned a Exp.fromJson
-        return exp)
-      return .TupleCtor size parsedItems.toList -- TODO: handle tuples properly
+        let itemTy ← getTyp
+        argTypes := argTypes ++ [itemTy]
+        parsedItems := parsedItems ++ [exp]
+      let ctorName : Ident := String.toName s!"Tuple_ctor_{size}"
+      modify fun st => { st with callSiteTypes :=
+        if st.callSiteTypes.contains ctorName then st.callSiteTypes
+        else st.callSiteTypes.insert ctorName (argTypes, retType) }
+      return .TupleCtor size parsedItems -- TODO: handle tuples properly
     | .error _ =>
       let dt ← pathedNameFromJson arr[0] "Path"
       let variant ← arr[1].getStrM
@@ -1038,10 +1054,20 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
   | ("UnaryOpr", obj) =>
     -- A complex unary object should be an array with an op and a data element
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
+    let retType ← getTyp
     -- dbg_trace s!"UnaryOpr arr: {arr}"
     let op  ← UnaryOp.oprFromJson arr[0]
     -- dbg_trace s!"UnaryOpr op: {op}"
     let data ← fromJsonSpanned arr[1] Exp.fromJson
+    let dataTy ← getTyp
+
+    match op with
+    | .Proj' size field =>
+      let projName : Ident := String.toName s!"Tuple_{size}_{field}"
+      modify fun st => { st with callSiteTypes :=
+        if st.callSiteTypes.contains projName then st.callSiteTypes
+        else st.callSiteTypes.insert projName ([dataTy], retType) }
+    | _ => pure ()
 
     -- Preserve both Box and Unbox: their type annotations carry concrete type
     -- information for polymorphic calls.  Box(T, e) tells downstream that e

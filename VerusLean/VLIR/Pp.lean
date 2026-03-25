@@ -307,7 +307,9 @@ def Decl.pp (d : Decl) : String :=
   | .struct s => Struct.pp s
   | .enum e => Enum.pp e
   | .func f => FuncCheckSst.pp f
-  | .mutualBlock ds => s!"mutual\n{ds.map Decl.pp}\nend"
+  | .mutualBlock ds =>
+    let body := String.intercalate "\n" (ds.map Decl.pp)
+    s!"mutual\n{body}\nend"
 
 instance Assertion.toString : ToString Assertion := ⟨Assertion.pp⟩
 instance SpecFn.toString : ToString SpecFn := ⟨SpecFn.pp⟩
