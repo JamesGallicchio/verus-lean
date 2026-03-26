@@ -333,9 +333,10 @@ private def fnRetKey (fname : String) : String :=
 private def preludeIdent (name : String) : Ident :=
   .str .anonymous name
 
-/-- Use a synthetic `vstd` namespace so `datatypeNameOf` canonicalizes the Seq
-    prelude's public collection types to their short emitted names (`Seq`,
-    `Set`) instead of reserving them as user datatypes. -/
+/-- Use a synthetic `vstd` namespace so `datatypeNameOf` canonicalizes
+    translator-owned collection shims to stable short names. `Seq` is later
+    lowered to Strata's built-in `Sequence` type in `monoTyOfTyp`; `Set`
+    remains prelude-owned. -/
 private def preludeTypeIdent (name : String) : Ident :=
   .str (.str .anonymous "vstd") name
 
@@ -353,35 +354,33 @@ private def setPreludeTy (elem : Typ) : Typ :=
     placeholder auto-stubs when the prelude is present and to emit typed
     fallback declarations when it is absent. -/
 private def seqPreludeOwnedTypeNames : List String :=
-  ["Seq", "Set"]
+  ["Set"]
 
-/-- Type signatures for translator-owned prelude symbols that can appear in the
-    emitted Core AST. This lets lowering treat the textual prelude as already
-    loaded, and also lets translation fall back to typed stubs when the
-    textual prelude file is unavailable. -/
-private def knownPreludeFnSignature? (fname : String) : Option (List Typ × Typ) :=
+/-- Type signatures for sequence-related helper names that can appear in VLIR.
+    Some of these lower directly to Strata built-ins (`Sequence.*`), while the
+    rest are provided by the optional textual prelude or fallback stubs. -/
+private def knownSeqHelperSignature? (fname : String) : Option (List Typ × Typ) :=
   let t := Typ.TypParam "T"
   let a := Typ.TypParam "A"
   let b := Typ.TypParam "B"
   match fname with
-  | "bv64_to_int_u" => some ([.UInt 64], .Int)
-  | "bv64_to_nat_u" => some ([.UInt 64], .Nat)
-  | "int_to_bv64_u" => some ([.Int], .UInt 64)
   | "Seq_len" => some ([seqPreludeTy t], .Nat)
-  | "Seq_empty" => some ([], seqPreludeTy t)
   | "Seq_index" => some ([seqPreludeTy t, .Int], t)
-  | "Seq_first" => some ([seqPreludeTy t], t)
-  | "Seq_last" => some ([seqPreludeTy t], t)
   | "Seq_update" => some ([seqPreludeTy t, .Int, t], seqPreludeTy t)
   | "Seq_push" => some ([seqPreludeTy t, t], seqPreludeTy t)
   | "Seq_take" => some ([seqPreludeTy t, .Int], seqPreludeTy t)
   | "Seq_skip" => some ([seqPreludeTy t, .Int], seqPreludeTy t)
   | "Seq_add" => some ([seqPreludeTy t, seqPreludeTy t], seqPreludeTy t)
+  | "Seq_first" => some ([seqPreludeTy t], t)
+  | "Seq_last" => some ([seqPreludeTy t], t)
   | "Seq_subrange" => some ([seqPreludeTy t, .Int, .Int], seqPreludeTy t)
-  | "Seq_new" => some ([.Nat, .SpecFn [.Int] t], seqPreludeTy t)
   | "Seq_lib_drop_last" => some ([seqPreludeTy t], seqPreludeTy t)
   | "Seq_lib_contains" => some ([seqPreludeTy t, t], .Bool)
   | "Seq_lib_remove" => some ([seqPreludeTy t, .Int], seqPreludeTy t)
+  | "bv64_to_int_u" => some ([.UInt 64], .Int)
+  | "bv64_to_nat_u" => some ([.UInt 64], .Nat)
+  | "int_to_bv64_u" => some ([.Int], .UInt 64)
+  | "Seq_new" => some ([.Nat, .SpecFn [.Int] t], seqPreludeTy t)
   | "Seq_lib_filter" => some ([seqPreludeTy t, .SpecFn [t] .Bool], seqPreludeTy t)
   | "Seq_lib_map" => some ([seqPreludeTy a, .SpecFn [.Int, a] b], seqPreludeTy b)
   | "Seq_lib_map_values" => some ([seqPreludeTy a, .SpecFn [a] b], seqPreludeTy b)
@@ -389,6 +388,23 @@ private def knownPreludeFnSignature? (fname : String) : Option (List Typ × Typ)
   | "Seq_lib_to_set" => some ([seqPreludeTy t], setPreludeTy t)
   | "Set_finite" => some ([setPreludeTy t], .Bool)
   | "Vec_view" => some ([.Array t, .UInt 64], seqPreludeTy t)
+  | _ => none
+
+/-- Public names that the optional textual Seq prelude provides directly. -/
+private def knownPreludeFnSignature? (fname : String) : Option (List Typ × Typ) :=
+  match fname with
+  | "bv64_to_int_u"
+  | "bv64_to_nat_u"
+  | "int_to_bv64_u"
+  | "Seq_len"
+  | "Seq_new"
+  | "Seq_lib_map"
+  | "Seq_lib_map_values"
+  | "Seq_lib_filter"
+  | "Seq_lib_sort_by"
+  | "Vec_view"
+  | "Seq_lib_to_set"
+  | "Set_finite" => knownSeqHelperSignature? fname
   | _ => none
 
 private def isPreludeOwnedTypeName (name : String) : Bool :=
@@ -407,7 +423,7 @@ private def needsSeqPrelude (typeRefs opRefs : List String) : Bool :=
 
 /-- Look up the return type of a spec function stored in the `VarEnv`. -/
 private def lookupFnRetType (env : VarEnv) (fname : String) : Option Typ :=
-  env.get? (fnRetKey fname) <|> (knownPreludeFnSignature? fname).map Prod.snd
+  env.get? (fnRetKey fname) <|> (knownSeqHelperSignature? fname).map Prod.snd
 
 /-- Key convention for storing the i-th parameter type of a spec function. -/
 private def fnParamKey (fname : String) (idx : Nat) : String :=
@@ -416,7 +432,7 @@ private def fnParamKey (fname : String) (idx : Nat) : String :=
 /-- Look up the i-th parameter type of a spec function. -/
 private def lookupFnParamType (env : VarEnv) (fname : String) (idx : Nat) : Option Typ :=
   env.get? (fnParamKey fname idx) <|> do
-    let (params, _) ← knownPreludeFnSignature? fname
+    let (params, _) ← knownSeqHelperSignature? fname
     params.drop idx |>.head?
 
 private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : List Exp) : List Exp :=
@@ -613,6 +629,10 @@ def monoTyOfTyp : Typ → LMonoTy
         -- Unexpected: Vec without a type parameter. Use a placeholder element type
         -- so this shows up clearly in the generated Core program.
         Core.mapTy (.bitvec usizeBitWidth) (.tcons "MissingVecElem" [])
+    else if datatypeNameOf name == "Seq" then
+      match params with
+      | t :: _ => Core.seqTy (monoTyOfTyp t)
+      | [] => Core.seqTy (.tcons "MissingSeqElem" [])
     else
       .tcons (datatypeNameOf name) (params.map monoTyOfTyp)
   | .Enum name params => .tcons (datatypeNameOf name) (params.map monoTyOfTyp)
@@ -1345,13 +1365,17 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     return LExpr.ite () c' t' e'
   | .Call fn _typs args => do
     let fname := CallFun.name fn
+    let fnameStr := CoreIdent.toPretty (identToCore fname)
     let argsFiltered := normalizeCallArgsForCallee env fname args
+    let mkSeqBuiltinCall (opName : String) (argSpecs : List (Exp × Option Typ)) := do
+      let args' ← argSpecs.mapM (fun (arg, ty?) => expToCoreWithBound env bound ty? arg)
+      let f := LExpr.op () (CoreIdent.unres s!"Sequence.{opName}") none
+      return LExpr.mkApp () f args'
     let mkFallback := do
-      let fnStr := CoreIdent.toPretty (identToCore fname)
       -- Translate arguments with per-parameter expected types when available.
       let args' ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
         -- Look up the declared parameter type for this position.
-        let paramTy? := lookupFnParamType env fnStr idx
+        let paramTy? := lookupFnParamType env fnameStr idx
         let argExpected? := paramTy? <|> (match expected? with
           | some ty => if isIntTyp ty then some Typ.Int else none
           | none => none)
@@ -1401,6 +1425,9 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     else if isVecIndexSpecName fname || isVecIndexExecName fname then
       match argsFiltered with
       | [vArg, iArg] =>
+        let seqSelect :=
+          mkSeqBuiltinCall "select"
+            [(vArg, lookupFnParamType env fnameStr 0), (iArg, some .Int)]
         match vecVarFromExp vArg with
         | some base =>
           if (env.get? base |>.bind vecElemTyp? |>.isSome) then
@@ -1413,9 +1440,114 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
             let i ← expToCoreWithBound env bound (some (Typ.UInt usizeBitWidth)) iArg
             return LExpr.mkApp () Core.mapSelectOp [v, i]
           else
-            mkFallback
+            seqSelect
         | none =>
-          mkFallback
+          seqSelect
+      | _ => mkFallback
+    else if fnameStr == "Seq_index" then
+      match argsFiltered with
+      | [sArg, iArg] =>
+        mkSeqBuiltinCall "select"
+          [(sArg, lookupFnParamType env fnameStr 0), (iArg, some .Int)]
+      | _ => mkFallback
+    else if fnameStr == "Seq_first" then
+      match argsFiltered with
+      | [sArg] =>
+        let s ← expToCoreWithBound env bound (lookupFnParamType env fnameStr 0) sArg
+        let zero := LExpr.intConst () 0
+        let selectOp := LExpr.op () (CoreIdent.unres "Sequence.select") none
+        return LExpr.mkApp () selectOp [s, zero]
+      | _ => mkFallback
+    else if fnameStr == "Seq_last" then
+      match argsFiltered with
+      | [sArg] =>
+        let s ← expToCoreWithBound env bound (lookupFnParamType env fnameStr 0) sArg
+        let one := LExpr.intConst () 1
+        let lengthOp := LExpr.op () (CoreIdent.unres "Sequence.length") none
+        let subOp := LExpr.op () (CoreIdent.unres "Int.Sub") none
+        let selectOp := LExpr.op () (CoreIdent.unres "Sequence.select") none
+        let lastIdx := LExpr.mkApp () subOp [LExpr.mkApp () lengthOp [s], one]
+        return LExpr.mkApp () selectOp [s, lastIdx]
+      | _ => mkFallback
+    else if fnameStr == "Seq_empty" then
+      return LExpr.op () (CoreIdent.unres "Sequence.empty") none
+    else if fnameStr == "Seq_update" then
+      match argsFiltered with
+      | [sArg, iArg, vArg] =>
+        mkSeqBuiltinCall "update"
+          [(sArg, lookupFnParamType env fnameStr 0),
+           (iArg, some .Int),
+           (vArg, lookupFnParamType env fnameStr 2)]
+      | _ => mkFallback
+    else if fnameStr == "Seq_push" then
+      match argsFiltered with
+      | [sArg, vArg] =>
+        mkSeqBuiltinCall "build"
+          [(sArg, lookupFnParamType env fnameStr 0),
+           (vArg, lookupFnParamType env fnameStr 1)]
+      | _ => mkFallback
+    else if fnameStr == "Seq_take" then
+      match argsFiltered with
+      | [sArg, nArg] =>
+        mkSeqBuiltinCall "take"
+          [(sArg, lookupFnParamType env fnameStr 0), (nArg, some .Int)]
+      | _ => mkFallback
+    else if fnameStr == "Seq_skip" then
+      match argsFiltered with
+      | [sArg, nArg] =>
+        mkSeqBuiltinCall "drop"
+          [(sArg, lookupFnParamType env fnameStr 0), (nArg, some .Int)]
+      | _ => mkFallback
+    else if fnameStr == "Seq_add" then
+      match argsFiltered with
+      | [s1Arg, s2Arg] =>
+        let seqTy? := lookupFnParamType env fnameStr 0
+        mkSeqBuiltinCall "append" [(s1Arg, seqTy?), (s2Arg, seqTy?)]
+      | _ => mkFallback
+    else if fnameStr == "Seq_subrange" then
+      match argsFiltered with
+      | [sArg, startArg, endArg] =>
+        let s ← expToCoreWithBound env bound (lookupFnParamType env fnameStr 0) sArg
+        let start ← expToCoreWithBound env bound (some .Int) startArg
+        let stop ← expToCoreWithBound env bound (some .Int) endArg
+        let subOp := LExpr.op () (CoreIdent.unres "Int.Sub") none
+        let dropOp := LExpr.op () (CoreIdent.unres "Sequence.drop") none
+        let takeOp := LExpr.op () (CoreIdent.unres "Sequence.take") none
+        let len := LExpr.mkApp () subOp [stop, start]
+        return LExpr.mkApp () takeOp [LExpr.mkApp () dropOp [s, start], len]
+      | _ => mkFallback
+    else if fnameStr == "Seq_lib_contains" then
+      match argsFiltered with
+      | [sArg, vArg] =>
+        mkSeqBuiltinCall "contains"
+          [(sArg, lookupFnParamType env fnameStr 0),
+           (vArg, lookupFnParamType env fnameStr 1)]
+      | _ => mkFallback
+    else if fnameStr == "Seq_lib_drop_last" then
+      match argsFiltered with
+      | [sArg] =>
+        let s ← expToCoreWithBound env bound (lookupFnParamType env fnameStr 0) sArg
+        let one := LExpr.intConst () 1
+        let lengthOp := LExpr.op () (CoreIdent.unres "Sequence.length") none
+        let subOp := LExpr.op () (CoreIdent.unres "Int.Sub") none
+        let takeOp := LExpr.op () (CoreIdent.unres "Sequence.take") none
+        let lenMinusOne := LExpr.mkApp () subOp [LExpr.mkApp () lengthOp [s], one]
+        return LExpr.mkApp () takeOp [s, lenMinusOne]
+      | _ => mkFallback
+    else if fnameStr == "Seq_lib_remove" then
+      match argsFiltered with
+      | [sArg, iArg] =>
+        let s ← expToCoreWithBound env bound (lookupFnParamType env fnameStr 0) sArg
+        let i ← expToCoreWithBound env bound (some .Int) iArg
+        let one := LExpr.intConst () 1
+        let addOp := LExpr.op () (CoreIdent.unres "Int.Add") none
+        let takeOp := LExpr.op () (CoreIdent.unres "Sequence.take") none
+        let dropOp := LExpr.op () (CoreIdent.unres "Sequence.drop") none
+        let appendOp := LExpr.op () (CoreIdent.unres "Sequence.append") none
+        let suffixStart := LExpr.mkApp () addOp [i, one]
+        let prefixSeq := LExpr.mkApp () takeOp [s, i]
+        let suffixSeq := LExpr.mkApp () dropOp [s, suffixStart]
+        return LExpr.mkApp () appendOp [prefixSeq, suffixSeq]
       | _ => mkFallback
     else
       mkFallback
@@ -1480,8 +1612,8 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     if expected?.map isSeqTyp |>.getD false then
       -- Lower `seq![a, b, c]` to the Seq API when the surrounding type
       -- already tells us this literal is a Verus sequence.
-      let seqEmpty := LExpr.op () (CoreIdent.unres "Seq_empty") none
-      let seqPush := LExpr.op () (CoreIdent.unres "Seq_push") none
+      let seqEmpty := LExpr.op () (CoreIdent.unres "Sequence.empty") none
+      let seqPush := LExpr.op () (CoreIdent.unres "Sequence.build") none
       return args.foldl (init := seqEmpty) (fun acc arg =>
         LExpr.mkApp () seqPush [acc, arg])
     else
@@ -3693,7 +3825,7 @@ def declsToProgram (decls : List Decl)
         [ctorName, testerName] ++ fieldNames))
     | _ => [])
   let builtinPrefixes := ["Int.", "Bv1.", "Bv8.", "Bv16.", "Bv32.", "Bv64.",
-    "Bool.", "true", "false", "Map.", "__decreases", "Unsupported.",
+    "Bool.", "true", "false", "Map.", "Sequence.", "__decreases", "Unsupported.",
     "TriggerGroup.", "Triggers."]
   -- Strata Core built-in identifiers that must not be stubbed.
   let strataBuiltins := ["select", "store", "update", "ite"]

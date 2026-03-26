@@ -9,7 +9,7 @@ Solver success is **not** used to classify faithfulness.
 ## Data Sources
 - Full run:
   - command: `./tests/regress_examples.sh --all-suites`
-  - run id: `20260325_141445`
+  - run id: `20260325_175627`
   - solver: `cvc5`
 
 ## Raw Regression Summary (Full Run)
@@ -100,9 +100,10 @@ Additional counters (do not affect total):
 ### missing Strata categories/model types (16)
 - Missing types: `Unit`, `Atomic`, `Cell`, `Simple_pptr`, `Arithmetic_overflow`,
   `Rwlock`, `Thread`. `Invariant` clashes with Strata's `invariant` keyword.
-- `Tuple`, `Std_specs_range`, `Seq`, `Set`, `Verus_Map`,
-  `Multiset` are now declared. Free type variables (`A`, `T`, etc.)
-  are auto-declared as abstract types.
+- Verus `Seq<T>` now lowers to Strata's built-in `Sequence T`.
+  `Tuple`, `Std_specs_range`, `Set`, `Verus_Map`, and `Multiset` are
+  declared when referenced. Free type variables (`A`, `T`, etc.) are
+  auto-declared as abstract types.
 - Tests: `verus-examples:atomics`, `verus-examples:basic_lock1`, `verus-examples:basic_lock2`, `verus-examples:cells`, `verus-examples:doubly_linked_xor`, `verus-examples:even_cell`, `verus-examples:float`, `verus-examples:guide/interior_mutability`, `verus-examples:guide/strings`, `verus-examples:invariants`, `verus-examples:overflow`, `verus-examples:rwlock_vstd`, `verus-examples:statics`, `verus-examples:thread`, `vlir-tests:sets`, `verus-examples:exec_termination_example`
 
 ### polymorphic tuple helper panic in StrataVerify (1)
@@ -114,12 +115,12 @@ Additional counters (do not affect total):
 ### missing stdlib/pervasive symbols (19)
 - Auto-stub pass emits uninterpreted **function and procedure stubs** for
   referenced-but-undeclared symbols using **typed signatures from JSON
-  call-site annotations** (e.g. `Seq_len(x0: Seq int): nat`).
+  call-site annotations** (e.g. `Seq_len(x0: Sequence int): nat`).
 - Stubs and type declarations are only emitted when referenced.
 - Multi-shard test script bug fixed: tests with module shards (e.g.
   `broadcast_proof`, `guide/quants`) now correctly load all shards.
 - Current per-test blockers:
-  - `Seq T` vs `Map T bv64` mismatch: `broadcast_proof`, `guide/exec_attr`, `guide/lib_examples`, `guide/quants`, `mergesort`, `nevd_script`, `set_from_vec`, `syntax`
+  - Incomplete `Vec_view` bridge between exec `Vec` (`Map bv64 T` + `len`) and spec `Sequence T`: `broadcast_proof`, `guide/exec_attr`, `guide/lib_examples`, `guide/quants`, `mergesort`, `nevd_script`, `set_from_vec`, `syntax`
   - `Undeclared type impl_*`: `guide/higher_order_fns`
   - `Undeclared type Simple_pptr`: `rfmig_script`
   - Type mismatch (`nat`/`bv64`/`int`): `guide/const`, `nonlinear`, `seqs`, `test_array`
@@ -128,32 +129,38 @@ Additional counters (do not affect total):
   - Other: `tests/mini_c`, `test_vstd`, `traits` (body type mismatch), `guide/invariants`
 
 ### generic/category typing mismatch (18)
-- Seq tests now get a minimal typed `Seq` prelude (abstract `Seq`/`Set`
-  plus typed `Seq_*` / `Vec_view` declarations).
+- Verus `Seq<T>` now lowers to Strata's built-in `Sequence T`.
+  The optional minimal prelude now only supplies typed shim declarations for
+  `Seq_len`, higher-order `Seq_lib_*`, `Vec_view`, `Seq_lib_to_set`, and
+  `Set_finite`. Simple sequence helpers such as first/last/subrange/remove
+  are lowered directly to `Sequence.select`, `Sequence.take`,
+  `Sequence.drop`, and `Sequence.append`. Sequence literals now start from
+  built-in `Sequence.empty`.
 - The remaining failures in these files are later blockers:
-  `Unsupported.lambda`, `nat`/`int`/`bv` mismatches, missing
+  current Strata text-mode support for `Sequence.empty`, `Unsupported.lambda`,
+  `nat`/`int`/`bv` mismatches, missing
   `Set`/`Multiset` semantics, and unresolved higher-order sequence operators.
 - Manual review found none are faithful yet. Key blockers per test:
   - `basic_failure`: no heap model for references (`&mut` parameter)
-  - `prelude`: `seq!` now lowers through `Seq_empty`/`Seq_push`, but
+  - `prelude`: `seq!` now lowers through `Sequence.empty`/`Sequence.build`, but
     higher-order `Seq_new` is still a stub
-  - `recommends`: same `Seq` model issue; `spec_affirm` lost in translation
-  - `guide/pervasive_example`: `Seq` support needed
+  - `recommends`: same `Sequence`/set-model issue; `spec_affirm` lost in translation
+  - `guide/pervasive_example`: `Sequence`/set support still incomplete
   - `guide/exec_spec_unverified`: `exec_spec_unverified!` macro needs more
-    thought; `Seq` support needed
+    thought; `Sequence`/set support still incomplete
   - `guide/assert_by_compute`: nat literal inference needed (is `exp - 1`
     `int` or `nat`?); `all_spec` semantics not captured (see Verus guide on
     assert_by_compute); closure support needed for `let prop = |x| p(x as
     usize);`
-  - `extensionality`: `Seq` model needed; needs closer review later
-  - `multiset`: `Seq` model needed; `broadcast use` ignored
-  - `bitmap`: `Seq` model and closure support needed
+  - `extensionality`: `Sequence`/set extensionality still incomplete; needs closer review later
+  - `multiset`: `Sequence` lowers cleanly now, but `broadcast use` is ignored and `Multiset` semantics are still missing
+  - `bitmap`: `Sequence` plus closure support still needed
   - `bitvector_garbage_collection`: closure support needed
   - `calc`: bv8/int type mismatch in calc chain
   - `guide/bst_map`, `guide/bst_map_generic`, `guide/bst_map_type_invariant`:
     undeclared `Fuel` type
   - `guide/exec_spec_verified`: undeclared `View_V` type
-  - `guide/ext_equal`: `Seq` model needed
+  - `guide/ext_equal`: `Sequence`/extensional-equality support needed
   - `vectors`: undeclared type `T`
 - Tests: `verus-examples:assert_by_compute`, `verus-examples:basic_failure`, `verus-examples:bitmap`, `verus-examples:bitvector_garbage_collection`, `verus-examples:calc`, `verus-examples:extensionality`, `verus-examples:guide/assert_by_compute`, `verus-examples:guide/bst_map`, `verus-examples:guide/bst_map_generic`, `verus-examples:guide/bst_map_type_invariant`, `verus-examples:guide/exec_spec_unverified`, `verus-examples:guide/exec_spec_verified`, `verus-examples:guide/ext_equal`, `verus-examples:guide/pervasive_example`, `verus-examples:multiset`, `verus-examples:prelude`, `verus-examples:recommends`, `verus-examples:vectors`
 
@@ -243,10 +250,10 @@ Additional counters (do not affect total):
 
 ### Missing Strata types
 - `nat` emitted as abstract type. Coercion functions declared as uninterpreted.
-- Collection types: `Seq`, `Set`, `Verus_Map`, `Multiset`.
-  `Seq`, `Set`, and `Multiset` are emitted directly; `Map` stays prefixed
-  because Strata Core already has a built-in `Map`.
-  `Tuple`, `Std_specs_range` also declared. Type declarations only emitted
-  when referenced.
+- Collection types: `Sequence` (built-in), `Set`, `Verus_Map`, `Multiset`.
+  Verus `Seq<T>` now lowers to Strata's built-in `Sequence T`; `Set` and
+  `Multiset` are still declared by the translator when referenced.
+  `Map` stays prefixed because Strata Core already has a built-in `Map`.
+  `Tuple`, `Std_specs_range` are also declared when referenced.
 - Still missing in Strata: `Cell`, `Atomic`, `Simple_pptr`, `Unit`,
   `Arithmetic_overflow`, `Rwlock`, `Thread`, `Invariant` (keyword clash).
