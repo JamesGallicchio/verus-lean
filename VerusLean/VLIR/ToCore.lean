@@ -202,19 +202,10 @@ def projFieldNameOf (dt : Ident) (variant field : String) : String :=
       else
         s!"{dtName}_{variantName}_{sanitizeIdent field}"
 
-def declSentinelName : String := "__verus_decl__"
-
-def declSentinel : CoreExpr :=
-  LExpr.fvar () (CoreIdent.unres declSentinelName) none
-
-def isDeclSentinel : CoreExpr → Bool
-  | LExpr.fvar _ id _ => CoreIdent.toPretty id == declSentinelName
-  | _ => false
-
 def emptyStmtMeta : Imperative.MetaData Core.Expression := .empty
 
-def mkInitStmt (name : CoreIdent) (ty : LTy) (rhs : CoreExpr) : Core.Statement :=
-  Core.Statement.init name ty (some rhs) emptyStmtMeta
+def mkInitStmt (name : CoreIdent) (ty : LTy) (rhs? : Option CoreExpr := none) : Core.Statement :=
+  Core.Statement.init name ty rhs? emptyStmtMeta
 
 def mkSetStmt (name : CoreIdent) (rhs : CoreExpr) : Core.Statement :=
   Core.Statement.set name rhs emptyStmtMeta
@@ -232,12 +223,8 @@ def mkCallStmt (lhs : List CoreIdent) (pname : String) (args : List CoreExpr) : 
 def mkExitToLabelStmt (label : String) : Core.Statement :=
   Imperative.Stmt.exit (some label) emptyStmtMeta
 
-/-- Emit a return statement.  Encoded as `assume [__return__]: false` which
-    cuts off execution on this path (semantically correct for early return).
-    The local pretty-printer merges `ret := expr; assume [__return__]: false`
-    into `// return expr;`.  The official printer shows `assume false;` which
-    is semantically honest.  Replace with native `return` when Strata adds
-    support. -/
+/-- Emit a return statement. Encoded as `assume [__return__]: false`, which
+    cuts off execution on this path until Strata grows native `return`. -/
 def mkReturnStmt : Core.Statement :=
   Core.Statement.assume "__return__" (LExpr.boolConst () false) emptyStmtMeta
 
@@ -393,6 +380,7 @@ private def knownSeqHelperSignature? (fname : String) : Option (List Typ × Typ)
 /-- Public names that the optional textual Seq prelude provides directly. -/
 private def knownPreludeFnSignature? (fname : String) : Option (List Typ × Typ) :=
   match fname with
+  | "nat_to_int" => some ([.Nat], .Int)
   | "bv64_to_int_u"
   | "bv64_to_nat_u"
   | "int_to_bv64_u"
@@ -414,7 +402,7 @@ private def isPreludeOwnedValueName (name : String) : Bool :=
   (knownPreludeFnSignature? name).isSome
 
 private def isSeqPreludeProvidedCastName : String → Bool
-  | "bv64_to_int_u" | "bv64_to_nat_u" | "int_to_bv64_u" => true
+  | "nat_to_int" | "bv64_to_int_u" | "bv64_to_nat_u" | "int_to_bv64_u" => true
   | _ => false
 
 private def needsSeqPrelude (typeRefs opRefs : List String) : Bool :=
@@ -777,6 +765,10 @@ def isBvToIntCastExpr : CoreExpr → Bool
   | .app _ (.op _ id _) _ => isBvToIntCastName (CoreIdent.toPretty id)
   | _ => false
 
+def isNatToIntCastExpr : CoreExpr → Bool
+  | .app _ (.op _ id _) _ => CoreIdent.toPretty id == "nat_to_int"
+  | _ => false
+
 -- Wrap a bitvector expression in a `bv*_to_int_*` cast when it is a known
 -- bitvector type but the comparison/context expects an integer.
 -- Avoids double-wrapping expressions that are already cast.
@@ -788,6 +780,17 @@ def castExprToIntIfBitInfo (info? : Option (Nat × Bool)) (e : CoreExpr) : CoreE
     else
       LExpr.mkApp () (bvToIntCastOp w signed) [e]
   | none => e
+
+/-- Wrap a nat-typed operand in `nat_to_int` when comparison lowering falls
+    back to the integer domain. -/
+def castExprToIntIfNatTyp (ty? : Option Typ) (e : CoreExpr) : CoreExpr :=
+  match ty? with
+  | some .Nat =>
+    if isNatToIntCastExpr e then
+      e
+    else
+      LExpr.mkApp () (LExpr.op () (CoreIdent.unres "nat_to_int") none) [e]
+  | _ => e
 
 def bvWidenCastName (fromW toW : Nat) (signed : Bool) : String :=
   if signed then s!"bv{fromW}_to_bv{toW}_s" else s!"bv{fromW}_to_bv{toW}_u"
@@ -954,6 +957,10 @@ private def freshenedName (base : String) (used : List String) : String :=
         if used.contains cand then go rest else cand
     go (List.range (used.length + 1))
 
+private def triggerVarRefs (trigs : List (List Exp)) : List String :=
+  let flatten (xs : List (List String)) : List String := (xs.foldl (· ++ ·) []).eraseDups
+  flatten <| trigs.map (fun g => flatten <| g.map expVarRefs)
+
 def binaryOpToCore : BinaryOp → Option CoreExpr
   | .And => some Core.boolAndOp
   | .Or => some Core.boolOrOp
@@ -1023,7 +1030,39 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
   | .If _ t f => inferBitInfo env bound t <|> inferBitInfo env bound f
   | _ => none
 
+/-- Recover just enough result-type information for comparison lowering when
+    bitvector inference alone is not enough, especially for `nat`/`int`
+    comparisons and projected/called expressions. -/
+private partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Option Typ
+  | .Var x => boundType? bound x <|> env.get? x
+  | .Call fn _ _ =>
+    let name := CallFun.name fn
+    if isVecLenSpecName name || isVecLenExecName name then
+      some (.UInt usizeBitWidth)
+    else if isVecIndexSpecName name || isVecIndexExecName name then
+      none
+    else
+      lookupFnRetType env (CoreIdent.toPretty (identToCore name))
+  | .Unary (.Box t) _ => some t
+  | .Unary (.Unbox t) _ => some t
+  | .Unary (.Proj dt variant field _ _) _ =>
+    let projField := projFieldNameOf dt variant field
+    lookupFnRetType env (CoreIdent.toPretty (datatypeDestructorIdentOf dt projField))
+  | .Unary (.Clip range _) _ =>
+    match range with
+    | .Int => some .Int
+    | .Nat => some .Nat
+    | .U w => some (.UInt w.toNat)
+    | .I w => some (.SInt w.toNat)
+    | .USize => some (.UInt usizeBitWidth)
+    | .ISize => some (.SInt usizeBitWidth)
+    | .Char => some .Char
+  | .If _ t f => inferComparableTyp? env bound t <|> inferComparableTyp? env bound f
+  | .Bind (.Let _ _ _) body => inferComparableTyp? env bound body
+  | _ => none
+
 -- Inline let-bindings since Core expressions are let-free.
+mutual
 partial def substExp (name : String) (rhs : Exp) : Exp → Exp
   | .Const c => .Const c
   | .Var x => if x == name then rhs else .Var x
@@ -1056,21 +1095,56 @@ partial def substExp (name : String) (rhs : Exp) : Exp → Exp
         else
           .Bind (.Let v ty e') (substExp name rhs body)
     | .Quant q vars trigs =>
-      -- Trigger exprs reference the quantifier's own bound variables, so they
-      -- are unaffected by substitution of external names.
       if vars.any (fun (v, _) => v == name) then
         .Bind (.Quant q vars trigs) body
       else
-        .Bind (.Quant q vars trigs) (substExp name rhs body)
+        let rhsRefs := expVarRefs rhs
+        let (vars', trigs', body') := renameBinderPack vars trigs body rhsRefs [name]
+        let trigs'' := trigs'.map (fun g => g.map (substExp name rhs))
+        .Bind (.Quant q vars' trigs'') (substExp name rhs body')
     | .Lambda vars =>
       if vars.any (fun (v, _) => v == name) then
         .Bind (.Lambda vars) body
       else
-        .Bind (.Lambda vars) (substExp name rhs body)
+        let rhsRefs := expVarRefs rhs
+        let (vars', _, body') := renameBinderPack vars [] body rhsRefs [name]
+        .Bind (.Lambda vars') (substExp name rhs body')
   | .ArrayLiteral elems => .ArrayLiteral (elems.map (substExp name rhs))
   | .MatchBlock scrut body =>
     let (e, t) := scrut
     .MatchBlock (substExp name rhs e, t) (substExp name rhs body)
+
+/-- Alpha-rename binders that would capture free variables from the
+    substitution RHS, rewriting triggers and body in lockstep. -/
+private partial def renameBinderPack
+    (vars : List (String × Typ))
+    (trigs : List (List Exp))
+    (body : Exp)
+    (rhsRefs : List String)
+    (avoid : List String) :
+    (List (String × Typ) × List (List Exp) × Exp) :=
+  let rec go
+      (rest : List (String × Typ))
+      (used : List String)
+      (trigsAcc : List (List Exp))
+      (bodyAcc : Exp)
+      (revVars : List (String × Typ)) :
+      (List (String × Typ) × List (List Exp) × Exp) :=
+    match rest with
+    | [] => (revVars.reverse, trigsAcc, bodyAcc)
+    | (v, ty) :: tail =>
+      if rhsRefs.contains v then
+        let v' := freshenedName v used
+        let renameExpr := substExp v (.Var v')
+        let trigs' := trigsAcc.map (fun g => g.map renameExpr)
+        let body' := renameExpr bodyAcc
+        go tail (v' :: used) trigs' body' ((v', ty) :: revVars)
+      else
+        go tail (v :: used) trigsAcc bodyAcc ((v, ty) :: revVars)
+  go vars
+    (avoid ++ rhsRefs ++ vars.map Prod.fst ++ expVarRefs body ++ triggerVarRefs trigs)
+    trigs body []
+end
 
 def substExps (subs : List (String × Exp)) (e : Exp) : Exp :=
   subs.foldl (fun acc (n, rhs) => substExp n rhs acc) e
@@ -1092,26 +1166,30 @@ mutual
 -- Shared setup for Eq/Ne/Inequality lowering:
 -- Infer bitvector context for both sides, choose a common comparison type via
 -- width-promotion, and insert casts as needed.
--- When no common bv type is possible (e.g. bv vs. int), falls back to int domain.
+-- When no common bv type is possible (e.g. bv vs. int or nat vs. int), fall
+-- back to the integer domain and insert the appropriate `*_to_int` casts.
 private partial def comparisonPreludeToCore
     (env : VarEnv) (bound : BoundEnv) (lhs rhs : Exp) :
     Except String (Option Typ × CoreExpr × CoreExpr) := do
   let lhsInfo? := inferBitInfo env bound lhs
   let rhsInfo? := inferBitInfo env bound rhs
+  let lhsTy? := inferComparableTyp? env bound lhs
+  let rhsTy? := inferComparableTyp? env bound rhs
   let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
   let mixedIntMode := argTy?.isNone && (lhsInfo?.isSome || rhsInfo?.isSome)
-  let sideTy? := if mixedIntMode then some Typ.Int else argTy?
+  let natIntMode := argTy?.isNone && !mixedIntMode && (lhsTy? == some .Nat || rhsTy? == some .Nat)
+  let sideTy? := if mixedIntMode || natIntMode then some Typ.Int else argTy?
   let targetInfo? := argTy?.bind bitInfoOfTyp
   let l0 ← expToCoreWithBound env bound sideTy? lhs
   let r0 ← expToCoreWithBound env bound sideTy? rhs
   let l ←
-    if mixedIntMode then
-      pure (castExprToIntIfBitInfo lhsInfo? l0)
+    if mixedIntMode || natIntMode then
+      pure (castExprToIntIfNatTyp lhsTy? (castExprToIntIfBitInfo lhsInfo? l0))
     else
       castExprToBitInfoIfNeeded lhsInfo? targetInfo? l0
   let r ←
-    if mixedIntMode then
-      pure (castExprToIntIfBitInfo rhsInfo? r0)
+    if mixedIntMode || natIntMode then
+      pure (castExprToIntIfNatTyp rhsTy? (castExprToIntIfBitInfo rhsInfo? r0))
     else
       castExprToBitInfoIfNeeded rhsInfo? targetInfo? r0
   return (argTy?, l, r)
@@ -1771,7 +1849,7 @@ private def mutArgProjectionBridgeStmts (env : VarEnv) (projLayouts : List ProjL
     Except String (List Core.Statement × List Core.Statement) := do
   let pre ← rewrites.mapM (fun rw => do
     let rhs ← lvalueReadExprToCore env rw.lhs
-    pure <| mkInitStmt (varToCore rw.tmp) (.forAll [] (monoTyOfTyp rw.ty)) rhs)
+    pure <| mkInitStmt (varToCore rw.tmp) (.forAll [] (monoTyOfTyp rw.ty)) (some rhs))
   let post ← rewrites.mapM (fun rw => do
     let tmpExpr := LExpr.fvar () (varToCore rw.tmp) (some (monoTyOfTyp rw.ty))
     let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts rw.lhs tmpExpr
@@ -2386,7 +2464,7 @@ mutual
               -- Projected l-values need a temporary to receive the call result.
               let tmp := varToCore (projectedCallTmpName fnName lhs)
               let declTy := .forAll [] (monoTyOfTyp lhsTy)
-              pure (tmp, [mkInitStmt tmp declTy declSentinel])
+              pure (tmp, [mkInitStmt tmp declTy])
           let lowered ← lowerMutCallArgs env projLayouts mutArgMap callee argsFiltered
           let callStmt := mkCallStmt ([destName] ++ lowered.mutOuts) callee lowered.argsCore
           match lvalueVarName? lhs with
@@ -2725,6 +2803,29 @@ private partial def addAllFnParamTypes (env : VarEnv) (decls : List Decl) : VarE
     | .mutualBlock ds => addAllFnParamTypes acc ds
     | _ => acc)
 
+/-- Add datatype destructor return types so expression lowering can recover the
+    field type of projections like `bev->creamers`. -/
+private partial def addDatatypeAccessorRetTypes (env : VarEnv) (decls : List Decl) : VarEnv :=
+  decls.foldl (init := env) (fun acc d =>
+    match d with
+    | .struct s =>
+      s.fields.foldl (init := acc) (fun acc (field, ty) =>
+        let projField := projFieldNameOf s.name (datatypeNameOf s.name) field
+        acc.insert (fnRetKey (CoreIdent.toPretty (datatypeDestructorIdentOf s.name projField))) ty)
+    | .enum e =>
+      e.fields.foldl (init := acc) (fun acc field =>
+        match field with
+        | .labeled variant fields =>
+          fields.foldl (init := acc) (fun acc (field, ty) =>
+            let projField := projFieldNameOf e.name variant field
+            acc.insert (fnRetKey (CoreIdent.toPretty (datatypeDestructorIdentOf e.name projField))) ty)
+        | .tuple variant tys =>
+          tys.zipIdx.foldl (init := acc) (fun acc (ty, idx) =>
+            let projField := projFieldNameOf e.name variant (toString idx)
+            acc.insert (fnRetKey (CoreIdent.toPretty (datatypeDestructorIdentOf e.name projField))) ty))
+    | .mutualBlock ds => addDatatypeAccessorRetTypes acc ds
+    | _ => acc)
+
 private partial def collectSpecFns : List Decl → SpecFnMap
   | [] => ∅
   | d :: rest =>
@@ -2794,7 +2895,7 @@ private def concatRefLists {α : Type} (xss : List (List α)) : List α :=
 private partial def stmtModifiedVars : Core.Statement → List CoreIdent
   | .cmd (.cmd (.init name _ e _)) =>
     match e with
-    | some rhs => if isDeclSentinel rhs then [] else [name]
+    | some _ => [name]
     | none => []
   | .cmd (.cmd (.set name _ _)) => [name]
   | .cmd (.cmd (.havoc name _)) => [name]
@@ -2815,7 +2916,7 @@ private def stmtsModifiedVars (ss : List Core.Statement) : List CoreIdent :=
 private partial def stmtDeclOnlyLocals : Core.Statement → List CoreIdent
   | .cmd (.cmd (.init name _ e _)) =>
     match e with
-    | some rhs => if isDeclSentinel rhs then [name] else []
+    | some _ => []
     | none => [name]
   | .cmd _ => []
   | .block _ ss _ => (ss.flatMap stmtDeclOnlyLocals).eraseDups
@@ -2927,8 +3028,12 @@ private partial def stripDecreaseArtifacts : Stm → Stm
   | stm => stm
 
 def specFnToCore (noParamFns : List String)
-    (emitBody : Bool) (f : SpecFn) (sfMap : SpecFnMap := (∅ : SpecFnMap)) : Except String Core.Function := do
-  let env := addFnRetTypes (addNoParamFnMarkers (envFromDecls f.inputs) noParamFns) sfMap
+    (emitBody : Bool) (f : SpecFn) (sfMap : SpecFnMap := (∅ : SpecFnMap))
+    (allDecls : List Decl := []) : Except String Core.Function := do
+  let env :=
+    addDatatypeAccessorRetTypes
+      (addFnRetTypes (addNoParamFnMarkers (envFromDecls f.inputs) noParamFns) sfMap)
+      allDecls
   let typeArgs := (typeArgsFromDecls f.inputs ++ typeArgsFromTyps [f.returnType]).eraseDups
   -- Recursion metadata comes directly from Verus JSON (`has.is_recursive`) and
   -- parsed termination-check hints (`recursiveCasesIdxHint`).
@@ -2939,9 +3044,8 @@ def specFnToCore (noParamFns : List String)
     | some idx => #[.inlineIfConstr idx]
     | none => #[]
   -- `SpecFn.decreases` is preserved in VLIR but not stored in the Core `Func`
-  -- AST (which has no function-level decreases slot).  The decreases comment
-  -- is built in `declsToProgram` from a side map and injected by the
-  -- pretty-printer, avoiding misuse of the semantic `axioms` field.
+  -- AST (which has no function-level decreases slot). The Boole printer can
+  -- still render it from the side map built in `declsToProgram`.
   let body? ←
     match f.body with
     | none => pure none  -- uninterpreted: always declaration-only
@@ -2960,6 +3064,9 @@ def specFnToCore (noParamFns : List String)
     attr := attrs
   }
 
+/-- Lower a proof function into a Core procedure, reconstructing locals and
+    specs from the translated body while stripping Verus-only decreases/return
+    artifacts that have no direct Core procedure representation. -/
 def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (sfMap : SpecFnMap) (f : ProofFn) (allDecls : List Decl := []) : Except String Core.Procedure := do
   let inputNames := f.inputs.map Prod.fst
@@ -2969,10 +3076,6 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
     | _ => true
   let retDecls := if hasRet then [(f.retName, f.returnType)] else []
   let retNames := if hasRet then [f.retName] else []
-  -- Extract decreases expressions before stripping artifacts.
-  let decreasesExps : List Exp := match f.body with
-    | some body => collectDecreasesExps body
-    | none => []
   let bodyStm? := f.body.map (fun b =>
     let b := expandReveals sfMap b
     let b := stripDecreaseArtifacts b
@@ -2992,13 +3095,18 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
     !shouldDropForLoopScaffoldingLocal n && !isUnitLikeTyp t)
   let localsDecls := localsAll
   let outputs := retDecls
-  let env := addAllFnParamTypes (addFnRetTypes (addNoParamFnMarkers (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns) sfMap) allDecls
+  let env :=
+    addDatatypeAccessorRetTypes
+      (addAllFnParamTypes
+        (addFnRetTypes
+          (addNoParamFnMarkers (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns)
+          sfMap)
+        allDecls)
+      allDecls
   let typeArgs := typeArgsFromDecls (f.inputs ++ outputs ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" f.ensures
   let retVar? := if hasRet then some (f.retName, f.returnType) else none
-  -- Translate decreases expressions for the comment.
-  let decreasesCoreExprs ← decreasesExps.mapM (expToCore env none)
   let body ←
     match bodyStm? with
     | some stm => stmToCore env projLayouts mutArgMap retVar? stm
@@ -3006,14 +3114,7 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
   -- Filter out `decrease%init*` local declarations.
   let localDecls :=
     localsDecls.filter (fun (n, _) => !n.startsWith "decrease") |>.map (fun (n, t) =>
-      mkInitStmt (varToCore n) (.forAll [] (monoTyOfTyp t)) declSentinel)
-  -- Build a `// decreases (expr)` comment statement.  We encode this as an
-  -- `assume __decreases_comment__(e₁, …)` sentinel that the pretty-printer
-  -- recognises and renders as a comment.
-  let decreasesStmts := if decreasesCoreExprs.isEmpty then [] else
-    let marker := LExpr.op () (CoreIdent.unres "__decreases_comment__") none
-    let e := LExpr.mkApp () marker decreasesCoreExprs
-    [mkAssumeStmt "__decreases__" e]
+      mkInitStmt (varToCore n) (.forAll [] (monoTyOfTyp t)))
   let proc : Core.Procedure := {
     header := {
       name := identToCore f.name
@@ -3028,23 +3129,23 @@ def proofFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mu
     }
     body :=
       let inner := localDecls ++ body
-      -- If the body contains early returns (exit __return__), wrap in a
+      -- Strip non-sentinel `assume false` only when early returns are present;
+      -- the `__return__` sentinel itself stays in the AST.
       let hasReturn := f.body.map (fun b => hasReturnStm b) |>.getD false
       let inner := if hasReturn then stripCoreAssumeFalse inner else inner
-      -- Return is encoded as `assert [__return__]: true`, rendered as `// return;`.
-      decreasesStmts ++ inner
+      inner
   }
   let modifies := inferProcModifies proc
   return { proc with spec := { proc.spec with modifies := modifies } }
 
+/-- Lower an exec function into a Core procedure, including mutable-reference
+    output threading and the same cleanup passes used for proof procedures. -/
 def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (sfMap : SpecFnMap) (f : ExecFn) (allDecls : List Decl := []) : Except String Core.Procedure := do
   let mutOutDecls :=
     f.inputs.filterMap (fun (n, t) =>
       (mutRefPayload? t).map (fun payloadTy => (n, s!"{n}_out", payloadTy)))
   let mutRenames := mutOutDecls.map (fun (n, outName, _) => (n, outName))
-  -- Extract decreases expressions before stripping artifacts.
-  let decreasesExps : List Exp := collectDecreasesExps f.body
   let rewrittenBody :=
     let b := stripDecreaseArtifacts (expandReveals sfMap (applyNameSubstsStm mutRenames f.body))
     match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s
@@ -3069,28 +3170,25 @@ def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mut
     !shouldDropForLoopScaffoldingLocal n && !isUnitLikeTyp t)
   let localsDecls := localsAll
   let outputs := retDecls ++ mutOutputDecls
-  let env := addAllFnParamTypes (addFnRetTypes (addNoParamFnMarkers
-    (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns) sfMap) allDecls
+  let env :=
+    addDatatypeAccessorRetTypes
+      (addAllFnParamTypes
+        (addFnRetTypes (addNoParamFnMarkers
+          (envFromDecls (expandVecDecls (f.inputs ++ outputs ++ localsAll))) noParamFns) sfMap)
+        allDecls)
+      allDecls
   let typeArgs := typeArgsFromDecls (f.inputs ++ outputs ++ localsAll)
   let pre ← mkChecks env "requires_" f.requires
   let post ← mkChecks env "ensures_" rewrittenEnsures
   let retVar? := if hasRet then some (f.retName, f.returnType) else none
-  -- Translate decreases expressions for the comment.
-  let decreasesCoreExprs ← decreasesExps.mapM (expToCore env none)
   let body ← stmToCore env projLayouts mutArgMap retVar? rewrittenBody
   let mutOutInits :=
     mutOutDecls.map (fun (inName, outName, payloadTy) =>
       let rhs := LExpr.fvar () (varToCore inName) (some (monoTyOfTyp payloadTy))
       mkSetStmt (varToCore outName) rhs)
-  -- Declaration-only locals are represented with a sentinel RHS and rendered
-  -- by the pretty-printer as `var x : T;`
   let localDecls :=
     localsDecls.filter (fun (n, _) => !n.startsWith "decrease") |>.map (fun (n, t) =>
-      mkInitStmt (varToCore n) (.forAll [] (monoTyOfTyp t)) declSentinel)
-  let decreasesStmts := if decreasesCoreExprs.isEmpty then [] else
-    let marker := LExpr.op () (CoreIdent.unres "__decreases_comment__") none
-    let e := LExpr.mkApp () marker decreasesCoreExprs
-    [mkAssumeStmt "__decreases__" e]
+      mkInitStmt (varToCore n) (.forAll [] (monoTyOfTyp t)))
   let proc : Core.Procedure := {
     header := {
       name := identToCore f.name
@@ -3107,7 +3205,7 @@ def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mut
       let inner := localDecls ++ mutOutInits ++ body
       let hasReturn := hasReturnStm f.body
       let inner := if hasReturn then stripCoreAssumeFalse inner else inner
-      decreasesStmts ++ inner
+      inner
   }
   let modifies := inferProcModifies proc
   return { proc with spec := { proc.spec with modifies := modifies } }
@@ -3201,6 +3299,9 @@ def enumToCoreTypeDecl (e : Enum) : Except String Core.TypeDecl := do
         constrs_ne := by simp }
     return .data [d]
 
+/-- Lower a VLIR declaration to one or more Core declarations, grouping mutual
+    spec functions into a recursive block and preserving supporting type/proc
+    declarations in source order. -/
 partial def declToCore (noParamFns : List String)
     (projLayouts : List ProjLayout) (mutArgMap : MutArgMap) (sfMap : SpecFnMap)
     (allDecls : List Decl := []) :
@@ -3211,7 +3312,7 @@ partial def declToCore (noParamFns : List String)
     -- (These declarations remain useful in the Verus->Lean pipeline.)
     return []
   | .specFn f => do
-    let fn ← specFnToCore noParamFns (!f.isOpaque) f sfMap
+    let fn ← specFnToCore noParamFns (!f.isOpaque) f sfMap allDecls
     return [Core.Decl.func fn]
   | .proofFn f => do
     let p ← proofFnToCore noParamFns projLayouts mutArgMap sfMap f allDecls
@@ -3247,7 +3348,7 @@ partial def declToCore (noParamFns : List String)
     let mutualParts ← ds.mapM (fun d =>
       match d with
       | .specFn f => do
-        let fn ← specFnToCore noParamFns (!f.isOpaque) f sfMap
+        let fn ← specFnToCore noParamFns (!f.isOpaque) f sfMap allDecls
         return (.inl fn : Sum Core.Function (List Core.Decl))
       | _ => do
         let newDecls ← declToCore noParamFns projLayouts mutArgMap sfMap allDecls d
@@ -3291,18 +3392,12 @@ private def exprVarNames (e : CoreExpr) : List String :=
 private def collectVarNamesFromChecks (checks : ListMap CoreLabel Core.Procedure.Check) : List String :=
   joinRefs <| checks.values.map (fun c => exprVarNames c.expr)
 
--- Collect variable touches while ignoring declaration-only locals
--- (`var x : T;` represented as `init x T __verus_decl__`).
+-- Collect variable touches while ignoring declaration-only locals.
 private partial def stmtTouchedVarsExcludingDeclOnly : Core.Statement → List String
   | .cmd (.cmd (.init name _ e _)) =>
     match e with
-    | some rhs =>
-      if isDeclSentinel rhs then
-        []
-      else
-        (CoreIdent.toPretty name :: exprVarNames rhs).eraseDups
-    | none =>
-      [CoreIdent.toPretty name]
+    | some rhs => (CoreIdent.toPretty name :: exprVarNames rhs).eraseDups
+    | none => []
   | .cmd (.cmd (.set name e _)) =>
     (CoreIdent.toPretty name :: exprVarNames e).eraseDups
   | .cmd (.cmd (.havoc name _)) =>
@@ -3334,13 +3429,12 @@ private partial def pruneUnusedDeclOnlyStmt
     (usedVars : List String) : Core.Statement → Option Core.Statement
   | .cmd (.cmd (.init name ty e md)) =>
     match e with
-    | some rhs =>
-      if isDeclSentinel rhs && !usedVars.contains (CoreIdent.toPretty name) then
+    | some _ => some (.cmd (.cmd (.init name ty e md)))
+    | none =>
+      if !usedVars.contains (CoreIdent.toPretty name) then
         none
       else
         some (.cmd (.cmd (.init name ty e md)))
-    | none =>
-      some (.cmd (.cmd (.init name ty e md)))
   | .cmd c => some (.cmd c)
   | .block label ss md =>
     some (.block label (ss.filterMap (pruneUnusedDeclOnlyStmt usedVars)) md)
@@ -3761,8 +3855,8 @@ private def neededSeqPreludeFallbackDecls
   dedupCoreDecls (typeDecls ++ fnDecls)
 
 /-- Translates VLIR declarations to a Core program, a side map of
-    function-name → decreases Core expressions (for the pretty-printer), and a
-    flag indicating whether the emitted `.core.st` should prepend the text Seq
+    function-name → decreases Core expressions (for Boole-only comments), and a
+    flag indicating whether the emitted output should prepend the text Seq
     prelude from `prelude/Seq.core.st`. -/
 def declsToProgram (decls : List Decl)
     (callSiteTypes : Std.HashMap Ident (List Typ × Typ) := {})
@@ -3848,7 +3942,8 @@ def declsToProgram (decls : List Decl)
   let needsStub (n : String) (arity : Nat) : Bool :=
     if isBuiltin n || isBvToIntCastName n || isBvToNatCastName n ||
        isBvWidenCastName n || isPreludeOwnedTypeName n ||
-       isPreludeOwnedValueName n || datatypeNames.contains n then false
+       (isPreludeOwnedValueName n && !isSeqPreludeProvidedCastName n) ||
+       datatypeNames.contains n then false
     else match declaredArities.get? n with
     | none => true  -- not declared at all
     | some 0 => arity > 0  -- declared with 0 params but called with args
@@ -3873,15 +3968,24 @@ def declsToProgram (decls : List Decl)
     let (typeArgs, params, retTy) := match tupleStubSignature? name with
       | some sig => sig
       | none =>
-        match callSiteTypesByName.get? name with
+        match knownPreludeFnSignature? name with
         | some (argTypes, retType) =>
-          let ps := argTypes.zipIdx.map (fun ((ty : Typ), (i : Nat)) =>
-            (CoreIdent.unres s!"x{i}", monoTyOfTyp ty))
-          ([], ps, monoTyOfTyp retType)
+          let inputTys := argTypes.map monoTyOfTyp
+          let retTy := monoTyOfTyp retType
+          let targs := ((inputTys.flatMap collectFtvars) ++ collectFtvars retTy).eraseDups
+          let ps := inputTys.zipIdx.map (fun (ty, i) =>
+            (CoreIdent.unres s!"x{i}", ty))
+          (targs, ps, retTy)
         | none =>
-          let ps := (List.range arity).map (fun i =>
-            (CoreIdent.unres s!"x{i}", LMonoTy.int))
-          ([], ps, LMonoTy.int)
+          match callSiteTypesByName.get? name with
+          | some (argTypes, retType) =>
+            let ps := argTypes.zipIdx.map (fun ((ty : Typ), (i : Nat)) =>
+              (CoreIdent.unres s!"x{i}", monoTyOfTyp ty))
+            ([], ps, monoTyOfTyp retType)
+          | none =>
+            let ps := (List.range arity).map (fun i =>
+              (CoreIdent.unres s!"x{i}", LMonoTy.int))
+            ([], ps, LMonoTy.int)
     match procCallInfo.get? name with
     | some lhsCount =>
       -- Emit a procedure stub for `call` targets.
@@ -3989,467 +4093,6 @@ def declsToProgram (decls : List Decl)
     else
       decls1
   return ({ decls := finalDecls }, fnDecMap, seqPreludeNeeded)
-
-
-/-! ## Strata Core pretty-printer (temp) -/
-namespace Pretty
-
-mutual
-partial def monoTyToString : LMonoTy → String
-  | .tcons "bool" [] => "bool"
-  | .tcons "int" [] => "int"
-  | .tcons "string" [] => "string"
-  | .bitvec n => s!"bv{n}"
-  | .ftvar n => n
-  | .tcons "arrow" [arg, res] =>
-    s!"{monoTyArgToString arg} -> {monoTyToString res}"
-  | .tcons name [] => name
-  | .tcons name args =>
-    let argsStr := String.intercalate " " (args.map monoTyArgToString)
-    s!"{name} {argsStr}"
-
-partial def monoTyArgToString : LMonoTy → String
-  | t@(.tcons _ (_ :: _)) => s!"({monoTyToString t})"
-  | t => monoTyToString t
-end
-
-def tyToString (ty : LTy) : String :=
-  match ty with
-  | .forAll _ mty => monoTyToString mty
-
-partial def exprToString (e : CoreExpr) : String :=
-  exprToStringWithBound [] e
-where
-  ppIdent (id : CoreIdent) : String :=
-    -- Core AST identifiers are already normalized at construction sites.
-    -- Re-sanitizing here can corrupt builtins (e.g. `Int.Sub` -> `Int_Sub`).
-    CoreIdent.toPretty id
-
-  constToString : LConst → String
-  | .intConst i => toString i
-  | .boolConst b => if b then "true" else "false"
-  | .strConst s => s!"\"{s}\""
-  | .realConst r => toString r
-  | .bitvecConst n b => "bv{" ++ toString n ++ "}(" ++ toString b.toNat ++ ")"
-
-  collectApps : CoreExpr → CoreExpr × List CoreExpr
-  | .app _ fn arg =>
-    let (h, args) := collectApps fn
-    (h, args ++ [arg])
-  | e => (e, [])
-
-  callString (name : String) (args : List String) : String :=
-    s!"{name}({String.intercalate ", " args})"
-
-  bvUnaryOp? (name : String) : Option String :=
-    if name.startsWith "Bv" then
-      match (name.splitOn ".").getLast? with
-      | some "Not" => some "~"
-      | some "Neg" => some "-"
-      | _ => none
-    else
-      none
-
-  bvBinaryOp? (name : String) : Option String :=
-    if name.startsWith "Bv" then
-      match (name.splitOn ".").getLast? with
-      | some "Add" => some "+"
-      | some "Sub" => some "-"
-      | some "Mul" => some "*"
-      | some "And" => some "&"
-      | some "Or" => some "|"
-      | some "Xor" => some "^"
-      | some "Shl" => some "<<"
-      | some "UShr" => some ">>"
-      | some "SShr" => some ">>s"
-      | some "UDiv" => some "div"
-      | some "UMod" => some "mod"
-      | some "SDiv" => some "sdiv"
-      | some "SMod" => some "smod"
-      | some "ULt" => some "<"
-      | some "ULe" => some "<="
-      | some "UGt" => some ">"
-      | some "UGe" => some ">="
-      | some "SLt" => some "<s"
-      | some "SLe" => some "<=s"
-      | some "SGt" => some ">s"
-      | some "SGe" => some ">=s"
-      | _ => none
-    else
-      none
-
-  getBound? (bound : List String) (idx : Nat) : Option String :=
-    let rec go (i : Nat) (rest : List String) : Option String :=
-      match rest with
-      | [] => none
-      | x :: xs => if i == idx then some x else go (i + 1) xs
-    go 0 bound
-
-  -- Collect a maximal chain of same-kind quantifiers so we can print:
-  --   forall x: T, y: U :: { trig } body
-  -- instead of nested:
-  --   forall x: T :: forall y: U :: body
-  --
-  -- `boundAcc` mirrors the bound-variable environment used for body printing.
-  -- As we descend quantifiers, new binders are cons'ed to the front.
-  -- Returns (binders, bound', triggerExpr, body) where triggerExpr is from the
-  -- innermost quantifier in the chain.
-  collectQuantChain
-      (k : Lambda.QuantifierKind)
-      (boundAcc : List String)
-      (e : CoreExpr) :
-      (List (String × Option String) × List String × CoreExpr × CoreExpr) :=
-    let rec go (boundNow : List String) (acc : List (String × Option String))
-        (lastTrig : CoreExpr) (cur : CoreExpr) :
-        (List (String × Option String) × List String × CoreExpr × CoreExpr) :=
-      match cur with
-      | .quant _ k' name ty trig body =>
-        if k' == k then
-          let binderName := if name.isEmpty then s!"x{boundNow.length}" else name
-          let tyStr := ty.map (fun mty => tyToString (.forAll [] mty))
-          go (binderName :: boundNow) (acc ++ [(binderName, tyStr)]) trig body
-        else
-          (acc, boundNow, lastTrig, cur)
-      | _ => (acc, boundNow, lastTrig, cur)
-    go boundAcc [] (LExpr.noTrigger ()) e
-
-  -- Decode the trigger tree produced by `Core.mkTriggerExpr`.  The encoding
-  -- uses Strata's official ops: `Triggers.addGroup`, `TriggerGroup.addTrigger`,
-  -- `Triggers.empty`, `TriggerGroup.empty`.
-  --
-  -- We mirror the logic of `extractTriggerPatterns` from Strata's ASTtoCST but
-  -- render each expression as text via our local `exprToStringWithBound`.
-  decodeTriggerTree (bound : List String) (e : CoreExpr) : List String :=
-    match e with
-    | .bvar _ 0 => []  -- noTrigger sentinel
-    | .app _ (.app _ (.op _ name _) arg) rest =>
-      match name.name with
-      | "TriggerGroup.addTrigger" =>
-        exprToStringWithBound bound arg :: decodeTriggerTree bound rest
-      | "Triggers.addGroup" =>
-        decodeTriggerTree bound arg ++ decodeTriggerTree bound rest
-      | _ => []  -- unknown op
-    | .op _ name _ =>
-      if name.name == "TriggerGroup.empty" || name.name == "Triggers.empty"
-      then []
-      else []
-    | _ => []
-
-  -- Render the trigger slot of the innermost quantifier to textual trigger
-  -- groups like `{ f(x0), g(x0, x1) }`.
-  -- Returns the empty string when there are no triggers.
-  triggerGroupsStr (bound : List String) (trigExpr : CoreExpr) : String :=
-    match trigExpr with
-    | .bvar _ 0 => ""  -- noTrigger
-    | _ =>
-      let exprs := decodeTriggerTree bound trigExpr
-      if exprs.isEmpty then ""
-      else
-        s!" \{ {String.intercalate ", " exprs} }\n  "
-
-  exprToStringWithBound (bound : List String) (e : CoreExpr) : String :=
-    match e with
-    | .const _ c => constToString c
-    | .fvar _ id _ => ppIdent id
-    | .op _ id _ => ppIdent id
-    | .bvar _ idx =>
-      match getBound? bound idx with
-      | some name => name
-      | none => s!"_b{idx}"
-    | .eq _ a b => s!"({exprToStringWithBound bound a} == {exprToStringWithBound bound b})"
-    | .ite _ c t f =>
-      s!"(if {exprToStringWithBound bound c} then {exprToStringWithBound bound t} \
-else {exprToStringWithBound bound f})"
-    | .quant _ k _ _ _ _ =>
-      let kw := match k with
-        | .all => "forall"
-        | .exist => "exists"
-      let (binders, bound', trigExpr, body) := collectQuantChain k bound e
-      let binderStrs := binders.map (fun (name, tyStr) =>
-        match tyStr with
-        | some ts => s!"{name}: {ts}"
-        | none => name)
-      let trigStr := triggerGroupsStr bound' trigExpr
-      s!"{kw} {String.intercalate ", " binderStrs} ::{trigStr} {exprToStringWithBound bound' body}"
-    | .abs _ _ _ _ =>
-      -- Core textual syntax in this pipeline is first-order; lambda abstractions
-      -- are currently emitted as an explicit placeholder symbol to avoid
-      -- unparsable Lean-format output.
-      "Unsupported.lambda"
-    | .app _ _ _ =>
-      let (head, args) := collectApps e
-      match head, args with
-      | .op _ id _, [a] =>
-        match ppIdent id with
-        | "Bool.Not" => s!"(!{exprToStringWithBound bound a})"
-        | "Int.Neg" => s!"(-{exprToStringWithBound bound a})"
-        | op =>
-          match bvUnaryOp? op with
-          | some sym => s!"({sym}{exprToStringWithBound bound a})"
-          | none => callString op [exprToStringWithBound bound a]
-      | .op _ id _, [a, b] =>
-        let op := ppIdent id
-        let lhs := exprToStringWithBound bound a
-        let rhs := exprToStringWithBound bound b
-        match op with
-        | "Map.Select" => s!"({lhs}[{rhs}])"
-        | "select" => s!"({lhs}[{rhs}])"
-        | "Int.Add" => s!"({lhs} + {rhs})"
-        | "Int.Sub" => s!"({lhs} - {rhs})"
-        | "Int.Mul" => s!"({lhs} * {rhs})"
-        | "Int.Div" => s!"({lhs} div {rhs})"
-        | "Int.Mod" => s!"({lhs} mod {rhs})"
-        | "Int.Lt" => s!"({lhs} < {rhs})"
-        | "Int.Le" => s!"({lhs} <= {rhs})"
-        | "Int.Gt" => s!"({lhs} > {rhs})"
-        | "Int.Ge" => s!"({lhs} >= {rhs})"
-        | "Bool.And" => s!"({lhs} && {rhs})"
-        | "Bool.Or" => s!"({lhs} || {rhs})"
-        | "Bool.Implies" => s!"({lhs} ==> {rhs})"
-        | "Bool.Equiv" => s!"({lhs} == {rhs})"
-        | _ =>
-          match bvBinaryOp? op with
-          | some sym => s!"({lhs} {sym} {rhs})"
-          | none => callString op [lhs, rhs]
-      | .op _ id _, [a, b, c] =>
-        let op := ppIdent id
-        let lhs := exprToStringWithBound bound a
-        let idx := exprToStringWithBound bound b
-        let val := exprToStringWithBound bound c
-        match op with
-        | "Map.Update" => s!"({lhs}[{idx} := {val}])"
-        | "update" => s!"({lhs}[{idx} := {val}])"
-        | _ => callString op [lhs, idx, val]
-      | .op _ id _, _ =>
-        callString (ppIdent id) (args.map (exprToStringWithBound bound))
-      | .fvar _ id _, _ =>
-        callString (ppIdent id) (args.map (exprToStringWithBound bound))
-      | .bvar _ _, _ =>
-        callString (exprToStringWithBound bound head) (args.map (exprToStringWithBound bound))
-      | _, _ =>
-        -- Keep unsupported expression forms explicit and machine-searchable in
-        -- emitted Core text (consistent with other placeholders).
-        "Unsupported.expr"
-
-def indentString (n : Nat) : String :=
-  String.ofList (List.replicate (n * 2) ' ')
-
-mutual
-partial def stmtsToLines (indent : Nat) (ss : List Core.Statement) : List String :=
-  match ss with
-  | [] => []
-  -- Merge `ret := expr; // return` into `// return expr`
-  | .cmd (.cmd (.set _name e _)) :: .cmd (.cmd (.assume "__return__" _ _)) :: rest =>
-    let pad := indentString indent
-    [s!"{pad}// return {exprToString e};"] ++ stmtsToLines indent rest
-  | s :: rest => stmtToLines indent s ++ stmtsToLines indent rest
-
-partial def stmtToLines (indent : Nat) (s : Core.Statement) : List String :=
-  let pad := indentString indent
-  match s with
-  | .cmd (.cmd (.init name ty e _)) =>
-    let n := CoreIdent.toPretty name
-    match e with
-    | none =>
-      [s!"{pad}var {n} : {tyToString ty};"]
-    | some rhs =>
-      if isDeclSentinel rhs then
-        [s!"{pad}var {n} : {tyToString ty};"]
-      else
-        [s!"{pad}var {n} : {tyToString ty} := {exprToString rhs};"]
-  | .cmd (.cmd (.set name e _)) =>
-    [s!"{pad}{CoreIdent.toPretty name} := {exprToString e};"]
-  | .cmd (.cmd (.havoc name _)) =>
-    [s!"{pad}havoc {CoreIdent.toPretty name};"]
-  | .cmd (.cmd (.assert label e _)) =>
-    if label.isEmpty then
-      [s!"{pad}assert {exprToString e};"]
-    else
-      [s!"{pad}assert [{label}]: {exprToString e};"]
-  | .cmd (.cmd (.assume label e _)) =>
-    if label == "__return__" then
-      [s!"{pad}// return;"]
-    else if label.isEmpty then
-      [s!"{pad}assume {exprToString e};"]
-    else
-      [s!"{pad}assume [{label}]: {exprToString e};"]
-  | .cmd (.cmd (.cover label e _)) =>
-    if label.isEmpty then
-      [s!"{pad}cover {exprToString e};"]
-    else
-      [s!"{pad}cover [{label}]: {exprToString e};"]
-  | .cmd (.call lhs pname args _) =>
-    let lhsStr :=
-      if lhs.isEmpty then ""
-      else s!"{String.intercalate ", " (lhs.map CoreIdent.toPretty)} := "
-    let argsStr := String.intercalate ", " (args.map exprToString)
-    [s!"{pad}call {lhsStr}{pname}({argsStr});"]
-  | .block lbl ss _ =>
-    let body := stmtsToLines (indent + 1) ss
-    if lbl.isEmpty then
-      [pad ++ "{"] ++ body ++ [pad ++ "}"]
-    else
-      [s!"{pad}{lbl}:", pad ++ "{"] ++ body ++ [pad ++ "}"]
-  | .ite cond t e _ =>
-    let head := s!"{pad}if ({exprToString cond}) " ++ "{"
-    let thenLines := stmtsToLines (indent + 1) t
-    if e.isEmpty then
-      [head] ++ thenLines ++ [pad ++ "}"]
-    else
-      let elseLines := stmtsToLines (indent + 1) e
-      [head] ++ thenLines ++ [pad ++ "} else {"] ++ elseLines ++ [pad ++ "}"]
-  | .loop guard measure invs body _ =>
-    let measureLine := match measure with
-      | some m => [s!"{pad}  decreases {exprToString m}"]
-      | none => []
-    let invLine := invs.map (fun i => s!"{pad}  invariant {exprToString i}")
-    let head := s!"{pad}while ({exprToString guard})"
-    let bodyLines := stmtsToLines (indent + 1) body
-    [head] ++ measureLine ++ invLine ++ [pad ++ "{"] ++ bodyLines ++ [pad ++ "}"]
-  | .exit lbl _ =>
-    match lbl with
-    | some l => [s!"{pad}exit {l};"]
-    | none => [s!"{pad}exit;"]
-  | .funcDecl _ _ =>
-    -- Current VLIR→Core lowering path does not emit statement-level function declarations.
-    [s!"{pad}/* unsupported: statement-level function declaration */"]
-  | .typeDecl _ _ =>
-    [s!"{pad}/* unsupported: statement-level type declaration */"]
-end
-
-def typeArgsToString (args : List String) : String :=
-  if args.isEmpty then "" else s!"<{String.intercalate ", " args}>"
-
-def typeParamsToString (num : Nat) : String :=
-  if num == 0 then
-    ""
-  else
-    let names := (List.range num).map (fun i => s!"T{i}")
-    let binds := names.map (fun n => s!"{n}: Type")
-    s!" ({String.intercalate ", " binds})"
-
-def datatypeTypeArgsToString (args : List String) : String :=
-  if args.isEmpty then
-    "()"
-  else
-    let binds := args.map (fun n => s!"{sanitizeIdent n}: Type")
-    "(" ++ String.intercalate ", " binds ++ ")"
-
-def datatypeConstrToString (c : LConstr Visibility) : String :=
-  let fields :=
-    c.args.map (fun (field, ty) =>
-      s!"{CoreIdent.toPretty field}: {tyToString (.forAll [] ty)}")
-  s!"{CoreIdent.toPretty c.name}({String.intercalate ", " fields})"
-
-def datatypeDeclToString (d : LDatatype Visibility) : String :=
-  let ctors := String.intercalate ", " (d.constrs.map datatypeConstrToString)
-  "datatype " ++ d.name ++ " " ++ datatypeTypeArgsToString d.typeArgs ++ " { " ++ ctors ++ " };"
-
-def procToString (p : Core.Procedure) : String :=
-  let inputs := sigToString p.header.inputs
-  let outputs := sigToString p.header.outputs
-  let header :=
-    s!"procedure {CoreIdent.toPretty p.header.name}{typeArgsToString p.header.typeArgs}({inputs}) returns ({outputs})"
-  -- Extract `__decreases__` sentinels from the body and render in the spec block.
-  let (decreasesStmts, bodyStmts) := p.body.partition (fun s =>
-    match s with
-    | .cmd (.cmd (.assume label _ _)) => label == "__decreases__"
-    | _ => false)
-  let decreasesLines := decreasesStmts.filterMap (fun s =>
-    match s with
-    | .cmd (.cmd (.assume _ e _)) =>
-      let inner := exprToString e
-      let args := inner.dropWhile (· != '(')
-      some s!"  // decreases {args}"
-    | _ => none)
-  let specLines :=
-    (p.spec.modifies.map (fun v => s!"  modifies {CoreIdent.toPretty v};"))
-    ++ (p.spec.preconditions.map (fun (_, c) => s!"  requires ({exprToString c.expr});"))
-    ++ (p.spec.postconditions.map (fun (_, c) => s!"  ensures ({exprToString c.expr});"))
-    ++ decreasesLines
-  let specBlock :=
-    if specLines.isEmpty then
-      []
-    else
-      ["spec {"] ++ specLines ++ ["}"]
-  let bodyLines := stmtsToLines 1 bodyStmts
-  let body := ["{"] ++ bodyLines ++ ["};"]
-  String.intercalate "\n" ([header] ++ specBlock ++ body)
-where
-  sigToString (sig : @Lambda.LMonoTySignature Visibility) : String :=
-    String.intercalate ", " (sig.map (fun (id, ty) =>
-      s!"{CoreIdent.toPretty id}: {tyToString (.forAll [] ty)}"))
-
-def funcToString (f : Core.Function) (fnDecreasesMap : Std.HashMap String (List CoreExpr) := ∅) : String :=
-  -- `@[cases]` comes from the function attributes
-  let recCasesIdx? :=
-    if f.body.isSome then
-      Strata.DL.Util.FuncAttr.findInlineIfConstr f.attr
-    else
-      none
-  let inputs := String.intercalate ", " (f.inputs.zipIdx.map (fun ((id, ty), i) =>
-    let ann := if recCasesIdx? == some i then "@[cases] " else ""
-    s!"{ann}{CoreIdent.toPretty id}: {tyToString (.forAll [] ty)}"))
-  let header := s!"function {CoreIdent.toPretty f.name}{typeArgsToString f.typeArgs}({inputs}): {tyToString (.forAll [] f.output)}"
-  let decComment := match fnDecreasesMap.get? (CoreIdent.toPretty f.name) with
-    | some exprs =>
-      let exprsStr := String.intercalate ", " (exprs.map exprToString)
-      s!"\n    // decreases ({exprsStr})"
-    | none => ""
-  match f.body with
-  | none => header ++ ";" ++ decComment
-  | some body =>
-    let bodyStr := exprToString body
-    if decComment.isEmpty then
-      String.intercalate "\n" [header ++ " {", "  " ++ bodyStr, "}"]
-    else
-      -- Put `{` on a new line so the `// decreases` comment doesn't swallow it.
-      String.intercalate "\n" [header ++ decComment, "{", "  " ++ bodyStr, "}"]
-
-private def recFuncBlockToString (fs : List Core.Function)
-    (fnDecreasesMap : Std.HashMap String (List CoreExpr) := ∅) : String :=
-  match fs with
-  | [] => ""
-  | _ =>
-    let rendered := fs.map (fun f => funcToString { f with isRecursive := false } fnDecreasesMap)
-    "rec " ++ String.intercalate "\n" rendered ++ ";"
-
-def declToString (d : Core.Decl) (fnDecreasesMap : Std.HashMap String (List CoreExpr) := ∅) : String :=
-  match d with
-  | .proc p _ => procToString p
-  | .func f _ =>
-    if f.isRecursive && f.body.isSome then
-      recFuncBlockToString [f] fnDecreasesMap
-    else
-      funcToString f fnDecreasesMap
-  | .recFuncBlock fs _ => recFuncBlockToString fs fnDecreasesMap
-  | .type t _ =>
-    match t with
-    | .con c => s!"type {c.name}{typeParamsToString c.numargs};"
-    | .syn s => s!"type {s.name} := {tyToString (.forAll [] s.type)};"
-    | .data ds => String.intercalate "\n" (ds.map datatypeDeclToString)
-  | .ax a _ => s!"axiom {CoreIdent.toPretty a.name}: {exprToString a.e};"
-  | .var name ty e _ =>
-    match e with
-    | some rhs => s!"var {CoreIdent.toPretty name} : {tyToString ty} := {exprToString rhs};"
-    | none => s!"var {CoreIdent.toPretty name} : {tyToString ty};"
-  | .distinct lbl es _ =>
-    let esStr := String.intercalate ", " (es.map exprToString)
-    s!"distinct [{lbl}] {esStr};"
-
-def programToString (p : Core.Program) (fnDecreasesMap : Std.HashMap String (List CoreExpr) := ∅) : String :=
-  let decls := p.decls.map (declToString · fnDecreasesMap)
-  let body := String.intercalate "\n\n" decls
-  if body.isEmpty then
-    "program Core;\n"
-  else
-    "program Core;\n\n" ++ body ++ "\n"
-
-end Pretty
-
-def declsToCoreString (decls : List Decl) : Except String String := do
-  let (p, fnDecMap, _) ← declsToProgram decls
-  return Pretty.programToString p fnDecMap
 
 end ToCore
 

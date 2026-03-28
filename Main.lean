@@ -2,6 +2,7 @@ import Lean
 import Lean.PrettyPrinter
 import VerusLean
 import VerusLean.VLIR.ToCore
+import VerusLean.VLIR.Pretty
 import Strata.Languages.Core.DDMTransform.ASTtoCST
 
 open VerusLean
@@ -9,17 +10,26 @@ open VerusLean
 open Lean PrettyPrinter
 open VName
 
-/-- Strip the standard `program Core;\n\n` header so we can prepend another
-    textual prelude without duplicating the program header. -/
-private def stripCoreProgramHeader (text : String) : String :=
-  let header := "program Core;\n\n"
+/-- The local pretty-printer emits a fixed program header per dialect.
+    Strip it before prepending a textual prelude so the final file keeps
+    exactly one header. -/
+private def stripProgramHeader (dialect : ToCore.OutputDialect) (text : String) : String :=
+  let header :=
+    match dialect with
+    | .core => "program Core;\n\n"
+    | .boole => "program Boole;\n\n"
   if text.startsWith header then
     (text.drop header.length).toString
   else
     text
 
+private def programHeader (dialect : ToCore.OutputDialect) : String :=
+  match dialect with
+  | .core => "program Core;"
+  | .boole => "program Boole;"
+
 /-- The Seq prelude keeps source comments for maintainability, but generated
-    `.core.st` files should stay concise. Drop standalone `// ...` lines before
+    output files should stay concise. Drop standalone `// ...` lines before
     prepending the prelude text. -/
 private def stripLineComments (text : String) : String :=
   String.intercalate "\n" <|
@@ -27,22 +37,49 @@ private def stripLineComments (text : String) : String :=
       let trimmed := line.trimAscii.toString
       !trimmed.startsWith "//")
 
-/-- Read `prelude/Seq.core.st` relative to the `verus-boogie` repo root.
-    If the file is absent, translation still proceeds without textual prelude
-    insertion and falls back to internal typed stubs. -/
+/-- Read the textual Seq prelude relative to the `verus-boogie` repo root.
+    The file itself is written in Core concrete syntax, so strip the Core
+    header before reusing it in either Core or Boole output. If the file is
+    absent, translation still proceeds without textual prelude insertion and
+    falls back to internal typed stubs. -/
 private def readSeqPreludeBody? : IO (Option String) := do
   let cwd ← IO.currentDir
   let path := cwd / "prelude" / "Seq.core.st"
   if ← path.pathExists then
     let text ← IO.FS.readFile path
-    pure <| some <| stripLineComments (stripCoreProgramHeader text)
+    pure <| some <| stripLineComments (stripProgramHeader .core text)
   else
     pure none
 
-/-- Prepend the textual Seq prelude while keeping exactly one `program Core;`
-    header in the final output. -/
-private def prependSeqPrelude (prelude body : String) : String :=
-  s!"program Core;\n\n{prelude.trimAsciiEnd.toString}\n\n{stripCoreProgramHeader body}"
+private def prependPrelude (dialect : ToCore.OutputDialect) (prelude body : String) : String :=
+  s!"{programHeader dialect}\n\n{prelude.trimAsciiEnd.toString}\n\n{stripProgramHeader dialect body}"
+
+private def parseOutputDialect? : String → Option ToCore.OutputDialect
+  | "core" => some .core
+  | "boole" => some .boole
+  | _ => none
+
+private def parseCoreArgs
+    (args : List String) :
+    Except String (ToCore.OutputDialect × Bool × String × Option String) := do
+  let rec go
+      (dialect : ToCore.OutputDialect)
+      (useOfficialPrinter : Bool)
+      (rest : List String) :
+      Except String (ToCore.OutputDialect × Bool × String × Option String) := do
+    match rest with
+    | "--official" :: tail => go dialect true tail
+    | "--dialect" :: d :: tail =>
+      let dialect ←
+        match parseOutputDialect? d with
+        | some dialect => pure dialect
+        | none => throw s!"unknown output dialect: {d}"
+      go dialect useOfficialPrinter tail
+    | [path] => pure (dialect, useOfficialPrinter, path, none)
+    | [path, toFile] => pure (dialect, useOfficialPrinter, path, some toFile)
+    | [] => throw "missing input path"
+    | _ => throw "unexpected extra arguments"
+  go .core false args
 
 /-
 def genFromDir (dirPath : String) : IO String := do
@@ -139,7 +176,10 @@ private def collectJsonBundleFiles (target : System.FilePath) : IO (List System.
     pure (target :: sortedShards)
   | _, _ => pure [target]
 
-unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit)
+unsafe def genCoreFromFile
+    (path : String)
+    (printFn : String → IO Unit)
+    (dialect : ToCore.OutputDialect := .core)
     (useOfficialPrinter : Bool := false) : IO Unit := do
   let target := System.FilePath.mk path
   let bundleFiles ← collectJsonBundleFiles target
@@ -165,19 +205,23 @@ unsafe def genCoreFromFile (path : String) (printFn : String → IO Unit)
   match ToCore.declsToProgram allDecls allCallSiteTypes (useTextSeqPrelude := seqPreludeBody?.isSome) with
   | .ok (p, fnDecMap, seqPreludeNeeded) =>
     if useOfficialPrinter then
+      if dialect != .core then
+        IO.println "Error: --official only supports Core output"
+        return ()
       -- Use Strata's official DDM-based pretty-printer (Core.formatProgram).
       -- Note: output does not include the "program Core;" header.
       let formatted := Std.Format.pretty (Strata.Core.formatProgram p) 100
       let output :=
         match seqPreludeNeeded, seqPreludeBody? with
-        | true, some prelude => prependSeqPrelude prelude (formatted ++ "\n")
-        | _, _ => "program Core;\n\n" ++ formatted ++ "\n"
+        | true, some prelude => prependPrelude .core prelude (formatted ++ "\n")
+        | _, _ => s!"{programHeader .core}\n\n{formatted}\n"
       printFn output
     else
-      let body := ToCore.Pretty.programToString p fnDecMap
+      let p := ToCore.Pretty.prepareProgramForOutputDialect dialect p fnDecMap
+      let body := ToCore.Pretty.programToString p dialect
       let output :=
         match seqPreludeNeeded, seqPreludeBody? with
-        | true, some prelude => prependSeqPrelude prelude body
+        | true, some prelude => prependPrelude dialect prelude body
         | _, _ => body
       printFn output
   | .error e => IO.println s!"Error: {e}"
@@ -186,11 +230,16 @@ unsafe def main : List String → IO Unit
   | [path] => genFromFile path IO.println
   | ["boogie", path] => genCoreFromFile path IO.println
   | ["boogie", path, toFile] => genCoreFromFile path (IO.FS.writeFile toFile)
-  | ["core", "--official", path] => genCoreFromFile path IO.println (useOfficialPrinter := true)
-  | ["core", "--official", path, toFile] =>
-    genCoreFromFile path (IO.FS.writeFile toFile) (useOfficialPrinter := true)
-  | ["core", path] => genCoreFromFile path IO.println
-  | ["core", path, toFile] => genCoreFromFile path (IO.FS.writeFile toFile)
+  | "core" :: args =>
+    match parseCoreArgs args with
+    | .error e =>
+      IO.println s!"Error: {e}"
+    | .ok (dialect, useOfficialPrinter, path, toFile?) =>
+      match toFile? with
+      | some toFile =>
+        genCoreFromFile path (IO.FS.writeFile toFile) dialect (useOfficialPrinter := useOfficialPrinter)
+      | none =>
+        genCoreFromFile path IO.println dialect (useOfficialPrinter := useOfficialPrinter)
   /-| ["dir", path] => do
     -- IO.println "Reading from a directory"
     let res ← genFromDir' path
@@ -206,4 +255,4 @@ unsafe def main : List String → IO Unit
   | _ =>
     IO.println "Usage: ./verus-lean <input.json> [output.lean]\n\
       ./verus-lean boogie <input.json> [output.core.st]\n\
-      ./verus-lean core [--official] <input.json> [output.core.st]"
+      ./verus-lean core [--official] [--dialect core|boole] <input.json> [output.st]"

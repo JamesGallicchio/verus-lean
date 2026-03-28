@@ -792,14 +792,7 @@ private def decodeVarNameJson (j : Json) : m String := do
     match arr[1].getObjVal? "VirRenumbered" with
     | .ok renObj => return s!"tmp_ren{← renObj.getNatUnderKeyM "id"}"
     | .error _ => return "tmp_ren"
-  | _ =>
-    match arr[1] with
-    | .str "VirExprNoNumber" =>
-      -- Keep internal expression binders distinct from source-level params/locals.
-      -- Some exports reuse names like `ret` here, and collapsing them causes
-      -- later let-inlining to capture the real return variable.
-      return s!"{ident}__expr"
-    | _ => return ident
+  | _ => return ident
 
 def VarBinder.fromJson (j : Json) (key : String := "typ") : m (String × Typ) := do
   -- Decode binder names through `Var.fromJson` so renumbered temporaries like
