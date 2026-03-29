@@ -36,6 +36,12 @@ structure MutArgInfo where
 
 abbrev MutArgMap := Std.HashMap String (List MutArgInfo) -- Core callee name -> mutable argument metadata
 
+structure ProgramLoweringResult where
+  program : Core.Program
+  fnDecMap : Std.HashMap String (List CoreExpr)
+  seqPreludeNeeded : Bool
+  boolePrunableDeclNames : Std.HashSet String := ∅
+
 /-! ## Utilities -/
 
 -- Sanitize an identifier for Core emission:
@@ -3378,12 +3384,14 @@ TODO: if/when Verus export becomes reachability-minimized for
 `--export-lean-all`, this pass can be reduced or removed.
 -/
 
--- Name-level predicate for synthesized helper declarations after
--- sanitization/projection (e.g. `impl__N_arrow_*`, `Vec_Impl__1_len`).
+/-- Name-level predicate for synthesized helper declarations after
+    sanitization/projection (e.g. `impl__N_arrow_*`, `Vec_Impl__1_len`). -/
 def isSyntheticHelperName (s : String) : Bool :=
   s.startsWith "impl__" || s.startsWith "Impl__" || (s.find? "_Impl__").isSome
 
-private def joinRefs (xss : List (List String)) : List String :=
+/-- Shared deduping join used by Core declaration reference analysis in both
+    lowering cleanup and output preparation. -/
+def joinRefs (xss : List (List String)) : List String :=
   (xss.foldr (· ++ ·) []).eraseDups
 
 private def exprVarNames (e : CoreExpr) : List String :=
@@ -3464,18 +3472,21 @@ private def pruneUnusedDeclOnlyLocals (decls : List Core.Decl) : List Core.Decl 
     | .proc p md => .proc (pruneUnusedDeclOnlyLocalsInProc p) md
     | _ => d)
 
--- Shared traversal used by both synthetic-helper pruning and BV-cast stub retention.
--- `exprRefs` extracts names from expressions, and `callNameRefs` optionally adds
--- direct procedure-call callee names when needed.
-private def exprOpRefsBy (keep : String → Bool) (e : CoreExpr) : List String :=
+/-- Collect operation names referenced by a Core expression, filtered by `keep`.
+    Shared by lowering cleanup and output preparation. -/
+def exprOpRefsBy (keep : String → Bool) (e : CoreExpr) : List String :=
   ((Lambda.LExpr.getOps e).map CoreIdent.toPretty |>.filter keep).eraseDups
 
-private def collectRefsFromChecks
+def collectRefsFromChecks
     (exprRefs : CoreExpr → List String)
     (checks : ListMap CoreLabel Core.Procedure.Check) : List String :=
   joinRefs <| checks.values.map (fun c => exprRefs c.expr)
 
-private partial def stmtRefsBy
+/-- Shared traversal used by both synthetic-helper pruning and output-prep
+    dependency collection. `exprRefs` extracts referenced names from
+    expressions, and `callNameRefs` optionally adds direct procedure-call callee
+    names when needed. -/
+partial def stmtRefsBy
     (exprRefs : CoreExpr → List String)
     (callNameRefs : String → List String) :
     Core.Statement → List String
@@ -3498,13 +3509,13 @@ private partial def stmtRefsBy
   | .funcDecl _ _ => []
   | .typeDecl _ _ => []
 
-private def stmtsRefsBy
+def stmtsRefsBy
     (exprRefs : CoreExpr → List String)
     (callNameRefs : String → List String)
     (ss : List Core.Statement) : List String :=
   joinRefs <| ss.map (stmtRefsBy exprRefs callNameRefs)
 
-private def declRefsBy
+def declRefsBy
     (exprRefs : CoreExpr → List String)
     (callNameRefs : String → List String) :
     Core.Decl → List String
@@ -3854,14 +3865,35 @@ private def neededSeqPreludeFallbackDecls
       mkPreludeFallbackFuncDecl? name)
   dedupCoreDecls (typeDecls ++ fnDecls)
 
+private def isBooleRangeLoopSupportTypeName : String → Bool
+  | "Unit"
+  | "Ops_Range_range"
+  | "Option_option"
+  | "Std_specs_range" => true
+  | _ => false
+
+private def isBooleRangeLoopSupportValueName : String → Bool
+  | "Tuple_ctor_0"
+  | "Pervasive_exec_invariant"
+  | "Std_specs_Core_iter_into_iter_spec"
+  | "Pervasive_arbitrary"
+  | "Iter_Traits_Iterator_Iterator_next" => true
+  | name => name.startsWith "Pervasive_ghost_"
+
+private def isBooleIteratorNextStub : Core.Decl → Bool
+  | .proc p _ =>
+    p.body.isEmpty && CoreIdent.toPretty p.header.name == "Iter_Traits_Iterator_Iterator_next"
+  | _ => false
+
 /-- Translates VLIR declarations to a Core program, a side map of
-    function-name → decreases Core expressions (for Boole-only comments), and a
+    function-name → decreases Core expressions (for Boole-only comments), a
     flag indicating whether the emitted output should prepend the text Seq
-    prelude from `prelude/Seq.core.st`. -/
+    prelude from `prelude/Seq.core.st`, and explicit output-prep metadata such
+    as Boole-prunable helper declarations. -/
 def declsToProgram (decls : List Decl)
     (callSiteTypes : Std.HashMap Ident (List Typ × Typ) := {})
     (useTextSeqPrelude : Bool := true) :
-    Except String (Core.Program × Std.HashMap String (List CoreExpr) × Bool) := do
+    Except String ProgramLoweringResult := do
   let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
   let mutArgMap := collectMutArgMapFromDecls decls
@@ -4050,6 +4082,25 @@ def declsToProgram (decls : List Decl)
   -- Place auto-stubs BEFORE other declarations so Strata's sequential
   -- parser can resolve forward references to stdlib/pervasive symbols.
   let otherDecls := autoStubs ++ otherDecls
+  -- Output prep should not have to rediscover loop-recovery helpers by raw
+  -- decl-name heuristics. Record exactly which helper names lowering added for
+  -- current range-loop support so the Boole path can prune only those.
+  let boolePrunableFromTranslated : Std.HashSet String :=
+    translated.foldl (init := ∅) (fun acc d =>
+      if isBooleIteratorNextStub d then acc.insert (declNameString d) else acc)
+  let boolePrunableFromAutoStubs : Std.HashSet String :=
+    autoStubs.foldl (init := ∅) (fun acc d =>
+      let name := declNameString d
+      if isBooleRangeLoopSupportValueName name then acc.insert name else acc)
+  let boolePrunableFromTypeDecls : Std.HashSet String :=
+    neededAutoStubStdlibTypes.foldl (init := ∅) (fun acc d =>
+      let name := declNameString d
+      if isBooleRangeLoopSupportTypeName name then acc.insert name else acc)
+  let boolePrunableDeclSeeds : Std.HashSet String :=
+    (boolePrunableFromTranslated.toList ++
+      boolePrunableFromAutoStubs.toList ++
+      boolePrunableFromTypeDecls.toList).foldl (init := ∅) (fun acc name =>
+        acc.insert name)
   -- Build a side map of function-name → decreases comment string from the
   -- VLIR SpecFn.decreases field.  This avoids polluting Core's semantic
   -- `Func.axioms`.  We extract `decrease%init*` RHS expressions from
@@ -4092,7 +4143,16 @@ def declsToProgram (decls : List Decl)
         declNameString d != "nat" && !isSeqPreludeProvidedCastName (declNameString d))
     else
       decls1
-  return ({ decls := finalDecls }, fnDecMap, seqPreludeNeeded)
+  let boolePrunableDeclNames : Std.HashSet String :=
+    finalDecls.foldl (init := ∅) (fun acc d =>
+      let name := declNameString d
+      if boolePrunableDeclSeeds.contains name then acc.insert name else acc)
+  return {
+    program := { decls := finalDecls }
+    fnDecMap := fnDecMap
+    seqPreludeNeeded := seqPreludeNeeded
+    boolePrunableDeclNames := boolePrunableDeclNames
+  }
 
 end ToCore
 

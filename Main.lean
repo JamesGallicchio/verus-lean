@@ -2,6 +2,7 @@ import Lean
 import Lean.PrettyPrinter
 import VerusLean
 import VerusLean.VLIR.ToCore
+import VerusLean.VLIR.OutputPrep
 import VerusLean.VLIR.Pretty
 import Strata.Languages.Core.DDMTransform.ASTtoCST
 
@@ -53,6 +54,9 @@ private def readSeqPreludeBody? : IO (Option String) := do
 
 private def prependPrelude (dialect : ToCore.OutputDialect) (prelude body : String) : String :=
   s!"{programHeader dialect}\n\n{prelude.trimAsciiEnd.toString}\n\n{stripProgramHeader dialect body}"
+
+private def failWith (msg : String) : IO α :=
+  throw <| IO.userError s!"Error: {msg}"
 
 private def parseOutputDialect? : String → Option ToCore.OutputDialect
   | "core" => some .core
@@ -197,17 +201,18 @@ unsafe def genCoreFromFile
     | .error e =>
       if f == target then
         -- Primary file failure is fatal.
-        IO.println e
-        return ()
+        failWith e
       else
         -- Keep translating other shards so one unsupported module does not block output.
         IO.eprintln s!"warning: skipping shard {f}: {e}"
   match ToCore.declsToProgram allDecls allCallSiteTypes (useTextSeqPrelude := seqPreludeBody?.isSome) with
-  | .ok (p, fnDecMap, seqPreludeNeeded) =>
+  | .ok lowered =>
+    let p := lowered.program
+    let fnDecMap := lowered.fnDecMap
+    let seqPreludeNeeded := lowered.seqPreludeNeeded
     if useOfficialPrinter then
       if dialect != .core then
-        IO.println "Error: --official only supports Core output"
-        return ()
+        failWith "--official only supports Core output"
       -- Use Strata's official DDM-based pretty-printer (Core.formatProgram).
       -- Note: output does not include the "program Core;" header.
       let formatted := Std.Format.pretty (Strata.Core.formatProgram p) 100
@@ -217,14 +222,18 @@ unsafe def genCoreFromFile
         | _, _ => s!"{programHeader .core}\n\n{formatted}\n"
       printFn output
     else
-      let p := ToCore.Pretty.prepareProgramForOutputDialect dialect p fnDecMap
-      let body := ToCore.Pretty.programToString p dialect
-      let output :=
-        match seqPreludeNeeded, seqPreludeBody? with
-        | true, some prelude => prependPrelude dialect prelude body
-        | _, _ => body
-      printFn output
-  | .error e => IO.println s!"Error: {e}"
+      match ToCore.OutputPrep.prepareProgramForOutputDialect
+          dialect p fnDecMap lowered.boolePrunableDeclNames with
+      | .ok p =>
+        let body := ToCore.Pretty.programToString p dialect
+        let output :=
+          match seqPreludeNeeded, seqPreludeBody? with
+          | true, some prelude => prependPrelude dialect prelude body
+          | _, _ => body
+        printFn output
+      | .error e =>
+        failWith e
+  | .error e => failWith e
 
 unsafe def main : List String → IO Unit
   | [path] => genFromFile path IO.println
@@ -233,7 +242,7 @@ unsafe def main : List String → IO Unit
   | "core" :: args =>
     match parseCoreArgs args with
     | .error e =>
-      IO.println s!"Error: {e}"
+      failWith e
     | .ok (dialect, useOfficialPrinter, path, toFile?) =>
       match toFile? with
       | some toFile =>

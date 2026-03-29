@@ -150,7 +150,9 @@ Additional counters (do not affect total):
 - Missing types: `Unit`, `Atomic`, `Cell`, `Simple_pptr`, `Arithmetic_overflow`,
   `Rwlock`, `Thread`. `Invariant` clashes with Strata's `invariant` keyword.
 - Concrete example tests for each missing type:
-  - `Unit`: `vlir-tests:demo_for` (current Core loop lowering still leaves `Tuple_ctor_0`)
+  - `Unit`: raw Core example `vlir-tests:demo_for` (this test is Boole-primary,
+    so use it here only as evidence of the missing Core `Unit` type, not as the
+    primary artifact for manual translation review)
   - `Atomic`: `verus-examples:atomics`
   - `Cell`: `verus-examples:cells`
   - `Simple_pptr`: `verus-examples:rfmig_script`
@@ -177,12 +179,15 @@ Additional counters (do not affect total):
 - Stubs and type declarations are only emitted when referenced.
 - Multi-shard test script bug fixed: tests with module shards (e.g.
   `broadcast_proof`, `guide/quants`) now correctly load all shards.
+- The per-test blockers below are for Core-primary/manual-Core cases. Boole-primary
+  tests such as `demo`, `demo_for`, `mutual_recursion`, `recursion`, and
+  `guide/recursion` are intentionally excluded here unless called out elsewhere
+  as raw Core background notes.
 - Current per-test blockers:
   - Incomplete `Vec_view` bridge between exec `Vec` (`Map bv64 T` + `len`) and spec `Sequence T`: `broadcast_proof`, `guide/exec_attr`, `guide/lib_examples`, `guide/quants`, `mergesort`, `nevd_script`, `set_from_vec`, `syntax`
   - `Undeclared type impl_*`: `guide/higher_order_fns`
   - `Undeclared type Simple_pptr`: `rfmig_script`
   - Type mismatch (`nat`/`bv64`/`int`): `guide/const`, `nonlinear`, `seqs`, `test_array`
-  - `Undeclared type or category Unit` from lingering `Tuple_ctor_0` in Core loop lowering: `demo`, `demo_for` (Core-only; current Boole output elaborates cleanly)
   - `Unsupported.lambda`: `maps`
   - Other: `tests/mini_c`, `test_vstd`, `traits` (body type mismatch), `guide/invariants`
 
