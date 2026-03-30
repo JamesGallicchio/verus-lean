@@ -115,6 +115,8 @@ def BinaryOp.pp (op : BinaryOp) : String :=
   | .Xor => " ^^ "
   | .Implies => " → "
   | .Eq _ => " = "
+  | .ExtEq false _ => " =~= "
+  | .ExtEq true _ => " =~~= "
   | .Ne => " ≠ "
   | .Inequality ineq => InequalityOp.pp ineq
   | .Arith arith _ => ArithOp.pp arith

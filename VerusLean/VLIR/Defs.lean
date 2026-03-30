@@ -72,7 +72,7 @@ inductive IntRange where
   /-- Rust's isize type -/
   | ISize
   | Char
-deriving Repr, Inhabited, DecidableEq, Hashable
+deriving Repr, Inhabited, Hashable, BEq
 
 /--
   Rust and Verus type decorations.
@@ -89,7 +89,7 @@ inductive TypDecoration where
   | Ghost     -- `Ghost<T>`
   | Tracked   -- `Tracked<T>`
   | ConstPtr  -- `*const T` when applied to `*mut T`
-deriving Repr, Inhabited, DecidableEq, Hashable
+deriving Repr, Inhabited, DecidableEq, Hashable, BEq
 
 /-- Rust type, but without Box, Rc, Arc, etc. -/
 inductive Typ where
@@ -146,7 +146,7 @@ inductive Const
   | StrSlice (s : String)
   /-- UTF-8 Unicode chars. In Rust, these are always four bytes. -/
   | Char (c : Char)
-deriving Repr, Inhabited, DecidableEq, Hashable
+deriving Repr, Inhabited, Hashable, BEq
 
 /-- Bitwise operations.  -/
 inductive BitwiseOp
@@ -276,6 +276,12 @@ inductive BinaryOp
       Some types only support compilable equality (Mode == Exec),
         while others only support spec equality (Mode == Spec). -/
   | Eq (mode : Mode)
+  /-- Verus extensional equality.
+      `deep = false` corresponds to `=~=`.
+      `deep = true` corresponds to `=~~=`.
+      The payload type is preserved from JSON so lowering can distinguish
+      direct collection/function extensionality from plain `==`. -/
+  | ExtEq (deep : Bool) (ty : Typ)
   /-- Not equals. (Verus doesn't have a mode option here?) -/
   | Ne
   /-- Arithmetic inequality -/
@@ -284,7 +290,7 @@ inductive BinaryOp
   | Arith (op : ArithOp) (mode : Mode)
   /-- Bitwise operations. Overflow checking is done when `mode = Exec`. -/
   | Bitwise (op : BitwiseOp) (mode : Mode)
-deriving Repr, Inhabited, DecidableEq, Hashable
+deriving Repr, Inhabited, Hashable, BEq
 
 inductive Quant where
   | Forall
@@ -366,6 +372,32 @@ inductive AssertQueryMode where
   | BitVector
   | Other (name : String)
 deriving Repr, Inhabited, DecidableEq, Hashable
+
+/-- Provenance for non-parameter/non-return locals that survive into VLIR.
+    Keeping this metadata prevents later lowering from relying entirely on
+    name-based heuristics such as `decrease%...` prefixes. -/
+inductive LocalDeclOrigin where
+  | sourceStmtLet (mutable : Bool)
+  | sourceAssert
+  | sourceDecreases
+  | sourceOther (tag : String)
+  | implicitSet
+  | rangeIterTemp
+deriving Repr, Inhabited, DecidableEq, Hashable
+
+structure LocalDeclInfo where
+  name : String
+  ty : Typ
+  origin : LocalDeclOrigin
+deriving Repr, Inhabited, Hashable
+
+def LocalDeclInfo.toPair (decl : LocalDeclInfo) : String × Typ :=
+  (decl.name, decl.ty)
+
+def LocalDeclInfo.isSourceDecreases (decl : LocalDeclInfo) : Bool :=
+  match decl.origin with
+  | .sourceDecreases => true
+  | _ => false
 
 /--
   Assignment destination (Verus `Dest`), preserving l-value structure.
@@ -489,7 +521,7 @@ structure ProofFn where
   requires : List Exp
   ensures : List Exp
   body : Option Stm
-  locals : List (String × Typ) := []
+  locals : List LocalDeclInfo := []
 deriving Repr, Inhabited, Hashable
 
 structure ExecFn where
@@ -500,7 +532,7 @@ structure ExecFn where
   requires : List Exp
   ensures : List Exp
   body : Stm
-  locals : List (String × Typ) := []
+  locals : List LocalDeclInfo := []
 deriving Repr, Inhabited, Hashable
 
 structure Struct where

@@ -53,6 +53,59 @@ where
   callString (name : String) (args : List String) : String :=
     s!"{name}({String.intercalate ", " args})"
 
+  fixedOpArity? (name : String) : Option Nat :=
+    match name with
+    | "Bool.Not"
+    | "Int.Neg" => some 1
+    | "Map.Select"
+    | "Sequence.select"
+    | "select"
+    | "Int.Add"
+    | "Int.Sub"
+    | "Int.Mul"
+    | "Int.Div"
+    | "Int.Mod"
+    | "Int.Lt"
+    | "Int.Le"
+    | "Int.Gt"
+    | "Int.Ge"
+    | "Bool.And"
+    | "Bool.Or"
+    | "Bool.Implies"
+    | "Bool.Equiv" => some 2
+    | "Map.Update"
+    | "Sequence.update"
+    | "update" => some 3
+    | _ =>
+      if name.startsWith "Bv" then
+        match (name.splitOn ".").getLast? with
+        | some "Not"
+        | some "Neg" => some 1
+        | some "Add"
+        | some "Sub"
+        | some "Mul"
+        | some "And"
+        | some "Or"
+        | some "Xor"
+        | some "Shl"
+        | some "UShr"
+        | some "SShr"
+        | some "UDiv"
+        | some "UMod"
+        | some "SDiv"
+        | some "SMod"
+        | some "ULt"
+        | some "ULe"
+        | some "UGt"
+        | some "UGe"
+        | some "SLt"
+        | some "SLe"
+        | some "SGt"
+        | some "SGe" => some 2
+        | _ => none
+      else
+        none
+
   bvUnaryOp? (name : String) : Option String :=
     if name.startsWith "Bv" then
       match (name.splitOn ".").getLast? with
@@ -97,6 +150,15 @@ where
       | x :: xs => if i == idx then some x else go (i + 1) xs
     go 0 bound
 
+  freshBinderName (base : String) (used : List String) : String :=
+    if !used.contains base then
+      base
+    else
+      let rec go (i : Nat) : String :=
+        let cand := s!"{base}_{i}"
+        if used.contains cand then go (i + 1) else cand
+      go 1
+
   collectQuantChain
       (k : Lambda.QuantifierKind)
       (boundAcc : List String)
@@ -108,7 +170,8 @@ where
       match cur with
       | .quant _ k' name ty trig body =>
         if k' == k then
-          let binderName := if name.isEmpty then s!"x{boundNow.length}" else name
+          let rawName := if name.isEmpty then s!"x{boundNow.length}" else name
+          let binderName := freshBinderName rawName boundNow
           let tyStr := ty.map (fun mty => tyToString (.forAll [] mty))
           go (binderName :: boundNow) (acc ++ [(binderName, tyStr)]) trig body
         else
@@ -173,6 +236,15 @@ where
           (h, args ++ [arg])
         | e => (e, [])
       let (head, args) := collectCoreApps e
+      let renderAppliedResult : String → List CoreExpr → String :=
+        fun accPrefix restArgs =>
+          restArgs.foldl
+            (fun acc arg => s!"({acc})({exprToStringWithBound bound arg})")
+            accPrefix
+      let renderSelect (arr idx : String) : String :=
+        s!"({arr}[{idx}])"
+      let renderUpdate (arr idx val : String) : String :=
+        s!"({arr}[{idx} := {val}])"
       match head, args with
       | .op _ id _, [a] =>
         match ppCoreIdent id with
@@ -188,6 +260,7 @@ where
         let rhs := exprToStringWithBound bound b
         match op with
         | "Map.Select" => s!"({lhs}[{rhs}])"
+        | "Sequence.select" => renderSelect lhs rhs
         | "select" => s!"({lhs}[{rhs}])"
         | "Int.Add" => s!"({lhs} + {rhs})"
         | "Int.Sub" => s!"({lhs} - {rhs})"
@@ -212,11 +285,24 @@ where
         let idx := exprToStringWithBound bound b
         let val := exprToStringWithBound bound c
         match op with
-        | "Map.Update" => s!"({lhs}[{idx} := {val}])"
-        | "update" => s!"({lhs}[{idx} := {val}])"
+        | "Map.Update" => renderUpdate lhs idx val
+        | "Sequence.update" => renderUpdate lhs idx val
+        | "update" => renderUpdate lhs idx val
+        | "Map.Select" => renderAppliedResult (renderSelect lhs idx) [c]
+        | "Sequence.select" => renderAppliedResult (renderSelect lhs idx) [c]
+        | "select" => renderAppliedResult (renderSelect lhs idx) [c]
         | _ => callString op [lhs, idx, val]
       | .op _ id _, _ =>
-        callString (ppCoreIdent id) (args.map (exprToStringWithBound bound))
+        let op := ppCoreIdent id
+        match fixedOpArity? op with
+        | some arity =>
+          if args.length <= arity then
+            callString op (args.map (exprToStringWithBound bound))
+          else
+            let appliedPrefix := callString op ((args.take arity).map (exprToStringWithBound bound))
+            renderAppliedResult appliedPrefix (args.drop arity)
+        | none =>
+          callString op (args.map (exprToStringWithBound bound))
       | .fvar _ id _, _ =>
         callString (ppCoreIdent id) (args.map (exprToStringWithBound bound))
       | .bvar _ _, _ =>

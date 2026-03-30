@@ -1084,9 +1084,11 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     let lhs ← fromJsonSpanned arr[1] Exp.fromJson
     let rhs ← fromJsonSpanned arr[2] Exp.fromJson
     match ← Lean.Json.getFirstValM arr[0] ["ExtEq"] with
-    | ("ExtEq", _extEqInfo) =>
-      -- Lower extensional equality into equality for now.
-      return .Binary (.Eq .Spec) lhs rhs
+    | ("ExtEq", extEqInfo) =>
+      let ⟨infoArr, _⟩ ← extEqInfo.getArrWithSizeGeM 2
+      let deep ← infoArr[0].getBoolM
+      let ty ← Typ.fromJson infoArr[1]
+      return .Binary (.ExtEq deep ty) lhs rhs
     | _ =>
       throw s!"unsupported BinaryOpr: {arr[0]}"
 
@@ -1575,26 +1577,49 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       isOpaque := isOpaque
     }
 
-def localDeclsFromJson (j : Json) : VParser (List (String × Typ)) := do
+private def localDeclOriginOfKind? (kind : Json) : Option LocalDeclOrigin :=
+  if (kind.getObjVal? "Param").isOk then
+    none
+  else if (kind.getObjVal? "Return").isOk then
+    none
+  else
+    match kind.getObjVal? "StmtLet" with
+    | .ok stmtLet =>
+      let mutable :=
+        match stmtLet.getBoolUnderKey? "mutable" with
+        | .ok b => b
+        | .error _ => false
+      some (.sourceStmtLet mutable)
+    | .error _ =>
+      if (kind.getObjVal? "Assert").isOk then
+        some .sourceAssert
+      else if (kind.getObjVal? "Decreases").isOk then
+        some .sourceDecreases
+      else
+        match kind with
+        | .obj obj =>
+          match obj.toList with
+          | (tag, _) :: _ => some (.sourceOther tag)
+          | [] => some (.sourceOther "<empty-kind>")
+        | _ => some (.sourceOther "<non-object-kind>")
+
+def localDeclsFromJson (j : Json) : VParser (List LocalDeclInfo) := do
   match j.getArrByPath? ["exec_proof_check", "local_decls"] with -- to be extended
   | .error _ => return []
   | .ok arr =>
-    let mut locals : List (String × Typ) := []
+    let mut locals : Array LocalDeclInfo := #[]
     for decl in arr do
-      let kindObj? := decl.getObjVal? "kind"
-      -- Keep all non-parameter locals so later lowering has complete type info
-      -- (e.g. `AssertByVar` locals used by bitvector assertions).
-      let isParamOrReturn := match kindObj? with
-        | .ok kind =>
-          (match kind.getObjVal? "Param" with | .ok _ => true | .error _ => false) ||
-          (match kind.getObjVal? "Return" with | .ok _ => true | .error _ => false)
-        | .error _ => false
-      if isParamOrReturn then
-        continue
-      let name ← Var.fromJson <| ← decl.getObjValM "ident"
-      let typ ← Typ.fromJson <| ← decl.getObjValM "typ"
-      locals := locals ++ [(name, typ)]
-    return locals
+      let origin? :=
+        match decl.getObjVal? "kind" with
+        | .ok kind => localDeclOriginOfKind? kind
+        | .error _ => some (.sourceOther "<missing-kind>")
+      match origin? with
+      | none => continue
+      | some origin =>
+        let name ← Var.fromJson <| ← decl.getObjValM "ident"
+        let typ ← Typ.fromJson <| ← decl.getObjValM "typ"
+        locals := locals.push { name := name, ty := typ, origin := origin }
+    return locals.toList
 
 
 def ProofFn.fromJson (j : Json) : VParser ProofFn := do
