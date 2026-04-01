@@ -457,30 +457,32 @@ private partial def stmtsRefsForBoole
     | s :: rest => joinRefs [stmtRefsForBooleStmt varTypes s, stmtsRefsForBoole varTypes rest]
 end
 
+private def tyTcons : LMonoTy → List String
+  | .tcons name args => [name] ++ args.flatMap tyTcons
+  | _ => []
+
+/-- Collect type-constructor names referenced in a declaration's type
+    signatures (inputs, outputs, function return types).  Neither the
+    expression-level ref collectors nor `declRefsBy` traverse these. -/
+private def declTypeRefs : Core.Decl → List String
+  | .func f _ =>
+    f.inputs.flatMap (fun (_, ty) => tyTcons ty) ++ tyTcons f.output
+  | .proc p _ =>
+    p.header.inputs.flatMap (fun (_, ty) => tyTcons ty) ++
+    p.header.outputs.flatMap (fun (_, ty) => tyTcons ty)
+  | _ => []
+
 private def declRefsForBoole : Core.Decl → List String
   | .proc p _ =>
     let varTypes := collectVarTypes p.body
     joinRefs [
       collectRefsFromChecks exprAllDeclRefs p.spec.preconditions,
       collectRefsFromChecks exprAllDeclRefs p.spec.postconditions,
-      stmtsRefsForBoole varTypes p.body
+      stmtsRefsForBoole varTypes p.body,
+      declTypeRefs (.proc p .empty)
     ]
-  | d => declRefsBy exprAllDeclRefs callAllDeclRefs d
+  | d => declRefsBy exprAllDeclRefs callAllDeclRefs d ++ declTypeRefs d
 
-private def closeBooleDeclRefs (prunableDecls : List Core.Decl) (seed : List String) : List String :=
-  let prunableRefs := prunableDecls.map (fun d => (declNameString d, declRefsForBoole d))
-  let rec loop (fuel : Nat) (keep : List String) : List String :=
-    match fuel with
-    | 0 => keep
-    | fuel + 1 =>
-      let expanded :=
-        prunableRefs.foldl (init := keep) (fun acc (name, refs) =>
-          if keep.contains name then
-            (acc ++ refs).eraseDups
-          else
-            acc)
-      if expanded == keep then keep else loop fuel expanded
-  loop prunableDecls.length seed.eraseDups
 
 private partial def pruneBooleStmtArtifacts (ss : List Core.Statement) : List Core.Statement :=
   let rec go : List Core.Statement → List Core.Statement
@@ -510,24 +512,41 @@ private def prepareBooleDecl : Core.Decl → Core.Decl
   | .proc p md => .proc { p with body := pruneBooleStmtArtifacts p.body } md
   | d => d
 
-private def pruneUnreferencedBooleDecls
+private def pruneUnreferencedPrunableDecls
+    (collectRefs : Core.Decl → List String)
     (prunableNames : Std.HashSet String)
     (decls : List Core.Decl) : List Core.Decl :=
   let (prunableDecls, keptDecls) := decls.partition (fun d => prunableNames.contains (declNameString d))
-  let seed := joinRefs <| keptDecls.map declRefsForBoole
-  let keep := closeBooleDeclRefs prunableDecls seed
+  let seed := joinRefs <| keptDecls.map collectRefs
+  let prunableRefs := prunableDecls.map (fun d => (declNameString d, collectRefs d))
+  let keep :=
+    let rec loop (fuel : Nat) (keep : List String) : List String :=
+      match fuel with
+      | 0 => keep
+      | fuel + 1 =>
+        let expanded :=
+          prunableRefs.foldl (init := keep) (fun acc (name, refs) =>
+            if keep.contains name then (acc ++ refs).eraseDups else acc)
+        if expanded == keep then keep else loop fuel expanded
+    loop prunableDecls.length seed.eraseDups
   decls.filter (fun d =>
     if prunableNames.contains (declNameString d) then keep.contains (declNameString d) else true)
+
+/-- Collect all declaration references using the standard (non-Boole) ref
+    collector, which reports references from the actual Core AST without
+    simulating for-loop recovery. -/
+private def declRefsStandard (d : Core.Decl) : List String :=
+  declRefsBy exprAllDeclRefs callAllDeclRefs d ++ declTypeRefs d
 
 private def prepareCoreProgramForOutputDialect
     (dialect : OutputDialect)
     (p : Core.Program)
-    (boolePrunableDeclNames : Std.HashSet String) : Core.Program :=
-  match dialect with
-  | .core => p
-  | .boole =>
-    let decls := p.decls.map prepareBooleDecl
-    { p with decls := pruneUnreferencedBooleDecls boolePrunableDeclNames decls }
+    (prunableDeclNames : Std.HashSet String) : Core.Program :=
+  let collectRefs := match dialect with
+    | .boole => declRefsForBoole
+    | .core => declRefsStandard
+  let decls := p.decls.map prepareBooleDecl
+  { p with decls := pruneUnreferencedPrunableDecls collectRefs prunableDeclNames decls }
 
 private def subOneExprForTy (loopTy : LTy) (e : CoreExpr) : CoreExpr :=
   let one :=
@@ -660,8 +679,8 @@ def prepareProgramForOutputDialect
     (dialect : OutputDialect)
     (p : Core.Program)
     (fnDecMap : Std.HashMap String (List CoreExpr) := ∅)
-    (boolePrunableDeclNames : Std.HashSet String := ∅) : Except String PreparedProgram := do
-  let p := prepareCoreProgramForOutputDialect dialect p boolePrunableDeclNames
+    (prunableDeclNames : Std.HashSet String := ∅) : Except String PreparedProgram := do
+  let p := prepareCoreProgramForOutputDialect dialect p prunableDeclNames
   return { decls := ← p.decls.mapM (prepareDeclForOutputDialect dialect fnDecMap) }
 
 end OutputPrep

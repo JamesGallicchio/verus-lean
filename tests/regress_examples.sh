@@ -32,7 +32,7 @@ Usage: tests/regress_examples.sh [options] [target.rs ...]
 Runs regression across 3 stages for each Verus example:
   1) Verus export (--export-lean-all)
   2) Verus-Lean JSON -> Core translation
-  3) StrataVerify on generated Core file
+  3) strata verify on generated Core file
 
 Options:
   --verbose         Stream command output while also saving logs
@@ -40,9 +40,9 @@ Options:
   --suite <name>    Add a suite: vlir-tests | verus-examples | rust-verify-generated
   --rvt-list <file> Curated path list for rust-verify-generated suite
                     (default: tests/rust_verify_generated_cases.txt)
-  --solver <name>   StrataVerify solver (default: cvc5)
+  --solver <name>   strata verify solver (default: cvc5)
   --solver-timeout <sec>
-                    StrataVerify timeout in seconds
+                    strata verify timeout in seconds
   -h, --help        Show this help
 
 Examples:
@@ -472,7 +472,7 @@ run_verify() {
   set +e
   (
     cd "$STRATA_DIR"
-    run_logged "$log_verify" lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$core"
+    run_logged "$log_verify" lake exe strata verify ${STRATA_VERIFY_ARGS[@]-} "$core"
   )
   verify_rc=$?
   set -e

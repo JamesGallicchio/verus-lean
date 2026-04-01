@@ -37,7 +37,7 @@ Solver success is **not** used to classify faithfulness.
     loop-helper artifacts in the reverse examples),
     `verus-examples:exec_termination_example` (residual iterator/ghost state),
     `verus-examples:guide/invariants` (`bv64` where `int` expected)
-  - the raw summary below is still based on Core output plus `StrataVerify`
+  - the raw summary below is still based on Core output plus `strata verify`
 
 ## Raw Core Regression Summary (Full Run)
 Total cases: **118**
@@ -334,7 +334,12 @@ Additional counters (do not affect total):
 - Verus erases widening casts (`nat as int`, `u16 as int`) at SST level.
 - Type-directed coercion insertion now adds `bv*_to_nat_u`/`bv*_to_int_u`
   at function/procedure call sites.
-- **Remaining gaps**: non-call contexts (comparisons, quantifier bodies).
+- Type-directed coercion insertion now also preserves source-typed quantifier
+  binders and inserts `int_to_bv64_u` at plain variable use sites when the
+  current `usize`/`Vec` fallback expects `bv64`.
+- **Remaining gaps**: richer non-call contexts beyond plain variables
+  (for example larger arithmetic expressions, projections, and other composite
+  terms that still need result-side coercion insertion).
 
 ### `[TRANS-lambda-placeholder]` Lambda / function-value placeholder
 - `Unsupported.lambda` is the current fallback for real lambda abstractions and

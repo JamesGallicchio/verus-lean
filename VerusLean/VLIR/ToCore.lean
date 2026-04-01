@@ -41,7 +41,7 @@ structure ProgramLoweringResult where
   program : Core.Program
   fnDecMap : Std.HashMap String (List CoreExpr)
   seqPreludeNeeded : Bool
-  boolePrunableDeclNames : Std.HashSet String := ∅
+  prunableDeclNames : Std.HashSet String := ∅
 
 /-! ## Utilities -/
 
@@ -388,9 +388,6 @@ private def knownSeqHelperSignature? (fname : String) : Option (List Typ × Typ)
   | "Seq_lib_drop_last" => some ([seqPreludeTy t], seqPreludeTy t)
   | "Seq_lib_contains" => some ([seqPreludeTy t, t], .Bool)
   | "Seq_lib_remove" => some ([seqPreludeTy t, .Int], seqPreludeTy t)
-  | "bv64_to_int_u" => some ([.UInt 64], .Int)
-  | "bv64_to_nat_u" => some ([.UInt 64], .Nat)
-  | "int_to_bv64_u" => some ([.Int], .UInt 64)
   | "Seq_new" => some ([.Nat, .SpecFn [.Int] t], seqPreludeTy t)
   | "Seq_lib_filter" => some ([seqPreludeTy t, .SpecFn [t] .Bool], seqPreludeTy t)
   | "Seq_lib_map" => some ([seqPreludeTy a, .SpecFn [.Int, a] b], seqPreludeTy b)
@@ -405,9 +402,6 @@ private def knownSeqHelperSignature? (fname : String) : Option (List Typ × Typ)
 private def knownPreludeFnSignature? (fname : String) : Option (List Typ × Typ) :=
   match fname with
   | "nat_to_int" => some ([.Nat], .Int)
-  | "bv64_to_int_u"
-  | "bv64_to_nat_u"
-  | "int_to_bv64_u"
   | "Seq_len"
   | "Seq_new"
   | "Seq_lib_map"
@@ -428,7 +422,17 @@ private def knownTranslatorStubSignature? (fname : String) : Option (List Typ ×
   match fname with
   | "Set_contains" => some ([setPreludeTy a, a], .Bool)
   | "Map_index" => some ([mapPreludeTy a b, a], b)
-  | _ => none
+  | "nat_to_int" => some ([.Nat], .Int)
+  | _ =>
+    -- Cast function signatures: bvN_to_int_{u|s}, bvN_to_nat_{u|s}, int_to_bvN_{u|s}
+    supportedBvWidths.findSome? (fun w =>
+      if fname == s!"bv{w}_to_int_u" then some ([.UInt w], .Int)
+      else if fname == s!"bv{w}_to_int_s" then some ([.SInt w], .Int)
+      else if fname == s!"bv{w}_to_nat_u" then some ([.UInt w], .Nat)
+      else if fname == s!"bv{w}_to_nat_s" then some ([.SInt w], .Nat)
+      else if fname == s!"int_to_bv{w}_u" then some ([.Int], .UInt w)
+      else if fname == s!"int_to_bv{w}_s" then some ([.Int], .SInt w)
+      else none)
 
 private def isPreludeOwnedTypeName (name : String) : Bool :=
   seqPreludeOwnedTypeNames.contains name
@@ -437,7 +441,7 @@ private def isPreludeOwnedValueName (name : String) : Bool :=
   (knownPreludeFnSignature? name).isSome
 
 private def isSeqPreludeProvidedCastName : String → Bool
-  | "nat_to_int" | "bv64_to_int_u" | "bv64_to_nat_u" | "int_to_bv64_u" => true
+  | "nat_to_int" => true
   | _ => false
 
 private def needsSeqPrelude (typeRefs opRefs : List String) : Bool :=
@@ -446,7 +450,9 @@ private def needsSeqPrelude (typeRefs opRefs : List String) : Bool :=
 
 /-- Look up the return type of a spec function stored in the `VarEnv`. -/
 private def lookupFnRetType (env : VarEnv) (fname : String) : Option Typ :=
-  env.get? (fnRetKey fname) <|> (knownSeqHelperSignature? fname).map Prod.snd
+  env.get? (fnRetKey fname) <|>
+    (knownSeqHelperSignature? fname).map Prod.snd <|>
+    (knownTranslatorStubSignature? fname).map Prod.snd
 
 /-- Key convention for storing the i-th parameter type of a spec function. -/
 private def fnParamKey (fname : String) (idx : Nat) : String :=
@@ -455,7 +461,7 @@ private def fnParamKey (fname : String) (idx : Nat) : String :=
 /-- Look up the i-th parameter type of a spec function. -/
 private def lookupFnParamType (env : VarEnv) (fname : String) (idx : Nat) : Option Typ :=
   env.get? (fnParamKey fname idx) <|> do
-    let (params, _) ← knownSeqHelperSignature? fname
+    let (params, _) ← knownSeqHelperSignature? fname <|> knownTranslatorStubSignature? fname
     params.drop idx |>.head?
 
 private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : List Exp) : List Exp :=
@@ -778,54 +784,74 @@ def isBvToIntCastName (s : String) : Bool :=
 def isBvToNatCastName (s : String) : Bool :=
   s.endsWith "_to_nat_u" || s.endsWith "_to_nat_s"
 
-/-- Wrap a bitvector expression in a coercion cast to the target type when needed.
-    Returns `none` if no coercion is needed (types match or can't determine). -/
-def mkCoercionCast (argInfo? : Option (Nat × Bool)) (targetTy : Typ) (e : CoreExpr) : Option CoreExpr :=
-  match argInfo? with
-  | some (w, signed) =>
-    match targetTy with
-    | .Int =>
-      -- bv → int: use bv*_to_int_*
-      some (LExpr.mkApp () (LExpr.op () (CoreIdent.unres (bvToIntCastName w signed)) none) [e])
-    | .Nat =>
-      -- bv → nat: use bv*_to_nat_*
-      some (LExpr.mkApp () (LExpr.op () (CoreIdent.unres (bvToNatCastName w signed)) none) [e])
-    | _ => none
-  | none => none
+def intToBvCastName (w : Nat) (signed : Bool) : String :=
+  if signed then s!"int_to_bv{w}_s" else s!"int_to_bv{w}_u"
+
+def isIntToBvCastName (s : String) : Bool :=
+  s.startsWith "int_to_bv" && (s.endsWith "_u" || s.endsWith "_s")
+
+/-! ## Numeric Coercion
+
+Verus SST often erases type casts between int, nat, and bitvector types.
+The translator re-inserts explicit casts using three mechanisms:
+
+**1. `.Var` coercion (primary mechanism).**  When `expToCoreWithBound` lowers
+a variable, it compares the variable's declared type against the `expected?`
+type hint.  If they differ in the `NumKind` domain (int/nat/bv), it wraps
+the variable in the appropriate cast (e.g. `bv32_to_int_u`, `int_to_bv64_u`,
+`nat_to_int`).  Callers propagate `expected?` downward so coercion happens
+exactly at the leaf.
+
+**2. `Box` coercion.**  `Box(T, e)` overrides `expected?` for the inner
+expression (to type `T`, for correct literal lowering), then coerces the
+result to the outer `expected?` if they differ.  This handles polymorphic
+call sites where Verus wraps `Box(U32, x)` but the callee expects `int`.
+
+**3. Explicit coercion at int-fallback boundaries.**  Two sites lower
+expressions in their natural type (without `expected?`) then coerce the
+compound result:
+  - Int-fallback comparisons: when `chooseBitArgTyForCmp` finds no common
+    bv type, each side is lowered naturally, then `coerceNumeric` casts the
+    compound result (e.g. `Bv8.Add(a, b)`) to int.
+  - Loop measures: Strata requires int, so the measure expression is lowered
+    naturally and then cast to int.
+
+**Width promotion** within binary ops, `Clip`, and `BitNot` uses `coerceBvBv`,
+which inspects the Core expression's head operator (`exprLooksLikeBitWidth`)
+to avoid redundant bv-to-bv casts when the inner lowering already operated
+at the target width.
+
+All other call sites (struct fields, enum fields, call arguments, assignments,
+return values) rely solely on `.Var` coercion through `expected?` propagation.
+Verus SST wraps cross-type values in `Box`/`Clip` at these boundaries,
+so `.Var` + `Box` coercion covers all cases without separate use-site logic. -/
+
+/-- Numeric type classification for coercion decisions. -/
+inductive NumKind where
+  | int
+  | nat
+  | bv (w : Nat) (signed : Bool)
+  deriving DecidableEq, Repr
+
+def numKindOfTyp? : Typ → Option NumKind
+  | .Int => some .int
+  | .Nat => some .nat
+  | .UInt w => if isSupportedBvWidth w then some (.bv w false) else none
+  | .SInt w => if isSupportedBvWidth w then some (.bv w true) else none
+  | .Decorated _ ty => numKindOfTyp? ty
+  | _ => none
+
+private def natToIntOp : CoreExpr :=
+  LExpr.op () (CoreIdent.unres "nat_to_int") none
 
 def bvToIntCastOp (w : Nat) (signed : Bool) : CoreExpr :=
   LExpr.op () (CoreIdent.unres (bvToIntCastName w signed)) none
 
-def isBvToIntCastExpr : CoreExpr → Bool
-  | .app _ (.op _ id _) _ => isBvToIntCastName (CoreIdent.toPretty id)
-  | _ => false
+private def bvToNatCastOp (w : Nat) (signed : Bool) : CoreExpr :=
+  LExpr.op () (CoreIdent.unres (bvToNatCastName w signed)) none
 
-def isNatToIntCastExpr : CoreExpr → Bool
-  | .app _ (.op _ id _) _ => CoreIdent.toPretty id == "nat_to_int"
-  | _ => false
-
--- Wrap a bitvector expression in a `bv*_to_int_*` cast when it is a known
--- bitvector type but the comparison/context expects an integer.
--- Avoids double-wrapping expressions that are already cast.
-def castExprToIntIfBitInfo (info? : Option (Nat × Bool)) (e : CoreExpr) : CoreExpr :=
-  match info? with
-  | some (w, signed) =>
-    if isBvToIntCastExpr e then
-      e
-    else
-      LExpr.mkApp () (bvToIntCastOp w signed) [e]
-  | none => e
-
-/-- Wrap a nat-typed operand in `nat_to_int` when comparison lowering falls
-    back to the integer domain. -/
-def castExprToIntIfNatTyp (ty? : Option Typ) (e : CoreExpr) : CoreExpr :=
-  match ty? with
-  | some .Nat =>
-    if isNatToIntCastExpr e then
-      e
-    else
-      LExpr.mkApp () (LExpr.op () (CoreIdent.unres "nat_to_int") none) [e]
-  | _ => e
+private def intToBvCastOp (w : Nat) (signed : Bool) : CoreExpr :=
+  LExpr.op () (CoreIdent.unres (intToBvCastName w signed)) none
 
 def bvWidenCastName (fromW toW : Nat) (signed : Bool) : String :=
   if signed then s!"bv{fromW}_to_bv{toW}_s" else s!"bv{fromW}_to_bv{toW}_u"
@@ -843,6 +869,39 @@ private def castExprToWiderBv (fromW toW : Nat) (signed : Bool) (e : CoreExpr) :
   else
     LExpr.mkApp () (bvWidenCastOp fromW toW signed) [e]
 
+/-- Insert a single numeric coercion.  Called exactly once per expression
+    at each type-boundary site (comparison, call argument, loop measure, etc.).
+    Returns the expression unchanged when no coercion is needed. -/
+def coerceNumeric (src? target? : Option NumKind) (e : CoreExpr) :
+    Except String CoreExpr :=
+  match src?, target? with
+  | _, none | none, _ => pure e
+  | some src, some target =>
+    if src == target then pure e
+    else match src, target with
+    -- bv → int
+    | .bv w s, .int => pure <| LExpr.mkApp () (bvToIntCastOp w s) [e]
+    -- bv → nat
+    | .bv w s, .nat => pure <| LExpr.mkApp () (bvToNatCastOp w s) [e]
+    -- nat → int
+    | .nat, .int => pure <| LExpr.mkApp () natToIntOp [e]
+    -- int → bv
+    | .int, .bv w s => pure <| LExpr.mkApp () (intToBvCastOp w s) [e]
+    -- nat → bv (chain: nat → int → bv)
+    | .nat, .bv w s =>
+      let eInt := LExpr.mkApp () natToIntOp [e]
+      pure <| LExpr.mkApp () (intToBvCastOp w s) [eInt]
+    -- bv → bv (width promotion, same signedness)
+    | .bv sw ss, .bv tw ts =>
+      if ss == ts && canPromoteBvWidths sw tw then
+        pure <| castExprToWiderBv sw tw ss e
+      else
+        throw s!"unsupported bitvector cast from ({sw}, signed={ss}) to ({tw}, signed={ts})"
+    -- int → nat: acceptable without cast (int used where nat expected)
+    | .int, .nat => pure e
+    -- identity cases (unreachable after the `src == target` check, but needed for exhaustiveness)
+    | .int, .int | .nat, .nat => pure e
+
 private def widenCastTargetWidth? (name : String) : Option Nat :=
   match name.splitOn "_to_bv" with
   | [_from, rest] =>
@@ -857,7 +916,7 @@ private def appHeadOpName? : CoreExpr → Option String
 
 -- Check whether a Core expression already operates at a given bitvector width,
 -- by inspecting the head operator name (e.g. `Bv32.Add`, `bv16_to_bv32_u`).
--- Used to avoid inserting redundant width-promotion casts.
+-- Used to avoid inserting redundant width-promotion casts on bv→bv widening.
 private def exprLooksLikeBitWidth (w : Nat) : CoreExpr → Bool
   | e =>
     match appHeadOpName? e with
@@ -866,22 +925,17 @@ private def exprLooksLikeBitWidth (w : Nat) : CoreExpr → Bool
       s.startsWith bvPrefix || widenCastTargetWidth? s == some w
     | none => false
 
--- Insert a bv-to-bv widening cast when the source and target are the same
--- signedness but differ in width. Returns the expression unchanged when source
--- already matches the target, or throws when the cast is not representable
--- (e.g. mismatched signedness).
-private def castExprToBitInfoIfNeeded
-    (srcInfo? targetInfo? : Option (Nat × Bool)) (e : CoreExpr) :
+/-- Coerce between bitvector widths when both source and target are known.
+    Avoids redundant casts when the expression already operates at the target
+    width (e.g. the result of a `Bv32.Add` doesn't need `bv32_to_bv32`). -/
+def coerceBvBv (srcInfo? targetInfo? : Option (Nat × Bool)) (e : CoreExpr) :
     Except String CoreExpr := do
   match srcInfo?, targetInfo? with
   | some (sw, ss), some (tw, ts) =>
-    if sw == tw && ss == ts then
-      pure e
+    if sw == tw && ss == ts then pure e
     else if ss == ts && canPromoteBvWidths sw tw then
-      if exprLooksLikeBitWidth tw e then
-        pure e
-      else
-        pure <| castExprToWiderBv sw tw ss e
+      if exprLooksLikeBitWidth tw e then pure e
+      else pure <| castExprToWiderBv sw tw ss e
     else
       throw s!"unsupported bitvector cast from ({sw}, signed={ss}) to ({tw}, signed={ts})"
   | _, _ => pure e
@@ -1187,6 +1241,15 @@ private partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp 
   | .Bind (.Let _ _ _) body => inferComparableTyp? env bound body
   | _ => none
 
+def inferNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=
+  match inferBitInfo env bound e with
+  | some (w, s) => some (.bv w s)
+  | none =>
+    match inferComparableTyp? env bound e with
+    | some .Int => some .int
+    | some .Nat => some .nat
+    | _ => none
+
 -- Inline let-bindings since Core expressions are let-free.
 mutual
 partial def substExp (name : String) (rhs : Exp) : Exp → Exp
@@ -1299,26 +1362,32 @@ private partial def comparisonPreludeToCore
     Except String (Option Typ × CoreExpr × CoreExpr) := do
   let lhsInfo? := inferBitInfo env bound lhs
   let rhsInfo? := inferBitInfo env bound rhs
-  let lhsTy? := inferComparableTyp? env bound lhs
-  let rhsTy? := inferComparableTyp? env bound rhs
   let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
-  let mixedIntMode := argTy?.isNone && (lhsInfo?.isSome || rhsInfo?.isSome)
-  let natIntMode := argTy?.isNone && !mixedIntMode && (lhsTy? == some .Nat || rhsTy? == some .Nat)
-  let sideTy? := if mixedIntMode || natIntMode then some Typ.Int else argTy?
-  let targetInfo? := argTy?.bind bitInfoOfTyp
-  let l0 ← expToCoreWithBound env bound sideTy? lhs
-  let r0 ← expToCoreWithBound env bound sideTy? rhs
-  let l ←
-    if mixedIntMode || natIntMode then
-      pure (castExprToIntIfNatTyp lhsTy? (castExprToIntIfBitInfo lhsInfo? l0))
-    else
-      castExprToBitInfoIfNeeded lhsInfo? targetInfo? l0
-  let r ←
-    if mixedIntMode || natIntMode then
-      pure (castExprToIntIfNatTyp rhsTy? (castExprToIntIfBitInfo rhsInfo? r0))
-    else
-      castExprToBitInfoIfNeeded rhsInfo? targetInfo? r0
-  return (argTy?, l, r)
+  -- When no common bv type exists but at least one side is bv or nat,
+  -- fall back to integer domain.
+  let fallbackToInt := argTy?.isNone &&
+    (lhsInfo?.isSome || rhsInfo?.isSome ||
+     inferNumKind env bound lhs == some .nat ||
+     inferNumKind env bound rhs == some .nat)
+  if fallbackToInt then
+    -- Lower each side in its natural type, then coerce the result to int.
+    -- We do NOT pass `Int` as hint because that would conflict with the
+    -- binary op handler's bv-width resolution for compound expressions.
+    let l0 ← expToCoreWithBound env bound none lhs
+    let r0 ← expToCoreWithBound env bound none rhs
+    let l ← coerceNumeric (inferNumKind env bound lhs) (some .int) l0
+    let r ← coerceNumeric (inferNumKind env bound rhs) (some .int) r0
+    return (argTy?, l, r)
+  else
+    -- Both sides lower at the common bv type. `.Var` coercion handles
+    -- cross-domain casts; `coerceBvBv` handles bv-width promotion for
+    -- compound expressions already lowered at a different width.
+    let l0 ← expToCoreWithBound env bound argTy? lhs
+    let r0 ← expToCoreWithBound env bound argTy? rhs
+    let targetInfo? := argTy?.bind bitInfoOfTyp
+    let l ← coerceBvBv lhsInfo? targetInfo? l0
+    let r ← coerceBvBv rhsInfo? targetInfo? r0
+    return (argTy?, l, r)
 
 -- Translate each trigger Exp into a CoreExpr and encode the groups into a
 -- single LExpr tree suitable for the trigger slot of LExpr.quant.
@@ -1431,21 +1500,14 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     Exp → Except String CoreExpr
   | .Var x =>
     let actualTy? := boundType? bound x <|> env.get? x
-    let asInt := expected?.map isIntTyp |>.getD false
-    match boundIndex? bound x with
-    | some idx =>
-      let e := LExpr.bvar () idx
-      if asInt then
-        return castExprToIntIfBitInfo (actualTy?.bind bitInfoOfTyp) e
-      else
-        return e
-    | none =>
-      let ty? := actualTy?.map monoTyOfTyp
-      let e := LExpr.fvar () (varToCore x) ty?
-      if asInt then
-        return castExprToIntIfBitInfo (actualTy?.bind bitInfoOfTyp) e
-      else
-        return e
+    let e := match boundIndex? bound x with
+      | some idx => LExpr.bvar () idx
+      | none =>
+        let ty? := actualTy?.map monoTyOfTyp
+        LExpr.fvar () (varToCore x) ty?
+    let srcKind? := actualTy?.bind numKindOfTyp?
+    let tgtKind? := expected?.bind numKindOfTyp?
+    coerceNumeric srcKind? tgtKind? e
   | .Const c => return constToCore expected? c
   | .StructCtor dt fields => do
     let ctor := LExpr.op () (structCtorIdentOf dt) none
@@ -1540,8 +1602,8 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
     let l0 ← expToCoreWithBound env bound argTy? lhs
     let r0 ← expToCoreWithBound env bound argTy? rhs
-    let l ← castExprToBitInfoIfNeeded lhsInfo? info? l0
-    let r ← castExprToBitInfoIfNeeded rhsInfo? info? r0
+    let l ← coerceBvBv lhsInfo? info? l0
+    let r ← coerceBvBv rhsInfo? info? r0
     match op with
     | .Bitwise bitop _ =>
       let w? := match bitop with
@@ -1601,7 +1663,11 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
           some (.UInt targetW)
         let x0 ← expToCoreWithBound env bound hint? e
         if isSupportedBvWidth targetW then
-          castExprToBitInfoIfNeeded innerInfo? (some (targetW, false)) x0
+          -- Use coerceBvBv (which checks exprLooksLikeBitWidth) for bv→bv widening.
+          -- The lowered expression may already operate at the target width when
+          -- inner subexpressions were independently promoted, even though
+          -- inferBitInfo reports the source AST's original width.
+          coerceBvBv innerInfo? (some (targetW, false)) x0
         else
           pure x0
       | .Clip (.I w) _ =>
@@ -1615,15 +1681,19 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
           some (.SInt targetW)
         let x0 ← expToCoreWithBound env bound hint? e
         if isSupportedBvWidth targetW then
-          castExprToBitInfoIfNeeded innerInfo? (some (targetW, true)) x0
+          coerceBvBv innerInfo? (some (targetW, true)) x0
         else
           pure x0
       | .Clip .Nat _ =>
         expToCoreWithBound env bound (some .Nat) e
-      -- Box(T, e): translate the inner expression with T as the expected
-      -- type, so e.g. `Box(U64, Const(Int, 10))` produces `bv{64}(10)`
-      -- instead of an untyped int literal.
-      | .Box t => expToCoreWithBound env bound (some t) e
+      -- Box(T, e): translate the inner expression at type T, then coerce
+      -- to the outer expected type if different (e.g. when a polymorphic
+      -- call site wraps `Box(U32, x)` but the callee expects `int`).
+      | .Box t => do
+        let inner ← expToCoreWithBound env bound (some t) e
+        let srcKind? := numKindOfTyp? t
+        let tgtKind? := expected?.bind numKindOfTyp?
+        coerceNumeric srcKind? tgtKind? inner
       | _ => expToCoreWithBound env bound expected? e
     match op with
     | .Clip _ _ => return x
@@ -1636,7 +1706,7 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
       let targetInfo? := expected?.bind bitInfoOfTyp <|> srcInfo? <|> annotFallback
       match targetInfo?.map Prod.fst with
       | some w =>
-        let x' ← castExprToBitInfoIfNeeded srcInfo? targetInfo? x
+        let x' ← coerceBvBv srcInfo? targetInfo? x
         match bvOp w "Not" with
         | some bop => return LExpr.mkApp () bop [x']
         | none => throw s!"unsupported bitvector width {w} for op Not"
@@ -1691,16 +1761,7 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
         let argExpected? := paramTy? <|> (match expected? with
           | some ty => if isIntTyp ty then some Typ.Int else none
           | none => none)
-        let argExpr ← expToCoreWithBound env bound argExpected? arg
-        -- Insert coercion if the argument is a bitvector but the parameter
-        -- expects `nat` or `int` (widening cast that Verus erases).
-        let argInfo? := inferBitInfo env bound arg
-        match paramTy? with
-        | some paramTy =>
-          match mkCoercionCast argInfo? paramTy argExpr with
-          | some coerced => pure coerced
-          | none => pure argExpr
-        | none => pure argExpr)
+        expToCoreWithBound env bound argExpected? arg)
       let f := LExpr.op () (identToCore fname) none
       return LExpr.mkApp () f args'
     if isViewName fname then
@@ -1890,19 +1951,7 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
       let body' := substExp v rhs' body
       expToCoreWithBound env bound expected? body'
     | .Quant q vars trigs => do
-      let bitInfo? := inferBitInfo env bound body
-      let vars' :=
-        match bitInfo? with
-        | some (w, signed) =>
-          vars.map (fun (p : String × Typ) =>
-            let n := p.fst
-            let ty := p.snd
-            match ty with
-            | .Int | .Nat =>
-              if signed then (n, Typ.SInt w) else (n, Typ.UInt w)
-            | _ => (n, ty))
-        | none => vars
-      let boundVars := vars'.reverse ++ bound
+      let boundVars := vars.reverse ++ bound
       let bodyExpr ← expToCoreWithBound env boundVars (some .Bool) body
       -- Translate trigger groups into CoreExpr and encode for the trigger slot.
       let trigExpr ← mkTriggersLExpr env boundVars trigs
@@ -1913,8 +1962,8 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
       -- ones get `noTrigger`.  Strata's grammar expects trigger groups on a
       -- single `forallT`/`existsT`, and `collectQuantChain` in the pretty-
       -- printer will flatten the nested quants back into one multi-binder form.
-      let n := vars'.length
-      let indexed := (List.range n).zip vars'
+      let n := vars.length
+      let indexed := (List.range n).zip vars
       let wrap := fun ((i : Nat), (v, ty)) acc =>
         let trig := if i == n - 1 then trigExpr else LExpr.noTrigger ()
         LExpr.quant () qk (sanitizeVarName v) (some (monoTyOfTyp ty)) trig acc
@@ -2120,14 +2169,7 @@ private def lowerMutCallArgs (env : VarEnv) (projLayouts : List ProjLayout)
   let argsFiltered' := replaceMutArgProjectionArgs argsFiltered rewrites
   let argsCore ← argsFiltered'.zipIdx.mapM (fun (arg, idx) => do
     let paramTy? := lookupFnParamType env callee idx
-    let argExpr ← expToCore env none arg
-    let argInfo? := inferBitInfo env [] arg
-    match paramTy? with
-    | some paramTy =>
-      match mkCoercionCast argInfo? paramTy argExpr with
-      | some coerced => pure coerced
-      | none => pure argExpr
-    | none => pure argExpr)
+    expToCore env paramTy? arg)
   let mutOuts ← mutCallOutputs mutArgMap callee argsFiltered'
   let (pre, post) ← mutArgProjectionBridgeStmts env projLayouts rewrites
   pure { argsFiltered := argsFiltered', argsCore := argsCore, mutOuts := mutOuts, pre := pre, post := post }
@@ -2857,8 +2899,13 @@ mutual
         -- Verus decreases expression with an explicit `int` expectation. When
         -- the expression still lowers through bitvector arithmetic (e.g.
         -- `usize` loop counters), cast the final result to `int`.
-        let ce0 ← expToCore env (some .Int) e
-        let ce := castExprToIntIfBitInfo (inferBitInfo env [] e) ce0
+        -- Lower in natural type (not hinted to int), then coerce the
+        -- result to int.  `.Var` coercion fires if the natural type
+        -- is bv and expToCore propagated an int hint, so we lower
+        -- without hint and coerce uniformly at the top.
+        let ce0 ← expToCore env none e
+        let srcKind? := inferNumKind env [] e
+        let ce ← coerceNumeric srcKind? (some .int) ce0
         pure (some ce)
     let bodyBound := match loopLabel? with | some l => bindUnlabeledLoopControlTo l body' | none => body'
     let bodyStms ← stmToCore env projLayouts mutArgMap retVar? bodyBound
@@ -3616,10 +3663,10 @@ partial def declToCore (noParamFns : List String)
     return []
   | .specFn f => do
     let fn ← specFnToCore noParamFns (!f.isOpaque) f sfMap allDecls
-    return [Core.Decl.func fn]
+    return [Core.Decl.func fn .empty]
   | .proofFn f => do
     let p ← proofFnToCore noParamFns projLayouts mutArgMap sfMap f allDecls
-    return [Core.Decl.proc p]
+    return [Core.Decl.proc p .empty]
   | .execFn f => do
     let isDeclOnly := match f.body with | .Block [] => true | _ => false
     -- `Iterator::next` in exported decls is often trait-generic over
@@ -3635,17 +3682,17 @@ partial def declToCore (noParamFns : List String)
         }
         spec := { modifies := [], preconditions := [], postconditions := [] }
         body := []
-      }]
+      } .empty]
     let p ← execFnToCore noParamFns projLayouts mutArgMap sfMap f allDecls
-    return [Core.Decl.proc p]
+    return [Core.Decl.proc p .empty]
   | .func f => do
     let p ← funcCheckSstToCore noParamFns f
-    return [Core.Decl.proc p]
+    return [Core.Decl.proc p .empty]
   | .struct s =>
-    return [Core.Decl.type (structToCoreTypeDecl s)]
+    return [Core.Decl.type (structToCoreTypeDecl s) .empty]
   | .enum e => do
     let dt ← enumToCoreTypeDecl e
-    return [Core.Decl.type dt]
+    return [Core.Decl.type dt .empty]
   | .mutualBlock ds => do
     -- Translate all declarations in the mutual block.
     let mutualParts ← ds.mapM (fun d =>
@@ -3935,7 +3982,7 @@ def mkBvToIntCastDecl (w : Nat) (signed : Bool) : Core.Decl :=
       inputs := [(CoreIdent.unres "x", .bitvec w)]
       output := .int
       body := none }
-  Core.Decl.func f
+  Core.Decl.func f .empty
 
 def bvToIntCastDecls : List Core.Decl :=
   [1, 8, 16, 32, 64].flatMap (fun w =>
@@ -3948,7 +3995,7 @@ def mkBvToNatCastDecl (w : Nat) (signed : Bool) : Core.Decl :=
       inputs := [(CoreIdent.unres "x", .bitvec w)]
       output := .tcons "nat" []
       body := none }
-  Core.Decl.func f
+  Core.Decl.func f .empty
 
 def bvToNatCastDecls : List Core.Decl :=
   [1, 8, 16, 32, 64].flatMap (fun w =>
@@ -3961,7 +4008,7 @@ def mkBvWidenCastDecl (fromW toW : Nat) (signed : Bool) : Core.Decl :=
       inputs := [(CoreIdent.unres "x", .bitvec fromW)]
       output := .bitvec toW
       body := none }
-  Core.Decl.func f
+  Core.Decl.func f .empty
 
 def bvWidenCastDecls : List Core.Decl :=
   supportedBvWidths.flatMap (fun fromW =>
@@ -3970,6 +4017,19 @@ def bvWidenCastDecls : List Core.Decl :=
         [mkBvWidenCastDecl fromW toW false, mkBvWidenCastDecl fromW toW true]
       else
         []))
+
+def mkIntToBvCastDecl (w : Nat) (signed : Bool) : Core.Decl :=
+  let f : Core.Function :=
+    { name := CoreIdent.unres (intToBvCastName w signed)
+      typeArgs := []
+      inputs := [(CoreIdent.unres "x", .int)]
+      output := .bitvec w
+      body := none }
+  Core.Decl.func f .empty
+
+def intToBvCastDecls : List Core.Decl :=
+  [1, 8, 16, 32, 64].flatMap (fun w =>
+    [mkIntToBvCastDecl w false, mkIntToBvCastDecl w true])
 
 private def exprBvToIntCastRefs (e : CoreExpr) : List String :=
   exprOpRefsBy isBvToIntCastName e
@@ -4007,8 +4067,18 @@ private def neededBvWidenCastDecls (decls : List Core.Decl) : List Core.Decl :=
   let needed := joinRefs <| decls.map declBvWidenCastRefs
   bvWidenCastDecls.filter (fun d => needed.contains (declNameString d))
 
+private def exprIntToBvCastRefs (e : CoreExpr) : List String :=
+  exprOpRefsBy isIntToBvCastName e
+
+private def declIntToBvCastRefs : Core.Decl → List String
+  := declRefsBy exprIntToBvCastRefs noCallNameRefs
+
+private def neededIntToBvCastDecls (decls : List Core.Decl) : List Core.Decl :=
+  let needed := joinRefs <| decls.map declIntToBvCastRefs
+  intToBvCastDecls.filter (fun d => needed.contains (declNameString d))
+
 private def natTypeDecl : Core.Decl :=
-  Core.Decl.type (.con { name := "nat", params := [] })
+  Core.Decl.type (.con { name := "nat", params := [] }) .empty
 
 /-- Abstract type declarations for Verus stdlib collection types that do not
     already have dedicated emitted preludes or Strata/Core builtins. -/
@@ -4016,9 +4086,9 @@ private def stdlibTypeDecls : List Core.Decl :=
   let oneParam := ["Multiset", "Std_specs_range"]
   let twoParam := ["Verus_Map", "Tuple"]
   let mkOneParam (name : String) : Core.Decl :=
-    Core.Decl.type (.con { name := name, params := ["T"] })
+    Core.Decl.type (.con { name := name, params := ["T"] }) .empty
   let mkTwoParam (name : String) : Core.Decl :=
-    Core.Decl.type (.con { name := name, params := ["T0", "T1"] })
+    Core.Decl.type (.con { name := name, params := ["T0", "T1"] }) .empty
   oneParam.map mkOneParam ++ twoParam.map mkTwoParam
 
 private def tupleStubSignature? (name : String) :
@@ -4134,7 +4204,7 @@ private def collectTcons : LMonoTy → List String
   | _ => []
 
 private def seqPreludeFallbackTypeDecls : List Core.Decl :=
-  seqPreludeOwnedTypeNames.map (fun name => Core.Decl.type (.con { name := name, params := ["T"] }))
+  seqPreludeOwnedTypeNames.map (fun name => Core.Decl.type (.con { name := name, params := ["T"] }) .empty)
 
 private def mkPreludeFallbackFuncDecl? (name : String) : Option Core.Decl := do
   let (params, ret) ← knownPreludeFnSignature? name
@@ -4148,7 +4218,7 @@ private def mkPreludeFallbackFuncDecl? (name : String) : Option Core.Decl := do
     inputs := inputs
     output := retTy
     body := none
-  }
+  } .empty
 
 private def neededSeqPreludeFallbackDecls
     (_typeRefs opRefs declaredNames : List String) : List Core.Decl :=
@@ -4227,7 +4297,8 @@ def declsToProgram (decls : List Decl)
     neededStdlibTypes ++
     neededBvToInt ++
     neededBvToNat ++
-    neededBvWidenCastDecls translated
+    neededBvWidenCastDecls translated ++
+    neededIntToBvCastDecls translated
   let flat :=
     dedupCoreDecls <| castDecls ++ translated
   -- Auto-stub pass: emit uninterpreted function stubs for referenced-but-
@@ -4236,7 +4307,9 @@ def declsToProgram (decls : List Decl)
   let allRefsWithArity := collectRefsWithArity flat
   -- Also collect bare identifier references (arity 0) from all ops/fvars.
   let bareRefs := joinRefs <| flat.map (declRefsBy (exprOpRefsBy (fun _ => true)) (fun n => [n]))
-  let allRefsWithArity := allRefsWithArity ++ bareRefs.map (fun n => (n, (0 : Nat)))
+  let allRefsWithArity :=
+    allRefsWithArity ++
+    bareRefs.map (fun n => (n, (0 : Nat)))
   -- Collect names introduced by datatype declarations (constructors, testers,
   -- destructors) so we don't emit duplicate stubs for them.
   let datatypeNames := flat.flatMap (fun d => match d with
@@ -4270,7 +4343,7 @@ def declsToProgram (decls : List Decl)
   -- (b) declared with 0 params but referenced with >0 args (wrong arity).
   let needsStub (n : String) (arity : Nat) : Bool :=
     if isBuiltin n || isBvToIntCastName n || isBvToNatCastName n ||
-       isBvWidenCastName n || isPreludeOwnedTypeName n ||
+       isBvWidenCastName n || isIntToBvCastName n || isPreludeOwnedTypeName n ||
        (isPreludeOwnedValueName n && !isSeqPreludeProvidedCastName n) ||
        datatypeNames.contains n then false
     else match declaredArities.get? n with
@@ -4334,7 +4407,7 @@ def declsToProgram (decls : List Decl)
                      inputs := params, outputs := outputs }
         spec := { modifies := [], preconditions := [], postconditions := [] }
         body := []
-      }]
+      } .empty]
     | none =>
       -- Emit a function stub for expression-level references.
       [Core.Decl.func {
@@ -4343,7 +4416,7 @@ def declsToProgram (decls : List Decl)
         inputs := params
         output := retTy
         body := none
-      }])
+      } .empty])
   -- Collect free type variables from auto-stubs and emit `type X;`
   -- declarations for any that aren't already declared.
   let stubFtvars := autoStubs.flatMap (fun d => match d with
@@ -4376,7 +4449,7 @@ def declsToProgram (decls : List Decl)
     let name := declNameString d
     stubTcons.contains name && !declaredTypeNames.contains name)
   let freeTypeVarDecls := stubFtvars.filter (fun n => !knownTypeNames.contains n)
-    |>.map (fun name => Core.Decl.type (.con { name := name, params := [] }))
+    |>.map (fun name => Core.Decl.type (.con { name := name, params := [] }) .empty)
   -- Remove 0-arity declarations that are being replaced by auto-stubs
   -- with correct arities.
   let autoStubNameSet : Std.HashSet String := autoStubs.foldl (init := ∅)
@@ -4399,7 +4472,7 @@ def declsToProgram (decls : List Decl)
       let name := declNameString d
       if isBooleRangeLoopSupportValueName name then acc.insert name else acc)
   let boolePrunableFromTypeDecls : Std.HashSet String :=
-    neededAutoStubStdlibTypes.foldl (init := ∅) (fun acc d =>
+    typeDecls.foldl (init := ∅) (fun acc d =>
       let name := declNameString d
       if isBooleRangeLoopSupportTypeName name then acc.insert name else acc)
   let boolePrunableDeclSeeds : Std.HashSet String :=
@@ -4449,7 +4522,7 @@ def declsToProgram (decls : List Decl)
         declNameString d != "nat" && !isSeqPreludeProvidedCastName (declNameString d))
     else
       decls1
-  let boolePrunableDeclNames : Std.HashSet String :=
+  let prunableDeclNames : Std.HashSet String :=
     finalDecls.foldl (init := ∅) (fun acc d =>
       let name := declNameString d
       if boolePrunableDeclSeeds.contains name then acc.insert name else acc)
@@ -4457,7 +4530,7 @@ def declsToProgram (decls : List Decl)
     program := { decls := finalDecls }
     fnDecMap := fnDecMap
     seqPreludeNeeded := seqPreludeNeeded
-    boolePrunableDeclNames := boolePrunableDeclNames
+    prunableDeclNames := prunableDeclNames
   }
 
 end ToCore

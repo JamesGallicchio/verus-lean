@@ -34,11 +34,11 @@ Stages:
   --dialect <d>    Alias for output stage selection:
                    `core` = `--boogie`, `boole` = `--boole`
   --lean           Run verus-lean on JSONFilesLean to generate LeanFiles
-  --verify         Run StrataVerify on Core files
+  --verify         Run strata verify on Core files
   --all            Run Verus + Boogie + Verify across all suites
-  --solver <name>  StrataVerify solver (default: cvc5)
+  --solver <name>  strata verify solver (default: cvc5)
   --solver-timeout <sec>
-                   StrataVerify timeout in seconds
+                   strata verify timeout in seconds
   --out <path>     Output file path for single-target runs
                    (applies to one stage: --lean, --boogie, or --boole)
   --verbose        Show full CLI output for external commands
@@ -358,9 +358,9 @@ run_strata_verify() {
   local base
   base="$(basename "$core_file")"
   if [ "$output_mode" = "full" ] || $verbose; then
-    (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$core_file")
+    (cd "$STRATA_DIR" && lake exe strata verify ${STRATA_VERIFY_ARGS[@]-} "$core_file")
   else
-    if (cd "$STRATA_DIR" && lake exe StrataVerify ${STRATA_VERIFY_ARGS[@]-} "$core_file") >/dev/null 2>&1; then
+    if (cd "$STRATA_DIR" && lake exe strata verify ${STRATA_VERIFY_ARGS[@]-} "$core_file") >/dev/null 2>&1; then
       echo "$base: ✅"
       return 0
     else
@@ -951,7 +951,7 @@ fi
 
 if $run_verify; then
   echo ""
-  echo "=== Step 3: StrataVerify ==="
+  echo "=== Step 3: strata verify ==="
   if ! $run_boogie; then
     if [ -n "$target_core_path" ]; then
       echo "Note: verifying an existing Core file only; no regeneration from .rs/.json."

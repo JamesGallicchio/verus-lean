@@ -503,7 +503,7 @@ def declToString
     | .con c => s!"type {c.name}{typeParamsToString c.numargs};"
     | .syn s => s!"type {s.name} := {tyToString (.forAll [] s.type)};"
     | .data ds => String.intercalate "\n" (ds.map datatypeDeclToString)
-  | .axiom a => s!"axiom {CoreIdent.toPretty a.name}: {exprToString a.e};"
+  | .axiom a => s!"axiom [{a.name}]: {exprToString a.e};"
   | .var name ty e =>
     match e with
     | some rhs => s!"var {CoreIdent.toPretty name} : {tyToString ty} := {exprToString rhs};"

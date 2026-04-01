@@ -223,7 +223,7 @@ unsafe def genCoreFromFile
       printFn output
     else
       match ToCore.OutputPrep.prepareProgramForOutputDialect
-          dialect p fnDecMap lowered.boolePrunableDeclNames with
+          dialect p fnDecMap lowered.prunableDeclNames with
       | .ok p =>
         let body := ToCore.Pretty.programToString p dialect
         let output :=

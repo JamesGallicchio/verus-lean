@@ -5,7 +5,7 @@ that allows for the export of verus definitions and verification conditions to L
 
 This repository now supports two main translation paths:
 - `Verus -> Lean`
-- `Verus -> Strata Core` (and `StrataVerify`)
+- `Verus -> Strata Core` (and `strata verify`)
 - `Verus -> Boole` (via Strata Core wrapping)
 
 ## Building
@@ -93,7 +93,7 @@ Stage options:
 - `--boole`: generate Boole `.lean` end-to-end from target
   (`.rs -> JSON -> Core -> Boole`, `.json -> Core -> Boole`, `.core.st -> Boole`)
 - `--lean`: translate Lean JSON to Lean output
-- `--verify`: run `StrataVerify` on generated Core
+- `--verify`: run `strata verify` on generated Core
 - `--all`: run `--verus --boogie --verify`
 
 Other options:
@@ -126,7 +126,7 @@ Other options:
 ./tests/run_tests.sh --lean tests/JSONFilesLean/FindMax.json
 ```
 
-### Verus -> Strata Core / StrataVerify
+### Verus -> Strata Core / strata verify
 
 ```bash
 # Export + Core translation + Strata verification
