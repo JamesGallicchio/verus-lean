@@ -29,7 +29,7 @@ private def programHeader (dialect : ToCore.OutputDialect) : String :=
   | .core => "program Core;"
   | .boole => "program Boole;"
 
-/-- The Seq prelude keeps source comments for maintainability, but generated
+/-- Text preludes keep source comments for maintainability, but generated
     output files should stay concise. Drop standalone `// ...` lines before
     prepending the prelude text. -/
 private def stripLineComments (text : String) : String :=
@@ -38,22 +38,36 @@ private def stripLineComments (text : String) : String :=
       let trimmed := line.trimAscii.toString
       !trimmed.startsWith "//")
 
-/-- Read the textual Seq prelude relative to the `verus-boogie` repo root.
+/-- Read a textual prelude relative to the `verus-boogie` repo root.
     The file itself is written in Core concrete syntax, so strip the Core
-    header before reusing it in either Core or Boole output. If the file is
-    absent, translation still proceeds without textual prelude insertion and
-    falls back to internal typed stubs. -/
-private def readSeqPreludeBody? : IO (Option String) := do
+    header before reusing it in either Core or Boole output. -/
+private def readPreludeBody? (fileName : String) : IO (Option String) := do
   let cwd ← IO.currentDir
-  let path := cwd / "prelude" / "Seq.core.st"
+  let path := cwd / "prelude" / fileName
   if ← path.pathExists then
     let text ← IO.FS.readFile path
     pure <| some <| stripLineComments (stripProgramHeader .core text)
   else
     pure none
 
+private def readSeqPreludeBody? : IO (Option String) :=
+  readPreludeBody? "Seq.core.st"
+
+private def readVecPreludeBody? : IO (Option String) :=
+  readPreludeBody? "Vec.core.st"
+
 private def prependPrelude (dialect : ToCore.OutputDialect) (prelude body : String) : String :=
   s!"{programHeader dialect}\n\n{prelude.trimAsciiEnd.toString}\n\n{stripProgramHeader dialect body}"
+
+private def assemblePreludeText
+    (seqNeeded vecNeeded : Bool)
+    (seqPreludeBody? vecPreludeBody? : Option String) : Option String :=
+  let pieces :=
+    [if seqNeeded then seqPreludeBody? else none, if vecNeeded then vecPreludeBody? else none]
+      |>.filterMap id
+  match pieces with
+  | [] => none
+  | _ => some (String.intercalate "\n\n" pieces)
 
 private def failWith (msg : String) : IO α :=
   throw <| IO.userError s!"Error: {msg}"
@@ -188,6 +202,7 @@ unsafe def genCoreFromFile
   let target := System.FilePath.mk path
   let bundleFiles ← collectJsonBundleFiles target
   let seqPreludeBody? ← readSeqPreludeBody?
+  let vecPreludeBody? ← readVecPreludeBody?
   let mut allDecls : List Decl := []
   let mut allCallSiteTypes : CallSiteTypes := {}
   for f in bundleFiles do
@@ -205,21 +220,24 @@ unsafe def genCoreFromFile
       else
         -- Keep translating other shards so one unsupported module does not block output.
         IO.eprintln s!"warning: skipping shard {f}: {e}"
-  match ToCore.declsToProgram allDecls allCallSiteTypes (useTextSeqPrelude := seqPreludeBody?.isSome) with
+  let availableTextPreludes : ToCore.TextPreludeAvailability :=
+    { seq := seqPreludeBody?.isSome, vec := vecPreludeBody?.isSome }
+  match ToCore.declsToProgram allDecls allCallSiteTypes
+      (availableTextPreludes := availableTextPreludes) with
   | .ok lowered =>
     let p := lowered.program
     let fnDecMap := lowered.fnDecMap
-    let seqPreludeNeeded := lowered.seqPreludeNeeded
+    let bodyText := ToString.toString (Std.Format.pretty (Strata.Core.formatProgram p) 100)
+    let seqPreludeNeeded := lowered.neededPreludes.seq
+    let vecPreludeNeeded := lowered.neededPreludes.vec
+    let preludeText? := assemblePreludeText seqPreludeNeeded vecPreludeNeeded seqPreludeBody? vecPreludeBody?
     if useOfficialPrinter then
       if dialect != .core then
         failWith "--official only supports Core output"
-      -- Use Strata's official DDM-based pretty-printer (Core.formatProgram).
-      -- Note: output does not include the "program Core;" header.
-      let formatted := Std.Format.pretty (Strata.Core.formatProgram p) 100
       let output :=
-        match seqPreludeNeeded, seqPreludeBody? with
-        | true, some prelude => prependPrelude .core prelude (formatted ++ "\n")
-        | _, _ => s!"{programHeader .core}\n\n{formatted}\n"
+        match preludeText? with
+        | some prelude => prependPrelude .core prelude (bodyText ++ "\n")
+        | none => s!"{programHeader .core}\n\n{bodyText}\n"
       printFn output
     else
       match ToCore.OutputPrep.prepareProgramForOutputDialect
@@ -227,9 +245,9 @@ unsafe def genCoreFromFile
       | .ok p =>
         let body := ToCore.Pretty.programToString p dialect
         let output :=
-          match seqPreludeNeeded, seqPreludeBody? with
-          | true, some prelude => prependPrelude dialect prelude body
-          | _, _ => body
+          match preludeText? with
+          | some prelude => prependPrelude dialect prelude body
+          | none => body
         printFn output
       | .error e =>
         failWith e

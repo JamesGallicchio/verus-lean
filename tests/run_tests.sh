@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VERUSFILES_DIR="$ROOT_DIR/tests/VerusFiles"
+ADOPTED_RVT_DIR="$ROOT_DIR/tests/adopted_rust_verify_test"
 JSON_LEAN_DIR="${JSON_LEAN_DIR:-$ROOT_DIR/tests/JSONFilesLean}"
 JSON_BOOGIE_DIR="${JSON_BOOGIE_DIR:-$ROOT_DIR/tests/JSONFilesBoogie}"
 BOOGIE_DIR="${BOOGIE_DIR:-$ROOT_DIR/tests/BoogieFiles}"
@@ -77,13 +78,15 @@ case_key_from_rs_path() {
   local p="$1"
   local p_real
   p_real="$(abs_file_path "$p")"
-  local vlir_root verus_root examples_root
+  local vlir_root adopted_rvt_root verus_root examples_root
   vlir_root="$(cd "$VERUSFILES_DIR" && pwd -P)"
+  adopted_rvt_root="$(cd "$ADOPTED_RVT_DIR" 2>/dev/null && pwd -P || true)"
   verus_root="$(cd "$VERUS_DIR" && pwd -P)"
   examples_root="$(cd "$VERUS_DIR/examples" && pwd -P)"
   local rel
   case "$p_real" in
     "$vlir_root"/*) rel="${p_real#$vlir_root/}" ;;
+    "$adopted_rvt_root"/*) rel="$(basename "$p_real")" ;;
     "$verus_root/tests"/*) rel="${p_real#$verus_root/}" ;;
     "$examples_root"/*) rel="${p_real#$examples_root/}" ;;
     *) rel="$(basename "$p_real")" ;;
@@ -141,16 +144,28 @@ infer_suite_from_rs_path() {
   local p="$1"
   local p_real
   p_real="$(abs_file_path "$p")"
-  local vlir_root verus_tests_root examples_root
+  local vlir_root adopted_rvt_root verus_tests_root examples_root
   vlir_root="$(cd "$VERUSFILES_DIR" && pwd -P)"
+  adopted_rvt_root="$(cd "$ADOPTED_RVT_DIR" 2>/dev/null && pwd -P || true)"
   verus_tests_root="$(cd "$VERUS_DIR/tests" && pwd -P)"
   examples_root="$(cd "$VERUS_DIR/examples" && pwd -P)"
   case "$p_real" in
     "$vlir_root"/*) echo "vlir-tests" ;;
+    "$adopted_rvt_root"/*) echo "vlir-tests" ;;
     "$verus_tests_root"/*) echo "vlir-tests" ;;
     "$examples_root"/*) echo "verus-examples" ;;
     *) echo "verus-examples" ;;
   esac
+}
+
+collect_local_vlir_rs_files() {
+  local file
+  for dir in "$VERUSFILES_DIR" "$ADOPTED_RVT_DIR"; do
+    [ -d "$dir" ] || continue
+    while IFS= read -r file; do
+      printf '%s\n' "$file"
+    done < <(find "$dir" -maxdepth 1 -type f -name '*.rs' | sort)
+  done
 }
 
 collect_all_suite_rs_files() {
@@ -160,11 +175,14 @@ collect_all_suite_rs_files() {
   # Match the suite coverage used by regress_examples.sh.
   while IFS= read -r file; do
     printf '%s\n' "$file"
-  done < <(find "$VERUSFILES_DIR" -maxdepth 1 -type f -name '*.rs' | sort)
+  done < <(collect_local_vlir_rs_files)
 
   while IFS= read -r file; do
     base="$(basename "$file")"
     if [ -f "$VERUSFILES_DIR/$base" ]; then
+      continue
+    fi
+    if [ -f "$ADOPTED_RVT_DIR/$base" ]; then
       continue
     fi
     printf '%s\n' "$file"
@@ -223,7 +241,7 @@ infer_suite_from_json_path() {
         recursion_M) in_base="recursion" ;;
         *) in_base="$b" ;;
       esac
-      if [ -f "$VERUSFILES_DIR/$in_base.rs" ]; then
+      if [ -f "$VERUSFILES_DIR/$in_base.rs" ] || [ -f "$ADOPTED_RVT_DIR/$in_base.rs" ]; then
         echo "vlir-tests"
       else
         echo "verus-examples"
@@ -809,13 +827,15 @@ if $run_verus; then
     elif $run_all_flag; then
       files=("${all_suite_rs_files[@]}")
     else
-      files=("$VERUSFILES_DIR"/*.rs)
+      while IFS= read -r file; do
+        files+=("$file")
+      done < <(collect_local_vlir_rs_files)
     fi
     if [ ! -e "${files[0]}" ]; then
       if $run_all_flag; then
         echo "No Verus test files found in the selected suites."
       else
-        echo "No Verus test files found in $VERUSFILES_DIR"
+        echo "No Verus test files found in $VERUSFILES_DIR or $ADOPTED_RVT_DIR"
       fi
       exit 1
     fi

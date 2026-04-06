@@ -33,8 +33,10 @@ Solver success is **not** used to classify faithfulness.
     `verus-examples:set_from_vec`, `verus-examples:mergesort`,
     `verus-examples:guide/exec_attr` (`Unit` / loop-helper artifacts in the
     current Core-shaped lowering),
-    `verus-examples:vectors` (`[TRANS-vec-representation-gap]`, plus `Unit` /
-    loop-helper artifacts in the reverse examples),
+    `verus-examples:vectors` (`datatype Vec` path is now source-close; the
+    remaining issues are `[TRANS-lambda-placeholder]`,
+    `[TRANS-extensional-eq]`, plus `Unit` / loop-helper artifacts in the
+    reverse examples),
     `verus-examples:exec_termination_example` (residual iterator/ghost state),
     `verus-examples:guide/invariants` (`bv64` where `int` expected)
   - the raw summary below is still based on Core output plus `strata verify`
@@ -171,25 +173,25 @@ Additional counters (do not affect total):
 - `verus-examples:guide/external_trait_specs` (`[TRANS-trait-spec-resolution]`; raw Core also currently hits a bv64/int comparison mismatch in `test_hasher`)
 - `verus-examples:guide/higher_order_fns` (`[TRANS-exec-closure-scaffolding]`; raw Core also currently hits `[SURFACE-sequence-empty]` and `[MODEL-unit]` in the captured-closure example)
 - `verus-examples:guide/invariants` (`non_negative` still lowers its source `for` loop to raw iterator scaffolding with `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`; the source `=~=` assertion is expanded away under `[TRANS-extensional-eq]`; raw Core also still renders `return false` under `[TRANS-return-comment]`)
-- `verus-examples:guide/lib_examples` (`[TRANS-lambda-placeholder]` in returned/captured function values and collection constructors; raw Core also currently hits `[SURFACE-sequence-empty]`, helper leakage such as `Pervasive_set`, and `[TRANS-vec-representation-gap]`)
+- `verus-examples:guide/lib_examples` (`[TRANS-lambda-placeholder]` in returned/captured function values and collection constructors; raw Core also currently hits `[SURFACE-sequence-empty]` and helper leakage such as `Pervasive_set`; the current Vec translation itself is now the datatype-based path)
 - `verus-examples:guide/pervasive_example` (`s.len() == 5` still lowers under `[TRANS-seq-len-literal-typing]` to a nat/bv64 mismatch; raw Core otherwise looks source-close and then runs into current `Sequence` frontend/indexing support)
 - `verus-examples:guide/recursion` (`[TRANS-reveal-with-fuel]` in `test_triangle_reveal` / `test_triangle_assert_by`; raw Core also currently exposes `[TRANS-loop-helper-leakage]`, `[MODEL-unit]`, and `[TRANS-return-comment]` in the loop and early-return examples)
 - `verus-examples:mergesort` (`extend_from_idx` still has `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`; source `=~=` proof steps are flattened under `[TRANS-extensional-eq]`; the final `lemma_sorted_unique(..., |a, b| a <= b)` call still hits `[TRANS-lambda-placeholder]`)
 - `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; raw Core also currently hits `[SURFACE-sequence-empty]`)
 - `verus-examples:modules` (`[TRANS-closed-visibility]`)
 - `verus-examples:recommends` (`[TRANS-reveal-with-fuel]` still strengthens the local proof step for `seq_max_int`; the recursive body also has `[TRANS-seq-len-literal-typing]`, and source `spec_affirm(...)` steps are erased from `some_predicate`)
-- `verus-examples:rfmig_script` (`[MODEL-missing-types]` still blocks `Simple_pptr`; function `g` also still hits `[TRANS-vec-representation-gap]`)
+- `verus-examples:rfmig_script` (`[MODEL-missing-types]` still blocks `Simple_pptr`; the current Vec pieces now use the datatype-based path directly)
 - `verus-examples:rwlock_vstd` (`[TRANS-lambda-placeholder]` in the `Ghost(|v| ...)` lock invariant; raw Core also currently collapses `RwLock`/handle operations to undeclared model types under `[MODEL-missing-types]`)
 - `verus-examples:set_from_vec` (`set` extensionality still expands away under `[TRANS-extensional-eq]`; `contains` still lowers its labeled `for i in iter: ...` loop to raw iterator scaffolding with `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`)
 - `verus-examples:statics` (`[TRANS-atomic-ghost-scaffolding]`: the `Lazy` / `atomic_with_ghost!` encoding still lowers to low-level `Atomic_ghost_*`, `Invariant_*`, `Cell_*`, and `assume` scaffolding rather than source-like lazy-static structure; raw Core also currently hits `[MODEL-missing-types]` (`Cell`, `Atomic_ghost`, `Unit`))
-- `verus-examples:syntax` (`[TRANS-choose]` in `test_choose`; `[TRANS-ghost-tracked-erasure]`; `[TRANS-vec-representation-gap]` in `test_views`; `[TRANS-broadcast-use]`; raw Core also currently hits `[MODEL-unit]`)
+- `verus-examples:syntax` (`[TRANS-choose]` in `test_choose`; `[TRANS-ghost-tracked-erasure]`; `test_views` now uses the datatype-based Vec path directly; `[TRANS-broadcast-use]`; raw Core also currently hits `[MODEL-unit]`)
 - `verus-examples:syntax_attr` (`#[verus_spec(with ...)]`, `proof!`, and tracked/ghost wrapper syntax are still flattened under `[TRANS-ghost-tracked-erasure]`; raw Core also currently hits Strata's polymorphic tuple-helper DDM panic)
 - `verus-examples:trait_for_fn` (`[TRANS-lambda-placeholder]`)
 - `verus-examples:test_expand_errors` (`[TRANS-hide]`, `[TRANS-reveal-with-fuel]`)
 - `verus-examples:thread` (`[TRANS-exec-closure-scaffolding]`; raw Core also currently hits `[MODEL-missing-types]` (`Thread`) and `[MODEL-unit]` through the closure requirement encoding)
 - `verus-examples:debug_expand` (`[TRANS-hide]`, `[TRANS-closed-visibility]`)
 - `verus-examples:recursion` (`[TRANS-reveal-with-fuel]`; Boole output now recovers the `for` loop shape, but the source-level fuel behavior is still not preserved)
-- `verus-examples:vectors` (`[TRANS-vec-representation-gap]`; `pusher` also still hits `[TRANS-lambda-placeholder]` and `[TRANS-extensional-eq]`, while `reverse` / `reverse_no_spinoff` still expose `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`)
+- `verus-examples:vectors` (`datatype Vec` path is now source-close; `pusher` still hits `[TRANS-lambda-placeholder]` and `[TRANS-extensional-eq]`, while `reverse` / `reverse_no_spinoff` still expose `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`)
 - `vlir-tests:tests/mini_c` (`[TRANS-map-helper-typing]`: `Store = Map<Variable, Value>` still lowers `Map_insert` with a `state` receiver type; proof helper procedures also currently hit `[MODEL-unit]`)
 
 ## others (18) [WIP]
@@ -336,10 +338,20 @@ Additional counters (do not affect total):
   at function/procedure call sites.
 - Type-directed coercion insertion now also preserves source-typed quantifier
   binders and inserts `int_to_bv64_u` at plain variable use sites when the
-  current `usize`/`Vec` fallback expects `bv64`.
+  current `usize`/indexing context expects `bv64`.
 - **Remaining gaps**: richer non-call contexts beyond plain variables
   (for example larger arithmetic expressions, projections, and other composite
   terms that still need result-side coercion insertion).
+
+### `[VERIFY-generic-typevar-ddm]` Strata still rejects some generic typed operations
+- The translator now emits faithful generic helper bodies such as
+  `Vec_len<T>` / `Vec_index<T>` in the Vec prelude, rather than monomorphic
+  wrappers.
+- Some Vec-heavy or otherwise generic examples then hit current Strata
+  DDM/SMT encoding limits on type variables, even though the translation shape
+  is now more source-faithful.
+- Affects: `vlir-tests:FindMax`, `vlir-tests:demo_while`,
+  `vlir-tests:demo_while_loop_isolation`, `verus-examples:generics`
 
 ### `[TRANS-lambda-placeholder]` Lambda / function-value placeholder
 - `Unsupported.lambda` is the current fallback for real lambda abstractions and
@@ -419,15 +431,6 @@ Additional counters (do not affect total):
   construct or future Strata surface syntax.
 - Affects: `verus-examples:multiset`, `verus-examples:syntax`
 
-### `[TRANS-vec-representation-gap]` `Vec` still lowers through a temporary mixed representation
-- The long-term target is first-class `Vec` support in Strata/Boole, but the
-  current Core fallback still models `Vec<T>` through helper APIs over a
-  backing `Map bv64 T` plus an explicit length (`Vec_view`,
-  `Vec_Impl__0_new`, `Vec_Impl__1_push`, `Vec_Impl__1_pop`).
-- Some lowered call sites still look source-like and only thread the backing
-  map, while later assertions/spec uses refer to the helper-level length. That
-  mixed representation is a temporary fallback, not the intended final surface
-  design.
 - Affects: `verus-examples:guide/lib_examples`, `verus-examples:rfmig_script`,
   `verus-examples:syntax`, `verus-examples:vectors`
 

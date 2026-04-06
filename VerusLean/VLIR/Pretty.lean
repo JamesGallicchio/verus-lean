@@ -260,8 +260,8 @@ where
         let rhs := exprToStringWithBound bound b
         match op with
         | "Map.Select" => s!"({lhs}[{rhs}])"
-        | "Sequence.select" => renderSelect lhs rhs
         | "select" => s!"({lhs}[{rhs}])"
+        | "Sequence.select" => callString "Sequence.select" [lhs, rhs]
         | "Int.Add" => s!"({lhs} + {rhs})"
         | "Int.Sub" => s!"({lhs} - {rhs})"
         | "Int.Mul" => s!"({lhs} * {rhs})"
@@ -286,11 +286,14 @@ where
         let val := exprToStringWithBound bound c
         match op with
         | "Map.Update" => renderUpdate lhs idx val
-        | "Sequence.update" => renderUpdate lhs idx val
         | "update" => renderUpdate lhs idx val
+        -- Sequence.update is a function call, not bracket syntax.
+        -- Strata parses `s[i := v]` as Map update only.
+        | "Sequence.update" => callString "Sequence.update" [lhs, idx, val]
         | "Map.Select" => renderAppliedResult (renderSelect lhs idx) [c]
-        | "Sequence.select" => renderAppliedResult (renderSelect lhs idx) [c]
         | "select" => renderAppliedResult (renderSelect lhs idx) [c]
+        -- Sequence.select is a function call (2 args; third is type arg, dropped).
+        | "Sequence.select" => callString "Sequence.select" [lhs, idx]
         | _ => callString op [lhs, idx, val]
       | .op _ id _, _ =>
         let op := ppCoreIdent id

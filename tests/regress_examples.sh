@@ -7,6 +7,7 @@ VERUS_SRC="$VERUS_DIR/source"
 VERUS_EXAMPLES_DIR="$VERUS_DIR/examples"
 VERUS_TESTS_DIR="$VERUS_DIR/tests"
 VLIR_TESTS_DIR="$ROOT_DIR/tests/VerusFiles"
+ADOPTED_RVT_DIR="$ROOT_DIR/tests/adopted_rust_verify_test"
 RVT_DEBUG_INPUTS_DIR="$VERUS_SRC/target/debug/test_inputs"
 RVT_RELEASE_INPUTS_DIR="$VERUS_SRC/target/release/test_inputs"
 VERUS_BIN="$VERUS_SRC/target-verus/release/verus"
@@ -91,16 +92,18 @@ add_selected_suite() {
 infer_suite_from_path() {
   local path="$1"
   local abs_dir abs_path
-  local vlir_root examples_root tests_root rvt_debug_root rvt_release_root
+  local vlir_root adopted_rvt_root examples_root tests_root rvt_debug_root rvt_release_root
   abs_dir="$(cd "$(dirname "$path")" && pwd -P)"
   abs_path="$abs_dir/$(basename "$path")"
   vlir_root="$(suite_dir_of vlir-tests)"
+  adopted_rvt_root="$(cd "$ADOPTED_RVT_DIR" 2>/dev/null && pwd -P || true)"
   examples_root="$(suite_dir_of verus-examples)"
   tests_root="$(cd "$VERUS_TESTS_DIR" && pwd -P)"
   rvt_debug_root="$(cd "$RVT_DEBUG_INPUTS_DIR" 2>/dev/null && pwd -P || true)"
   rvt_release_root="$(cd "$RVT_RELEASE_INPUTS_DIR" 2>/dev/null && pwd -P || true)"
   case "$abs_path" in
     "$vlir_root"/*) echo "vlir-tests" ;;
+    "$adopted_rvt_root"/*) echo "vlir-tests" ;;
     "$examples_root"/*) echo "verus-examples" ;;
     "$tests_root"/*) echo "vlir-tests" ;;
     "$rvt_debug_root"/*) echo "rust-verify-generated" ;;
@@ -145,7 +148,7 @@ resolve_example_arg() {
   local suite
   suite="$(infer_suite_from_path "$abs_path")"
   if [ "$suite" = "external" ]; then
-    echo "ERROR: file must be under tests/VerusFiles, verus/examples, verus/tests," \
+    echo "ERROR: file must be under tests/VerusFiles, tests/adopted_rust_verify_test, verus/examples, verus/tests," \
       "or verus/source/target/*/test_inputs for rust-verify-generated suite: $abs_path" >&2
     exit 1
   fi
@@ -281,12 +284,20 @@ add_suite_files() {
     while IFS= read -r file; do
       add_case "$suite" "$file"
     done < <(find "$dir" -maxdepth 1 -type f -name '*.rs' | sort)
+    if [ -d "$ADOPTED_RVT_DIR" ]; then
+      while IFS= read -r file; do
+        add_case "$suite" "$file"
+      done < <(find "$ADOPTED_RVT_DIR" -maxdepth 1 -type f -name '*.rs' | sort)
+    fi
     # Fold in upstream verus/tests coverage that is not mirrored in VLIR tests.
     while IFS= read -r file; do
       local file_abs
       file_abs="$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")"
       base="$(basename "$file")"
       if [ -f "$VLIR_TESTS_DIR/$base" ]; then
+        continue
+      fi
+      if [ -f "$ADOPTED_RVT_DIR/$base" ]; then
         continue
       fi
       add_case "$suite" "$file_abs"

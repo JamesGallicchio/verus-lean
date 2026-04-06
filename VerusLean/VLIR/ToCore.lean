@@ -37,10 +37,16 @@ structure MutArgInfo where
 
 abbrev MutArgMap := Std.HashMap String (List MutArgInfo) -- Core callee name -> mutable argument metadata
 
+structure TextPreludeNeeds where
+  seq : Bool := false
+  vec : Bool := false
+
+abbrev TextPreludeAvailability := TextPreludeNeeds
+
 structure ProgramLoweringResult where
   program : Core.Program
   fnDecMap : Std.HashMap String (List CoreExpr)
-  seqPreludeNeeded : Bool
+  neededPreludes : TextPreludeNeeds := {}
   prunableDeclNames : Std.HashSet String := ∅
 
 /-! ## Utilities -/
@@ -86,10 +92,6 @@ def stripLeadingNamespace (s : String) : String :=
     | _ => none
   (dropFirstSegment "." <|> dropFirstSegment "::" <|> dropLeadingModulePrefix).getD s
 
-def isVecTypeName (name : Ident) : Bool :=
-  let s := name.toString
-  s.endsWith "Vec" || s.endsWith "vec"
-
 def usizeBitWidth : Nat := 64
 
 def isSupportedBvWidth (w : Nat) : Bool :=
@@ -97,14 +99,21 @@ def isSupportedBvWidth (w : Nat) : Bool :=
 
 private def supportedBvWidths : List Nat := [1, 8, 16, 32, 64]
 
-def vecLenName (base : String) : String :=
-  s!"{base}_len"
+/-! ### Vec/Seq Name Recognition
+
+    Predicates for recognizing Verus Vec and Seq operation names in the SST.
+    These are used by expression/statement lowering to dispatch to the
+    appropriate Core translation (Vec prelude accessors, Strata built-ins,
+    or procedure calls).  See `docs/seq-vec-pipeline.md` for the full picture. -/
+
+def isVecTypeName (name : Ident) : Bool :=
+  let s := name.toString
+  s.endsWith "Vec" || s.endsWith "vec"
 
 def isVecLenSpecName (name : Ident) : Bool :=
   let s := name.toString
   s.endsWith "spec_vec_len" || s.endsWith "Seq.len" || s.endsWith "seq.len"
 
--- Matches exec Vec length names like `alloc::vec::Vec::<T>::len`.
 def isVecLenExecName (name : Ident) : Bool :=
   let s := name.toString
   let hasAlloc := (s.find? "Alloc").isSome || (s.find? "alloc").isSome
@@ -275,8 +284,29 @@ private partial def stripCoreAssumeFalse : List Core.Statement → List Core.Sta
     if isCoreAssumeFalse s' then stripCoreAssumeFalse rest
     else s' :: stripCoreAssumeFalse rest
 
+/-- Strip Verus internal `_Impl__N_` / `_impl__N_` segments from sanitized
+    names (e.g. `Vec_Impl__1_push` → `Vec_push`, `Option_Impl__0_unwrap` →
+    `Option_unwrap`).  These segments originate from Rust `impl` block
+    numbering (`impl&%0`, `impl&%1`) which is a compiler artifact, not a
+    user-visible name. -/
+private def stripImplSegment (name : String) : String :=
+  -- Split on `_Impl__` or `_impl__`, drop the digits after it, rejoin.
+  let tryStrip (sep : String) : Option String :=
+    match name.splitOn sep with
+    | [before, after] =>
+      let digits := after.toList.takeWhile Char.isDigit
+      if digits.isEmpty then none
+      else
+        let rest := after.drop digits.length
+        -- Drop the leading `_` separator after digits
+        let rest := if rest.startsWith "_" then rest.drop 1 else rest
+        if rest.isEmpty then some before
+        else some s!"{before}_{rest}"
+    | _ => none
+  (tryStrip "_Impl__" <|> tryStrip "_impl__").getD name
+
 def identToCore (i : Ident) : CoreIdent :=
-  CoreIdent.unres (sanitizeIdent (stripLeadingNamespace i.toString))
+  CoreIdent.unres (stripImplSegment (sanitizeIdent (stripLeadingNamespace i.toString)))
 
 def sanitizeVarName (s : String) : String :=
   -- Preserve `%`-based temp numbering (`tmp%4`, `tmp%%1`, ...) to avoid
@@ -357,102 +387,182 @@ private def seqPreludeTy (elem : Typ) : Typ :=
 private def setPreludeTy (elem : Typ) : Typ :=
   preludeStructTyp "Set" [elem]
 
+private def vecPreludeTy (elem : Typ) : Typ :=
+  preludeStructTyp "Vec" [elem]
+
 private def mapPreludeTy (key val : Typ) : Typ :=
   preludeStructTyp "Map" [key, val]
 
-/-- Type constructors owned by the optional Seq prelude snippet in
-    `prelude/Seq.core.st`. The translator needs this list both to avoid
-    placeholder auto-stubs when the prelude is present and to emit typed
-    fallback declarations when it is absent. -/
-private def seqPreludeOwnedTypeNames : List String :=
+/-! ### Prelude Metadata and Known-Function Registry
+
+    Centralized tables for prelude-owned names, function type signatures,
+    and prelude detection logic.  See `docs/seq-vec-pipeline.md`. -/
+
+/-- Type constructors whose semantics come from the optional Seq prelude
+    snippet in `prelude/Seq.core.st`. These trigger Seq-prelude need
+    detection and also drive the degraded fallback path when the text prelude
+    is unavailable. `nat` and its bridge helpers are intentionally excluded
+    because they are supplied by the translator-managed numeric support layer,
+    not by the Seq prelude itself. -/
+private def seqPreludeTriggerTypeNames : List String :=
   ["Set"]
 
-/-- Type signatures for sequence-related helper names that can appear in VLIR.
-    Some of these lower directly to Strata built-ins (`Sequence.*`), while the
-    rest are provided by the optional textual prelude or fallback stubs. -/
-private def knownSeqHelperSignature? (fname : String) : Option (List Typ × Typ) :=
+/-- Type constructors declared by the optional Vec prelude snippet in
+    `prelude/Vec.core.st`. Unlike Seq, there is currently no degraded fallback
+    path for these declarations. -/
+private def vecPreludeTriggerTypeNames : List String :=
+  ["Vec"]
+
+/-! ### Known Function Signatures
+
+    Centralized registry of function type signatures that the translator
+    needs for type inference (`lookupFnRetType`, `lookupFnParamType`),
+    prelude ownership detection (`isSeqPreludeOwnedValue`), and fallback
+    stub generation (`mkPreludeFallbackFuncDecl?`).
+
+    Each entry carries an `owner` tag:
+    - `.seqPrelude`:  declared by `prelude/Seq.core.st` — used for prelude
+      ownership checks and fallback stub generation when the prelude is absent.
+    - `.vecPrelude`:  declared by `prelude/Vec.core.st`.
+    - `.natSupport`:  translator-managed `nat` bridge helpers.
+    - `.seqInlined`:  Seq operations that the translator inlines to Strata
+      `Sequence.*` built-ins — no declaration is emitted, but the type
+      signature is needed for inference.
+    - `.translator`:  translator-internal (casts, collection helpers). -/
+
+inductive KnownFnOwner where
+  | seqPrelude   -- declared by prelude/Seq.core.st
+  | vecPrelude   -- declared by prelude/Vec.core.st
+  | natSupport   -- translator-managed nat/int bridge helpers
+  | seqInlined   -- inlined to Sequence.* built-ins, no declaration emitted
+  | translator   -- translator-generated (casts, collection ops)
+  deriving DecidableEq, Repr
+
+structure KnownFnEntry where
+  params : List Typ
+  ret    : Typ
+  owner  : KnownFnOwner
+
+private def knownFnRegistry : List (String × KnownFnEntry) :=
   let t := Typ.TypParam "T"
   let a := Typ.TypParam "A"
   let b := Typ.TypParam "B"
-  match fname with
-  | "Seq_len" => some ([seqPreludeTy t], .Nat)
-  | "Seq_index" => some ([seqPreludeTy t, .Int], t)
-  | "Seq_update" => some ([seqPreludeTy t, .Int, t], seqPreludeTy t)
-  | "Seq_push" => some ([seqPreludeTy t, t], seqPreludeTy t)
-  | "Seq_take" => some ([seqPreludeTy t, .Int], seqPreludeTy t)
-  | "Seq_skip" => some ([seqPreludeTy t, .Int], seqPreludeTy t)
-  | "Seq_add" => some ([seqPreludeTy t, seqPreludeTy t], seqPreludeTy t)
-  | "Seq_first" => some ([seqPreludeTy t], t)
-  | "Seq_last" => some ([seqPreludeTy t], t)
-  | "Seq_subrange" => some ([seqPreludeTy t, .Int, .Int], seqPreludeTy t)
-  | "Seq_lib_drop_last" => some ([seqPreludeTy t], seqPreludeTy t)
-  | "Seq_lib_contains" => some ([seqPreludeTy t, t], .Bool)
-  | "Seq_lib_remove" => some ([seqPreludeTy t, .Int], seqPreludeTy t)
-  | "Seq_new" => some ([.Nat, .SpecFn [.Int] t], seqPreludeTy t)
-  | "Seq_lib_filter" => some ([seqPreludeTy t, .SpecFn [t] .Bool], seqPreludeTy t)
-  | "Seq_lib_map" => some ([seqPreludeTy a, .SpecFn [.Int, a] b], seqPreludeTy b)
-  | "Seq_lib_map_values" => some ([seqPreludeTy a, .SpecFn [a] b], seqPreludeTy b)
-  | "Seq_lib_sort_by" => some ([seqPreludeTy t, .SpecFn [t, t] .Bool], seqPreludeTy t)
-  | "Seq_lib_to_set" => some ([seqPreludeTy t], setPreludeTy t)
-  | "Set_finite" => some ([setPreludeTy t], .Bool)
-  | "Vec_view" => some ([.Array t, .UInt 64], seqPreludeTy t)
-  | _ => none
+  let seq := seqPreludeTy
+  let set := setPreludeTy
+  let vec := vecPreludeTy
+  let map := mapPreludeTy
+  -- Seq operations inlined to Strata built-ins (no declaration emitted)
+  [ ("Seq_index",        ⟨[seq t, .Int], t, .seqInlined⟩)
+  , ("Seq_update",       ⟨[seq t, .Int, t], seq t, .seqInlined⟩)
+  , ("Seq_push",         ⟨[seq t, t], seq t, .seqInlined⟩)
+  , ("Seq_take",         ⟨[seq t, .Int], seq t, .seqInlined⟩)
+  , ("Seq_skip",         ⟨[seq t, .Int], seq t, .seqInlined⟩)
+  , ("Seq_add",          ⟨[seq t, seq t], seq t, .seqInlined⟩)
+  , ("Seq_first",        ⟨[seq t], t, .seqInlined⟩)
+  , ("Seq_last",         ⟨[seq t], t, .seqInlined⟩)
+  , ("Seq_subrange",     ⟨[seq t, .Int, .Int], seq t, .seqInlined⟩)
+  , ("Seq_lib_contains", ⟨[seq t, t], .Bool, .seqInlined⟩)
+  , ("Seq_lib_drop_last",⟨[seq t], seq t, .seqInlined⟩)
+  , ("Seq_lib_remove",   ⟨[seq t, .Int], seq t, .seqInlined⟩)
+  -- Seq prelude declarations (emitted by prelude file or fallback stubs)
+  , ("Seq_len",          ⟨[seq t], .Nat, .seqPrelude⟩)
+  , ("Seq_lib_insert",   ⟨[seq t, .Int, t], seq t, .seqPrelude⟩)
+  , ("Seq_new",          ⟨[.Nat, .SpecFn [.Int] t], seq t, .seqPrelude⟩)
+  , ("Seq_lib_map",      ⟨[seq a, .SpecFn [.Int, a] b], seq b, .seqPrelude⟩)
+  , ("Seq_lib_map_values",⟨[seq a, .SpecFn [a] b], seq b, .seqPrelude⟩)
+  , ("Seq_lib_filter",   ⟨[seq t, .SpecFn [t] .Bool], seq t, .seqPrelude⟩)
+  , ("Seq_lib_sort_by",  ⟨[seq t, .SpecFn [t, t] .Bool], seq t, .seqPrelude⟩)
+  , ("Seq_lib_to_set",   ⟨[seq t], set t, .seqPrelude⟩)
+  , ("Set_finite",       ⟨[set t], .Bool, .seqPrelude⟩)
+  , ("nat_to_int",       ⟨[.Nat], .Int, .natSupport⟩)
+  , ("int_to_nat",       ⟨[.Int], .Nat, .natSupport⟩)
+  -- Vec prelude declarations
+  , ("Vec_len",          ⟨[vec t], .UInt usizeBitWidth, .vecPrelude⟩)
+  , ("Vec_index",        ⟨[vec t, .UInt usizeBitWidth], t, .vecPrelude⟩)
+  , ("Vec_view",         ⟨[vec t], seq t, .vecPrelude⟩)
+  -- Translator-internal: collection operations
+  , ("Set_contains",     ⟨[set a, a], .Bool, .translator⟩)
+  , ("Map_index",        ⟨[map a b, a], b, .translator⟩)
+  ]
 
-/-- Public names that the optional textual Seq prelude provides directly. -/
-private def knownPreludeFnSignature? (fname : String) : Option (List Typ × Typ) :=
-  match fname with
-  | "nat_to_int" => some ([.Nat], .Int)
-  | "Seq_len"
-  | "Seq_new"
-  | "Seq_lib_map"
-  | "Seq_lib_map_values"
-  | "Seq_lib_filter"
-  | "Seq_lib_sort_by"
-  | "Vec_view"
-  | "Seq_lib_to_set"
-  | "Set_finite" => knownSeqHelperSignature? fname
-  | _ => none
+/-- Dynamic cast function signatures (parameterized by bit-width). -/
+private def castFnSignature? (fname : String) : Option (List Typ × Typ) :=
+  supportedBvWidths.findSome? (fun w =>
+    if fname == s!"bv{w}_to_int_u" then some ([.UInt w], .Int)
+    else if fname == s!"bv{w}_to_int_s" then some ([.SInt w], .Int)
+    else if fname == s!"bv{w}_to_nat_u" then some ([.UInt w], .Nat)
+    else if fname == s!"bv{w}_to_nat_s" then some ([.SInt w], .Nat)
+    else if fname == s!"int_to_bv{w}_u" then some ([.Int], .UInt w)
+    else if fname == s!"int_to_bv{w}_s" then some ([.Int], .SInt w)
+    else none)
 
-/-- Typed helper signatures used only for translator-synthesized calls.
-    Unlike `knownPreludeFnSignature?`, these are not treated as coming from the
-    optional textual Seq prelude. -/
-private def knownTranslatorStubSignature? (fname : String) : Option (List Typ × Typ) :=
-  let a := Typ.TypParam "A"
-  let b := Typ.TypParam "B"
-  match fname with
-  | "Set_contains" => some ([setPreludeTy a, a], .Bool)
-  | "Map_index" => some ([mapPreludeTy a b, a], b)
-  | "nat_to_int" => some ([.Nat], .Int)
-  | _ =>
-    -- Cast function signatures: bvN_to_int_{u|s}, bvN_to_nat_{u|s}, int_to_bvN_{u|s}
-    supportedBvWidths.findSome? (fun w =>
-      if fname == s!"bv{w}_to_int_u" then some ([.UInt w], .Int)
-      else if fname == s!"bv{w}_to_int_s" then some ([.SInt w], .Int)
-      else if fname == s!"bv{w}_to_nat_u" then some ([.UInt w], .Nat)
-      else if fname == s!"bv{w}_to_nat_s" then some ([.SInt w], .Nat)
-      else if fname == s!"int_to_bv{w}_u" then some ([.Int], .UInt w)
-      else if fname == s!"int_to_bv{w}_s" then some ([.Int], .SInt w)
-      else none)
+private def lookupKnownFn? (fname : String) : Option KnownFnEntry :=
+  knownFnRegistry.find? (fun (n, _) => n == fname) |>.map Prod.snd
+
+/-- Look up type signature (params, ret) for any known function. -/
+private def knownFnSignature? (fname : String) : Option (List Typ × Typ) :=
+  (lookupKnownFn? fname).map (fun e => (e.params, e.ret)) <|>
+  castFnSignature? fname
+
+/-- Is this name declared by the Seq prelude? -/
+private def isSeqPreludeOwnedValue (name : String) : Bool :=
+  match lookupKnownFn? name with
+  | some e => e.owner == .seqPrelude
+  | none => false
+
+private def isVecPreludeOwnedValue (name : String) : Bool :=
+  match lookupKnownFn? name with
+  | some e => e.owner == .vecPrelude
+  | none => false
+
+private def seqPreludeProvidedTypeNames : List String :=
+  seqPreludeTriggerTypeNames
+
+private def vecPreludeProvidedTypeNames : List String :=
+  vecPreludeTriggerTypeNames
+
+private def isSeqPreludeTriggerTypeName (name : String) : Bool :=
+  seqPreludeTriggerTypeNames.contains name
+
+private def isVecPreludeTriggerTypeName (name : String) : Bool :=
+  vecPreludeTriggerTypeNames.contains name
 
 private def isPreludeOwnedTypeName (name : String) : Bool :=
-  seqPreludeOwnedTypeNames.contains name
+  isSeqPreludeTriggerTypeName name || isVecPreludeTriggerTypeName name
+
+private def seqPreludeProvidedValueNames : List String :=
+  knownFnRegistry.foldr (fun (name, entry) acc =>
+    if entry.owner == .seqPrelude then name :: acc else acc) []
+
+private def vecPreludeProvidedValueNames : List String :=
+  knownFnRegistry.foldr (fun (name, entry) acc =>
+    if entry.owner == .vecPrelude then name :: acc else acc) []
 
 private def isPreludeOwnedValueName (name : String) : Bool :=
-  (knownPreludeFnSignature? name).isSome
+  isSeqPreludeOwnedValue name || isVecPreludeOwnedValue name
 
-private def isSeqPreludeProvidedCastName : String → Bool
-  | "nat_to_int" => true
-  | _ => false
+/-- Check whether any emitted declarations reference Seq-prelude-owned names. -/
+private def hasSeqPreludeRefs (typeRefs opRefs : List String) : Bool :=
+  typeRefs.any isSeqPreludeTriggerTypeName ||
+    opRefs.any isSeqPreludeOwnedValue
 
-private def needsSeqPrelude (typeRefs opRefs : List String) : Bool :=
-  typeRefs.any isPreludeOwnedTypeName ||
-    opRefs.any (fun name => isPreludeOwnedValueName name && !isSeqPreludeProvidedCastName name)
+/-- Check whether any emitted declarations reference Vec-prelude-owned names. -/
+private def hasVecPreludeRefs (typeRefs opRefs : List String) : Bool :=
+  typeRefs.any isVecPreludeTriggerTypeName ||
+    opRefs.any isVecPreludeOwnedValue
+
+private def detectTextPreludeNeeds (typeRefs opRefs : List String) : TextPreludeNeeds :=
+  { seq := hasSeqPreludeRefs typeRefs opRefs
+    vec := hasVecPreludeRefs typeRefs opRefs }
+
+private def textPreludeProvidedNames (needs : TextPreludeNeeds) : List String :=
+  (if needs.seq then seqPreludeProvidedTypeNames ++ seqPreludeProvidedValueNames else []) ++
+  (if needs.vec then vecPreludeProvidedTypeNames ++ vecPreludeProvidedValueNames else [])
 
 /-- Look up the return type of a spec function stored in the `VarEnv`. -/
 private def lookupFnRetType (env : VarEnv) (fname : String) : Option Typ :=
   env.get? (fnRetKey fname) <|>
-    (knownSeqHelperSignature? fname).map Prod.snd <|>
-    (knownTranslatorStubSignature? fname).map Prod.snd
+    (knownFnSignature? fname).map Prod.snd
 
 /-- Key convention for storing the i-th parameter type of a spec function. -/
 private def fnParamKey (fname : String) (idx : Nat) : String :=
@@ -461,7 +571,7 @@ private def fnParamKey (fname : String) (idx : Nat) : String :=
 /-- Look up the i-th parameter type of a spec function. -/
 private def lookupFnParamType (env : VarEnv) (fname : String) (idx : Nat) : Option Typ :=
   env.get? (fnParamKey fname idx) <|> do
-    let (params, _) ← knownSeqHelperSignature? fname <|> knownTranslatorStubSignature? fname
+    let (params, _) ← knownFnSignature? fname
     params.drop idx |>.head?
 
 private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : List Exp) : List Exp :=
@@ -478,6 +588,14 @@ private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : Li
       | _ => true)
   else
     argsNoFuel
+
+/-- Unwrap `view(e)` calls: if `e` is `Call(view, [inner])`, return `inner`;
+    otherwise return `e` unchanged.  Used by Vec operation lowering so that
+    `Seq::len(view(v))` becomes `Vec_len(v)` rather than `Vec_len(Vec_view(v))`. -/
+def unwrapViewCall : Exp → Exp
+  | .Call fn _ [inner] =>
+    if isViewName (CallFun.name fn) then inner else .Call fn [] [inner]
+  | e => e
 
 partial def vecVarFromExp : Exp → Option String
   | .Var x => some x
@@ -653,11 +771,8 @@ def monoTyOfTyp : Typ → LMonoTy
   | .Struct name params =>
     if isVecTypeName name then
       match params with
-      | t :: _ => Core.mapTy (.bitvec usizeBitWidth) (monoTyOfTyp t)
-      | [] =>
-        -- Unexpected: Vec without a type parameter. Use a placeholder element type
-        -- so this shows up clearly in the generated Core program.
-        Core.mapTy (.bitvec usizeBitWidth) (.tcons "MissingVecElem" [])
+      | t :: _ => .tcons "Vec" [monoTyOfTyp t]
+      | [] => .tcons "Vec" [.tcons "MissingVecElem" []]
     else if datatypeNameOf name == "Seq" then
       match params with
       | t :: _ => Core.seqTy (monoTyOfTyp t)
@@ -951,13 +1066,8 @@ def vecElemTyp? : Typ → Option Typ
   | .Decorated _ ty => vecElemTyp? ty
   | _ => none
 
--- Core has no dedicated Vec primitive yet. Encode each Vec local as
--- the index -> element map + `*_len : bv64`.
 def expandVecDecls (decls : List (String × Typ)) : List (String × Typ) :=
-  decls.flatMap (fun (n, t) =>
-    match vecElemTyp? t with
-    | some _ => [(n, t), (vecLenName n, Typ.UInt usizeBitWidth)]
-    | none => [(n, t)])
+  decls
 
 /-! ## Expression Translation -/
 
@@ -1215,12 +1325,17 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
     comparisons and projected/called expressions. -/
 private partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Option Typ
   | .Var x => boundType? bound x <|> env.get? x
-  | .Call fn _ _ =>
+  | .Call fn _ args =>
     let name := CallFun.name fn
     if isVecLenSpecName name || isVecLenExecName name then
       some (.UInt usizeBitWidth)
     else if isVecIndexSpecName name || isVecIndexExecName name then
-      none
+      match args with
+      | vArg :: _ =>
+        match vecVarFromExp (unwrapViewCall vArg) with
+        | some base => env.get? base |>.bind vecElemTyp?
+        | none => none
+      | _ => none
     else
       lookupFnRetType env (CoreIdent.toPretty (identToCore name))
   | .Unary (.Box t) _ => some t
@@ -1362,21 +1477,32 @@ private partial def comparisonPreludeToCore
     Except String (Option Typ × CoreExpr × CoreExpr) := do
   let lhsInfo? := inferBitInfo env bound lhs
   let rhsInfo? := inferBitInfo env bound rhs
-  let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
+  let lhsNum? := inferNumKind env bound lhs
+  let rhsNum? := inferNumKind env bound rhs
+  let argTy? :=
+    chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo? <|>
+    match lhsInfo?, rhsInfo?, lhsNum?, rhsNum? with
+    | some (w, s), none, _, some .int
+    | some (w, s), none, _, some .nat =>
+      some (bitTypOfInfo w s)
+    | none, some (w, s), some .int, _
+    | none, some (w, s), some .nat, _ =>
+      some (bitTypOfInfo w s)
+    | _, _, _, _ => none
   -- When no common bv type exists but at least one side is bv or nat,
   -- fall back to integer domain.
   let fallbackToInt := argTy?.isNone &&
     (lhsInfo?.isSome || rhsInfo?.isSome ||
-     inferNumKind env bound lhs == some .nat ||
-     inferNumKind env bound rhs == some .nat)
+     lhsNum? == some .nat ||
+     rhsNum? == some .nat)
   if fallbackToInt then
     -- Lower each side in its natural type, then coerce the result to int.
     -- We do NOT pass `Int` as hint because that would conflict with the
     -- binary op handler's bv-width resolution for compound expressions.
     let l0 ← expToCoreWithBound env bound none lhs
     let r0 ← expToCoreWithBound env bound none rhs
-    let l ← coerceNumeric (inferNumKind env bound lhs) (some .int) l0
-    let r ← coerceNumeric (inferNumKind env bound rhs) (some .int) r0
+    let l ← coerceNumeric lhsNum? (some .int) l0
+    let r ← coerceNumeric rhsNum? (some .int) r0
     return (argTy?, l, r)
   else
     -- Both sides lower at the common bv type. `.Var` coercion handles
@@ -1772,10 +1898,7 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
           match env.get? base |>.bind vecElemTyp? with
           | some _ =>
             let vecExpr ← expToCoreWithBound env bound none arg
-            let lenName := vecLenName base
-            let lenTy? : Option LMonoTy := env.get? lenName |>.map monoTyOfTyp
-            let lenExpr : CoreExpr := LExpr.fvar () (varToCore lenName) lenTy?
-            return LExpr.mkApp () (LExpr.op () (CoreIdent.unres "Vec_view") none) [vecExpr, lenExpr]
+            return LExpr.mkApp () (LExpr.op () (CoreIdent.unres "Vec_view") none) [vecExpr]
           | none =>
             expToCoreWithBound env bound expected? arg
         | none =>
@@ -1796,38 +1919,17 @@ partial def expToCoreWithBound (env : VarEnv) (bound : BoundEnv)
     else if isVecLenSpecName fname || isVecLenExecName fname then
       match argsFiltered with
       | [arg] =>
-        match vecVarFromExp arg with
-        | some base =>
-          let isVec := env.get? base |>.bind vecElemTyp? |>.isSome
-          if isVec then
-            let lenVar := vecLenName base
-            let ty? := env.get? lenVar |>.map monoTyOfTyp
-            return LExpr.fvar () (varToCore lenVar) ty?
-          else
-            mkFallback
-        | none => mkFallback
+        let vecArg := unwrapViewCall arg
+        let vecExpr ← expToCoreWithBound env bound none vecArg
+        return LExpr.mkApp () (LExpr.op () (CoreIdent.unres "Vec_len") none) [vecExpr]
       | _ => mkFallback
     else if isVecIndexSpecName fname || isVecIndexExecName fname then
       match argsFiltered with
       | [vArg, iArg] =>
-        let seqSelect :=
-          mkSeqBuiltinCall "select"
-            [(vArg, lookupFnParamType env fnameStr 0), (iArg, some .Int)]
-        match vecVarFromExp vArg with
-        | some base =>
-          if (env.get? base |>.bind vecElemTyp? |>.isSome) then
-            let vecSource :=
-              match vArg with
-              | .Call fn _ [arg] =>
-                if isViewName (CallFun.name fn) then arg else vArg
-              | _ => vArg
-            let v ← expToCoreWithBound env bound none vecSource
-            let i ← expToCoreWithBound env bound (some (Typ.UInt usizeBitWidth)) iArg
-            return LExpr.mkApp () Core.mapSelectOp [v, i]
-          else
-            seqSelect
-        | none =>
-          seqSelect
+        let vecExpr ← expToCoreWithBound env bound none (unwrapViewCall vArg)
+        let rawIdx ← expToCoreWithBound env bound none iArg
+        let idxExpr ← coerceNumeric (inferNumKind env bound iArg) (some (.bv usizeBitWidth false)) rawIdx
+        return LExpr.mkApp () (LExpr.op () (CoreIdent.unres "Vec_index") none) [vecExpr, idxExpr]
       | _ => mkFallback
     else if fnameStr == "Seq_index" then
       match argsFiltered with
@@ -3552,10 +3654,15 @@ def execFnToCore (noParamFns : List String) (projLayouts : List ProjLayout) (mut
       postconditions := post
     }
     body :=
-      let inner := localDecls ++ mutOutInits ++ body
-      let hasReturn := hasReturnStm f.body
-      let inner := if hasReturn then stripCoreAssumeFalse inner else inner
-      inner
+      -- When the SST has no body (external / assumed spec), emit an empty
+      -- Core body so Strata treats the ensures as trusted axioms.
+      let isDeclOnly := match f.body with | .Block [] => true | _ => false
+      if isDeclOnly then []
+      else
+        let inner := localDecls ++ mutOutInits ++ body
+        let hasReturn := hasReturnStm f.body
+        let inner := if hasReturn then stripCoreAssumeFalse inner else inner
+        inner
   }
   let modifies := inferProcModifies proc
   return { proc with spec := { proc.spec with modifies := modifies } }
@@ -4080,6 +4187,27 @@ private def neededIntToBvCastDecls (decls : List Core.Decl) : List Core.Decl :=
 private def natTypeDecl : Core.Decl :=
   Core.Decl.type (.con { name := "nat", params := [] }) .empty
 
+private def natToIntDecl : Core.Decl :=
+  Core.Decl.func {
+    name := CoreIdent.unres "nat_to_int"
+    typeArgs := []
+    inputs := [(CoreIdent.unres "n", .tcons "nat" [])]
+    output := .int
+    body := none
+  } .empty
+
+private def intToNatDecl : Core.Decl :=
+  Core.Decl.func {
+    name := CoreIdent.unres "int_to_nat"
+    typeArgs := []
+    inputs := [(CoreIdent.unres "i", .int)]
+    output := .tcons "nat" []
+    body := none
+  } .empty
+
+private def natSupportDecls : List Core.Decl :=
+  [natTypeDecl, natToIntDecl, intToNatDecl]
+
 /-- Abstract type declarations for Verus stdlib collection types that do not
     already have dedicated emitted preludes or Strata/Core builtins. -/
 private def stdlibTypeDecls : List Core.Decl :=
@@ -4204,10 +4332,12 @@ private def collectTcons : LMonoTy → List String
   | _ => []
 
 private def seqPreludeFallbackTypeDecls : List Core.Decl :=
-  seqPreludeOwnedTypeNames.map (fun name => Core.Decl.type (.con { name := name, params := ["T"] }) .empty)
+  seqPreludeTriggerTypeNames.map (fun name => Core.Decl.type (.con { name := name, params := ["T"] }) .empty)
 
 private def mkPreludeFallbackFuncDecl? (name : String) : Option Core.Decl := do
-  let (params, ret) ← knownPreludeFnSignature? name
+  let entry ← lookupKnownFn? name
+  guard (entry.owner == .seqPrelude)
+  let (params, ret) := (entry.params, entry.ret)
   let inputTys := params.map monoTyOfTyp
   let retTy := monoTyOfTyp ret
   let typeArgs := ((inputTys.flatMap collectFtvars) ++ collectFtvars retTy).eraseDups
@@ -4232,6 +4362,15 @@ private def neededSeqPreludeFallbackDecls
       mkPreludeFallbackFuncDecl? name)
   dedupCoreDecls (typeDecls ++ fnDecls)
 
+private def needsNatSupportLayer (typeRefs opRefs : List String) : Bool :=
+  typeRefs.contains "nat" ||
+    opRefs.contains "nat_to_int" ||
+    opRefs.contains "int_to_nat" ||
+    hasSeqPreludeRefs typeRefs opRefs
+
+private def neededNatSupportDecls (typeRefs opRefs : List String) : List Core.Decl :=
+  if needsNatSupportLayer typeRefs opRefs then natSupportDecls else []
+
 private def isBooleRangeLoopSupportTypeName : String → Bool
   | "Unit"
   | "Ops_Range_range"
@@ -4244,75 +4383,37 @@ private def isBooleRangeLoopSupportValueName : String → Bool
   | "Pervasive_exec_invariant"
   | "Std_specs_Core_iter_into_iter_spec"
   | "Pervasive_arbitrary"
+  | "Iter_Traits_Collect_into_iter"
   | "Iter_Traits_Iterator_Iterator_next" => true
   | name => name.startsWith "Pervasive_ghost_"
 
-private def isBooleIteratorNextStub : Core.Decl → Bool
+private def isRedundantVecAccessProcStub : Core.Decl → Bool
   | .proc p _ =>
-    p.body.isEmpty && CoreIdent.toPretty p.header.name == "Iter_Traits_Iterator_Iterator_next"
+    p.body.isEmpty &&
+      let name := CoreIdent.toPretty p.header.name
+      name == "Vec_len" || name == "Vec_index"
   | _ => false
 
-/-- Translates VLIR declarations to a Core program, a side map of
-    function-name → decreases Core expressions (for Boole-only comments), a
-    flag indicating whether the emitted output should prepend the text Seq
-    prelude from `prelude/Seq.core.st`, and explicit output-prep metadata such
-    as Boole-prunable helper declarations. -/
-def declsToProgram (decls : List Decl)
-    (callSiteTypes : Std.HashMap Ident (List Typ × Typ) := {})
-    (useTextSeqPrelude : Bool := true) :
-    Except String ProgramLoweringResult := do
-  let noParamFns := collectNoParamFnNamesFromDecls decls
-  let projLayouts := buildProjLayouts decls
-  let mutArgMap := collectMutArgMapFromDecls decls
-  let sfMap := collectSpecFns decls
-  let parts ← decls.mapM (declToCore noParamFns projLayouts mutArgMap sfMap decls)
-  -- Keep declaration-only procedure stubs unless a stronger reachability proof
-  -- is implemented. Some Verus shards reference helpers only through specs,
-  -- and dropping them here can lose required declarations.
-  let translated := pruneUnreferencedSyntheticHelpers parts.flatten
-  let translated := pruneUnusedDeclOnlyLocals translated
-  -- Remove `.func` declarations that are shadowed by `recFuncBlock` definitions.
-  -- This prevents duplicate declarations when mutual blocks define spec functions.
-  let recFuncBlockNames := translated.flatMap (fun d => match d with
-    | .recFuncBlock fs _ => fs.map (fun f => CoreIdent.toPretty f.name)
-    | _ => [])
-  let translated := translated.filter (fun d => match d with
-    | .func f _ => !recFuncBlockNames.contains (CoreIdent.toPretty f.name)
-    | _ => true)
-  -- Only emit stdlib type declarations when referenced in translated signatures.
-  let translatedTypeRefs := translated.flatMap (fun d => match d with
+private def collectDeclTypeRefs (decls : List Core.Decl) : List String :=
+  decls.flatMap (fun d => match d with
     | .func f _ =>
       f.inputs.flatMap (fun (_, ty) => collectTcons ty) ++ collectTcons f.output
     | .proc p _ =>
       p.header.inputs.flatMap (fun (_, ty) => collectTcons ty) ++
       p.header.outputs.flatMap (fun (_, ty) => collectTcons ty)
     | _ => [])
-  let neededStdlibTypes := stdlibTypeDecls.filter (fun d =>
-    let name := declNameString d
-    !isPreludeOwnedTypeName name && translatedTypeRefs.contains name)
-  let neededBvToInt := neededBvToIntCastDecls translated
-  let neededBvToNat := neededBvToNatCastDecls translated
-  let castDecls :=
-    [natTypeDecl] ++
-    neededStdlibTypes ++
-    neededBvToInt ++
-    neededBvToNat ++
-    neededBvWidenCastDecls translated ++
-    neededIntToBvCastDecls translated
-  let flat :=
-    dedupCoreDecls <| castDecls ++ translated
-  -- Auto-stub pass: emit uninterpreted function stubs for referenced-but-
-  -- undeclared identifiers (stdlib/pervasive symbols not in the VLIR).
-  -- We collect (name, maxArgCount) pairs so stubs have the right arity.
-  let allRefsWithArity := collectRefsWithArity flat
-  -- Also collect bare identifier references (arity 0) from all ops/fvars.
-  let bareRefs := joinRefs <| flat.map (declRefsBy (exprOpRefsBy (fun _ => true)) (fun n => [n]))
-  let allRefsWithArity :=
-    allRefsWithArity ++
-    bareRefs.map (fun n => (n, (0 : Nat)))
-  -- Collect names introduced by datatype declarations (constructors, testers,
-  -- destructors) so we don't emit duplicate stubs for them.
-  let datatypeNames := flat.flatMap (fun d => match d with
+
+private def collectDeclOpRefs (decls : List Core.Decl) : List String :=
+  joinRefs <| decls.map (declRefsBy (exprOpRefsBy (fun _ => true)) (fun n => [n]))
+
+private def collectDeclaredTypeNames (decls : List Core.Decl) : List String :=
+  decls.flatMap (fun d => match d with
+    | .type (.con c) _ => [c.name]
+    | .type (.data ds) _ => ds.map (·.name)
+    | _ => [])
+
+private def collectDatatypeGeneratedNames (decls : List Core.Decl) : List String :=
+  decls.flatMap (fun d => match d with
     | .type (.data ds) _ => ds.flatMap (fun dt =>
       dt.constrs.flatMap (fun c =>
         let ctorName := CoreIdent.toPretty c.name
@@ -4320,57 +4421,77 @@ def declsToProgram (decls : List Decl)
         let fieldNames := c.args.map (fun (f, _) => CoreIdent.toPretty f)
         [ctorName, testerName] ++ fieldNames))
     | _ => [])
-  let builtinPrefixes := ["Int.", "Bv1.", "Bv8.", "Bv16.", "Bv32.", "Bv64.",
-    "Bool.", "true", "false", "Map.", "Sequence.", "__decreases", "Unsupported.",
-    "TriggerGroup.", "Triggers."]
-  -- Strata Core built-in identifiers that must not be stubbed.
-  let strataBuiltins := ["select", "store", "update", "ite"]
-  let hasDotDot (n : String) : Bool := (n.splitOn "..").length != 1
-  let isBuiltin (n : String) :=
-    builtinPrefixes.any (fun p => n.startsWith p) || hasDotDot n ||
-    strataBuiltins.contains n
-  -- Collect declared names with their arities for comparison.
-  let declaredArities : Std.HashMap String Nat := flat.foldl (init := ∅) (fun acc d =>
+
+private def collectDeclaredArities (decls : List Core.Decl) : Std.HashMap String Nat :=
+  decls.foldl (init := ∅) (fun acc d =>
     match d with
     | .func f _ => acc.insert (CoreIdent.toPretty f.name) f.inputs.length
     | .proc p _ => acc.insert (CoreIdent.toPretty p.header.name) p.header.inputs.length
     | .recFuncBlock fs _ =>
-      -- Register all functions in the mutual block as declared
       fs.foldl (init := acc) (fun acc f =>
         acc.insert (CoreIdent.toPretty f.name) f.inputs.length)
     | _ => acc)
-  -- A reference needs a stub if: (a) not declared at all, or
-  -- (b) declared with 0 params but referenced with >0 args (wrong arity).
-  let needsStub (n : String) (arity : Nat) : Bool :=
-    if isBuiltin n || isBvToIntCastName n || isBvToNatCastName n ||
-       isBvWidenCastName n || isIntToBvCastName n || isPreludeOwnedTypeName n ||
-       (isPreludeOwnedValueName n && !isSeqPreludeProvidedCastName n) ||
-       datatypeNames.contains n then false
-    else match declaredArities.get? n with
-    | none => true  -- not declared at all
-    | some 0 => arity > 0  -- declared with 0 params but called with args
-    | _ => false  -- already has correct declaration
-  -- Deduplicate by name, keeping the maximum arity for each.
+
+private def buildCallSiteTypesByName
+    (callSiteTypes : Std.HashMap Ident (List Typ × Typ)) :
+    Std.HashMap String (List Typ × Typ) :=
+  callSiteTypes.fold (init := ∅) (fun acc ident sig =>
+    let key := CoreIdent.toPretty (identToCore ident)
+    if acc.contains key then acc else acc.insert key sig)
+
+private def builtinAutoStubPrefixes : List String :=
+  ["Int.", "Bv1.", "Bv8.", "Bv16.", "Bv32.", "Bv64.",
+    "Bool.", "true", "false", "Map.", "Sequence.", "__decreases", "Unsupported.",
+    "TriggerGroup.", "Triggers."]
+
+private def builtinAutoStubNames : List String :=
+  ["select", "store", "update", "ite"]
+
+private def hasQualifiedFieldAccess (name : String) : Bool :=
+  (name.splitOn "..").length != 1
+
+private def isBuiltinAutoStubName (name : String) : Bool :=
+  builtinAutoStubPrefixes.any (fun pfx => name.startsWith pfx) ||
+    hasQualifiedFieldAccess name ||
+    builtinAutoStubNames.contains name
+
+private def needsAutoStub
+    (declaredArities : Std.HashMap String Nat)
+    (datatypeNames : List String)
+    (name : String)
+    (arity : Nat) : Bool :=
+  if isBuiltinAutoStubName name || isBvToIntCastName name || isBvToNatCastName name ||
+     isBvWidenCastName name || isIntToBvCastName name || isPreludeOwnedTypeName name ||
+     isPreludeOwnedValueName name || datatypeNames.contains name then
+    false
+  else
+    match declaredArities.get? name with
+    | none => true
+    | some 0 => arity > 0
+    | _ => false
+
+private def mkAutoStubDecls
+    (flat : List Core.Decl)
+    (callSiteTypes : Std.HashMap Ident (List Typ × Typ)) : List Core.Decl :=
+  let allRefsWithArity := collectRefsWithArity flat
+  let bareRefs := collectDeclOpRefs flat
+  let allRefsWithArity :=
+    allRefsWithArity ++ bareRefs.map (fun n => (n, (0 : Nat)))
+  let datatypeNames := collectDatatypeGeneratedNames flat
+  let declaredArities := collectDeclaredArities flat
   let refsByName := allRefsWithArity.foldl (init := (∅ : Std.HashMap String Nat))
     (fun acc (n, arity) => match acc.get? n with
       | some existing => if arity > existing then acc.insert n arity else acc
       | none => acc.insert n arity)
-  -- Convert Ident-keyed callSiteTypes to Core-sanitized string keys for lookup.
-  let callSiteTypesByName : Std.HashMap String (List Typ × Typ) :=
-    callSiteTypes.fold (init := ∅) (fun acc ident sig =>
-      let key := CoreIdent.toPretty (identToCore ident)
-      if acc.contains key then acc else acc.insert key sig)
-  let undeclaredWithArity := refsByName.toList.filter (fun (n, arity) => needsStub n arity)
-  -- Determine which undeclared symbols are called as procedures (via `call`)
-  -- vs used as expression-level functions.
+  let callSiteTypesByName := buildCallSiteTypesByName callSiteTypes
+  let undeclaredWithArity := refsByName.toList.filter (fun (n, arity) =>
+    needsAutoStub declaredArities datatypeNames n arity)
   let procCallInfo := collectAllCallProcInfo flat
-  let autoStubs := undeclaredWithArity.flatMap (fun (name, arity) =>
-    -- Use type signatures from JSON call sites when available;
-    -- fall back to `int` placeholders otherwise.
+  undeclaredWithArity.flatMap (fun (name, arity) =>
     let (typeArgs, params, retTy) := match tupleStubSignature? name with
       | some sig => sig
       | none =>
-        match knownPreludeFnSignature? name with
+        match knownFnSignature? name with
         | some (argTypes, retType) =>
           let inputTys := argTypes.map monoTyOfTyp
           let retTy := monoTyOfTyp retType
@@ -4379,27 +4500,17 @@ def declsToProgram (decls : List Decl)
             (CoreIdent.unres s!"x{i}", ty))
           (targs, ps, retTy)
         | none =>
-          match knownTranslatorStubSignature? name with
+          match callSiteTypesByName.get? name with
           | some (argTypes, retType) =>
-            let inputTys := argTypes.map monoTyOfTyp
-            let retTy := monoTyOfTyp retType
-            let targs := ((inputTys.flatMap collectFtvars) ++ collectFtvars retTy).eraseDups
-            let ps := inputTys.zipIdx.map (fun (ty, i) =>
-              (CoreIdent.unres s!"x{i}", ty))
-            (targs, ps, retTy)
+            let ps := argTypes.zipIdx.map (fun ((ty : Typ), (i : Nat)) =>
+              (CoreIdent.unres s!"x{i}", monoTyOfTyp ty))
+            ([], ps, monoTyOfTyp retType)
           | none =>
-            match callSiteTypesByName.get? name with
-            | some (argTypes, retType) =>
-              let ps := argTypes.zipIdx.map (fun ((ty : Typ), (i : Nat)) =>
-                (CoreIdent.unres s!"x{i}", monoTyOfTyp ty))
-              ([], ps, monoTyOfTyp retType)
-            | none =>
-              let ps := (List.range arity).map (fun i =>
-                (CoreIdent.unres s!"x{i}", LMonoTy.int))
-              ([], ps, LMonoTy.int)
+            let ps := (List.range arity).map (fun i =>
+              (CoreIdent.unres s!"x{i}", LMonoTy.int))
+            ([], ps, LMonoTy.int)
     match procCallInfo.get? name with
     | some lhsCount =>
-      -- Emit a procedure stub for `call` targets.
       let outputs : @Lambda.LMonoTySignature Visibility :=
         if lhsCount > 0 then [(CoreIdent.unres "_ret", retTy)] else []
       [Core.Decl.proc {
@@ -4409,7 +4520,6 @@ def declsToProgram (decls : List Decl)
         body := []
       } .empty]
     | none =>
-      -- Emit a function stub for expression-level references.
       [Core.Decl.func {
         name := CoreIdent.unres name
         typeArgs := typeArgs
@@ -4417,8 +4527,10 @@ def declsToProgram (decls : List Decl)
         output := retTy
         body := none
       } .empty])
-  -- Collect free type variables from auto-stubs and emit `type X;`
-  -- declarations for any that aren't already declared.
+
+private def augmentDeclsWithAutoStubs
+    (flat : List Core.Decl)
+    (autoStubs : List Core.Decl) : List Core.Decl :=
   let stubFtvars := autoStubs.flatMap (fun d => match d with
     | .func f _ =>
       let inputFtvars := f.inputs.flatMap (fun (_, ty) => collectFtvars ty)
@@ -4439,51 +4551,44 @@ def declsToProgram (decls : List Decl)
       let outputTcons := p.header.outputs.flatMap (fun (_, ty) => collectTcons ty)
       inputTcons ++ outputTcons
     | _ => []) |>.eraseDups
-  -- Collect already-declared type names (from type decls and datatype decls).
-  let declaredTypeNames := flat.flatMap (fun d => match d with
-    | .type (.con c) _ => [c.name]
-    | .type (.data ds) _ => ds.map (·.name)
-    | _ => [])
-  let knownTypeNames := declaredTypeNames ++ stdlibTypeDecls.map declNameString ++ ["nat", "int", "bool", "string", "bitvec"]
+  let declaredTypeNames := collectDeclaredTypeNames flat
+  let knownTypeNames :=
+    declaredTypeNames ++ stdlibTypeDecls.map declNameString ++ ["nat", "int", "bool", "string", "bitvec"]
   let neededAutoStubStdlibTypes := stdlibTypeDecls.filter (fun d =>
     let name := declNameString d
     stubTcons.contains name && !declaredTypeNames.contains name)
   let freeTypeVarDecls := stubFtvars.filter (fun n => !knownTypeNames.contains n)
     |>.map (fun name => Core.Decl.type (.con { name := name, params := [] }) .empty)
-  -- Remove 0-arity declarations that are being replaced by auto-stubs
-  -- with correct arities.
   let autoStubNameSet : Std.HashSet String := autoStubs.foldl (init := ∅)
     (fun acc d => acc.insert (declNameString d))
   let flat := flat.filter (fun d => !autoStubNameSet.contains (declNameString d))
   let (typeDecls, otherDecls) := flat.partition (fun d => match d with | .type _ _ => true | _ => false)
-  -- Add missing type declarations introduced by auto-stubs.
   let typeDecls := typeDecls ++ neededAutoStubStdlibTypes ++ freeTypeVarDecls
-  -- Place auto-stubs BEFORE other declarations so Strata's sequential
-  -- parser can resolve forward references to stdlib/pervasive symbols.
   let otherDecls := autoStubs ++ otherDecls
-  -- Output prep should not have to rediscover loop-recovery helpers by raw
-  -- decl-name heuristics. Record exactly which helper names lowering added for
-  -- current range-loop support so the Boole path can prune only those.
+  typeDecls ++ otherDecls
+
+private def collectBoolePrunableDeclSeeds
+    (translated autoStubs decls0 : List Core.Decl) : Std.HashSet String :=
   let boolePrunableFromTranslated : Std.HashSet String :=
     translated.foldl (init := ∅) (fun acc d =>
-      if isBooleIteratorNextStub d then acc.insert (declNameString d) else acc)
+      let name := declNameString d
+      if isBooleRangeLoopSupportValueName name then acc.insert name else acc)
   let boolePrunableFromAutoStubs : Std.HashSet String :=
     autoStubs.foldl (init := ∅) (fun acc d =>
       let name := declNameString d
       if isBooleRangeLoopSupportValueName name then acc.insert name else acc)
-  let boolePrunableFromTypeDecls : Std.HashSet String :=
-    typeDecls.foldl (init := ∅) (fun acc d =>
+  let boolePrunableFromDecls0 : Std.HashSet String :=
+    decls0.foldl (init := ∅) (fun acc d =>
       let name := declNameString d
       if isBooleRangeLoopSupportTypeName name then acc.insert name else acc)
-  let boolePrunableDeclSeeds : Std.HashSet String :=
-    (boolePrunableFromTranslated.toList ++
-      boolePrunableFromAutoStubs.toList ++
-      boolePrunableFromTypeDecls.toList).foldl (init := ∅) (fun acc name =>
-        acc.insert name)
-  -- Build a side map of function-name → decreases comment string from the
-  -- VLIR SpecFn.decreases field.  This avoids polluting Core's semantic
-  -- `Func.axioms`.  We extract `decrease%init*` RHS expressions from
-  -- each spec function's termination-check body.
+  (boolePrunableFromTranslated.toList ++
+    boolePrunableFromAutoStubs.toList ++
+    boolePrunableFromDecls0.toList).foldl (init := ∅) (fun acc name =>
+      acc.insert name)
+
+private def buildFnDecMap
+    (sfMap : SpecFnMap)
+    (noParamFns : List String) : Except String (Std.HashMap String (List CoreExpr)) := do
   let fnDecEntries ← sfMap.toArray.toList.filterMapM (fun (name, sf) => do
     match sf.decreases with
     | some decStm =>
@@ -4496,41 +4601,119 @@ def declsToProgram (decls : List Decl)
       else
         pure none
     | none => pure none)
-  let fnDecMap := fnDecEntries.foldl (init := (∅ : Std.HashMap String (List CoreExpr)))
+  pure <| fnDecEntries.foldl (init := (∅ : Std.HashMap String (List CoreExpr)))
     (fun acc (k, v) => acc.insert k v)
-  let decls0 := typeDecls ++ otherDecls
-  let finalTypeRefs := decls0.flatMap (fun d => match d with
-    | .func f _ =>
-      f.inputs.flatMap (fun (_, ty) => collectTcons ty) ++ collectTcons f.output
-    | .proc p _ =>
-      p.header.inputs.flatMap (fun (_, ty) => collectTcons ty) ++
-      p.header.outputs.flatMap (fun (_, ty) => collectTcons ty)
-    | _ => [])
-  let finalOpRefs :=
-    joinRefs <| decls0.map (declRefsBy (exprOpRefsBy (fun _ => true)) (fun n => [n]))
-  let seqPreludeNeeded := needsSeqPrelude finalTypeRefs finalOpRefs
+
+private structure PreludeAssemblyResult where
+  decls : List Core.Decl
+  neededPreludes : TextPreludeNeeds
+
+private def finalizePreludeAssembly
+    (decls0 : List Core.Decl)
+    (availableTextPreludes : TextPreludeAvailability) :
+    Except String PreludeAssemblyResult := do
+  let finalTypeRefs := collectDeclTypeRefs decls0
+  let finalOpRefs := collectDeclOpRefs decls0
+  let neededPreludes := detectTextPreludeNeeds finalTypeRefs finalOpRefs
+  if neededPreludes.vec && !availableTextPreludes.vec then
+    throw "Vec prelude required but prelude/Vec.core.st is unavailable"
   let seqPreludeFallbackDecls :=
-    if seqPreludeNeeded && !useTextSeqPrelude then
+    if neededPreludes.seq && !availableTextPreludes.seq then
       neededSeqPreludeFallbackDecls finalTypeRefs finalOpRefs (decls0.map declNameString)
     else
       []
   let decls1 :=
     if seqPreludeFallbackDecls.isEmpty then decls0 else dedupCoreDecls (seqPreludeFallbackDecls ++ decls0)
-  let finalDecls :=
-    if seqPreludeNeeded && useTextSeqPrelude then
-      decls0.filter (fun d =>
-        declNameString d != "nat" && !isSeqPreludeProvidedCastName (declNameString d))
-    else
-      decls1
+  let preludeProvidedNames : List String :=
+    textPreludeProvidedNames {
+      seq := neededPreludes.seq && availableTextPreludes.seq
+      vec := neededPreludes.vec && availableTextPreludes.vec
+    }
+  let decls :=
+    if preludeProvidedNames.isEmpty then decls1
+    else decls1.filter (fun d => !preludeProvidedNames.contains (declNameString d))
+  pure { decls := decls, neededPreludes := neededPreludes }
+
+private structure SupportAssemblyResult where
+  decls : List Core.Decl
+  neededPreludes : TextPreludeNeeds
+  prunableDeclNames : Std.HashSet String
+
+private def collectSupportCastDecls (translated : List Core.Decl) : List Core.Decl :=
+  let translatedTypeRefs := collectDeclTypeRefs translated
+  let translatedOpRefs := collectDeclOpRefs translated
+  let neededStdlibTypes := stdlibTypeDecls.filter (fun d =>
+    let name := declNameString d
+    !isPreludeOwnedTypeName name && translatedTypeRefs.contains name)
+  let neededNatSupport := neededNatSupportDecls translatedTypeRefs translatedOpRefs
+  let neededBvToInt := neededBvToIntCastDecls translated
+  let neededBvToNat := neededBvToNatCastDecls translated
+  neededNatSupport ++
+    neededStdlibTypes ++
+    neededBvToInt ++
+    neededBvToNat ++
+    neededBvWidenCastDecls translated ++
+    neededIntToBvCastDecls translated
+
+private def assembleSupportLayer
+    (translated : List Core.Decl)
+    (callSiteTypes : Std.HashMap Ident (List Typ × Typ))
+    (availableTextPreludes : TextPreludeAvailability) :
+    Except String SupportAssemblyResult := do
+  let castDecls := collectSupportCastDecls translated
+  let flat := dedupCoreDecls <| castDecls ++ translated
+  let autoStubs := mkAutoStubDecls flat callSiteTypes
+  let decls0 := augmentDeclsWithAutoStubs flat autoStubs
+  let boolePrunableDeclSeeds := collectBoolePrunableDeclSeeds translated autoStubs decls0
+  let preludeAssembly ← finalizePreludeAssembly decls0 availableTextPreludes
   let prunableDeclNames : Std.HashSet String :=
-    finalDecls.foldl (init := ∅) (fun acc d =>
+    preludeAssembly.decls.foldl (init := ∅) (fun acc d =>
       let name := declNameString d
       if boolePrunableDeclSeeds.contains name then acc.insert name else acc)
-  return {
-    program := { decls := finalDecls }
-    fnDecMap := fnDecMap
-    seqPreludeNeeded := seqPreludeNeeded
+  pure {
+    decls := preludeAssembly.decls
+    neededPreludes := preludeAssembly.neededPreludes
     prunableDeclNames := prunableDeclNames
+  }
+
+/-- Translates VLIR declarations to a Core program, a side map of
+    function-name → decreases Core expressions (for Boole-only comments), a
+    flag indicating whether the emitted output should prepend the text Seq
+    prelude from `prelude/Seq.core.st`, and explicit output-prep metadata such
+    as Boole-prunable helper declarations. -/
+def declsToProgram (decls : List Decl)
+    (callSiteTypes : Std.HashMap Ident (List Typ × Typ) := {})
+    (availableTextPreludes : TextPreludeAvailability := {}) :
+    Except String ProgramLoweringResult := do
+  let noParamFns := collectNoParamFnNamesFromDecls decls
+  let projLayouts := buildProjLayouts decls
+  let mutArgMap := collectMutArgMapFromDecls decls
+  let sfMap := collectSpecFns decls
+  let parts ← decls.mapM (declToCore noParamFns projLayouts mutArgMap sfMap decls)
+  -- Keep declaration-only procedure stubs unless a stronger reachability proof
+  -- is implemented. Some Verus shards reference helpers only through specs,
+  -- and dropping them here can lose required declarations.
+  let translated := pruneUnreferencedSyntheticHelpers parts.flatten
+  let translated := pruneUnusedDeclOnlyLocals translated
+  -- Remove `.func` declarations that are shadowed by `recFuncBlock` definitions.
+  -- This prevents duplicate declarations when mutual blocks define spec functions.
+  let recFuncBlockNames := translated.flatMap (fun d => match d with
+    | .recFuncBlock fs _ => fs.map (fun f => CoreIdent.toPretty f.name)
+    | _ => [])
+  let translated := translated.filter (fun d => match d with
+    | .func f _ => !recFuncBlockNames.contains (CoreIdent.toPretty f.name)
+    | _ => true)
+  -- Vec length/index calls are translated directly to the pure Vec-prelude
+  -- accessors, so body-less SST helper procedures for `Vec_len` /
+  -- `Vec_index` are redundant and would otherwise add spurious ensures goals.
+  let translated := translated.filter (fun d => !isRedundantVecAccessProcStub d)
+  let support ← assembleSupportLayer translated callSiteTypes availableTextPreludes
+  let fnDecMap ← buildFnDecMap sfMap noParamFns
+  return {
+    program := { decls := support.decls }
+    fnDecMap := fnDecMap
+    neededPreludes := support.neededPreludes
+    prunableDeclNames := support.prunableDeclNames
   }
 
 end ToCore
