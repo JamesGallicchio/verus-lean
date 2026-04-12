@@ -14,6 +14,7 @@ VERUS_BIN="${VERUS_BIN:-$VERUS_SRC/target-verus/release/verus}"
 STRATA_DIR="${STRATA_DIR:-$ROOT_DIR/../Strata}"
 VERUS_LEAN="${VERUS_LEAN:-$ROOT_DIR/.lake/build/bin/verus-lean}"
 BOOLE_DIR="${BOOLE_DIR:-$ROOT_DIR/tests/BooleFiles}"
+BOOLE_PROGRAMS_DIR="${BOOLE_PROGRAMS_DIR:-$ROOT_DIR/tests/BoolePrograms}"
 
 JSON_BOOGIE_EXAMPLES_DIR="$JSON_BOOGIE_DIR/verus-examples"
 JSON_BOOGIE_VLIR_DIR="$JSON_BOOGIE_DIR/vlir-tests"
@@ -349,6 +350,8 @@ write_boole_wrapper() {
     echo "program Boole;"
     sed '1{/^[[:space:]]*program [A-Za-z][A-Za-z]*;.*$/d;}' "$program_file"
     echo "#end"
+    echo
+    echo "#eval Strata.Boole.verify \"cvc5\" ${ident}_program (options := .quiet)"
   } >"$out_file"
 }
 
@@ -775,7 +778,7 @@ if $run_all_flag && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ] && [ 
 fi
 
 mkdir -p "$JSON_LEAN_DIR" "$JSON_BOOGIE_DIR" "$JSON_BOOGIE_EXAMPLES_DIR" "$JSON_BOOGIE_VLIR_DIR" \
-  "$BOOGIE_DIR" "$CORE_EXAMPLES_DIR" "$CORE_VLIR_DIR" "$BOOLE_DIR" "$LEAN_DIR"
+  "$BOOGIE_DIR" "$CORE_EXAMPLES_DIR" "$CORE_VLIR_DIR" "$BOOLE_DIR" "$BOOLE_PROGRAMS_DIR" "$LEAN_DIR"
 
 if $run_verus; then
   echo "=== Step 1: Verus -> JSON ==="
@@ -929,15 +932,25 @@ if $run_boole; then
       fi
     fi
     any=true
+    echo "Boole: $base"
+    # Determine output paths for .boole.st and .lean wrapper
+    boole_st_file=""
+    lean_file=""
     if [ "$custom_out_mode" = "boole" ]; then
-      out_file="$custom_out_path"
+      boole_st_file="$custom_out_path"
+      lean_file=""
     else
       case "$core" in
-        "$CORE_VLIR_DIR"/*) out_file="$BOOLE_DIR/vlir-tests/${base}.lean" ;;
-        *) out_file="$BOOLE_DIR/verus-examples/${base}.lean" ;;
+        "$CORE_VLIR_DIR"/*)
+          boole_st_file="$BOOLE_DIR/vlir-tests/${base}.boole.st"
+          lean_file="$BOOLE_PROGRAMS_DIR/vlir-tests/${base}.lean"
+          ;;
+        *)
+          boole_st_file="$BOOLE_DIR/verus-examples/${base}.boole.st"
+          lean_file="$BOOLE_PROGRAMS_DIR/verus-examples/${base}.lean"
+          ;;
       esac
     fi
-    echo "Boole: $base"
     if [ -n "$target_json_path" ]; then
       json_source="$target_json_path"
     elif [ -n "$target_rs_path" ]; then
@@ -946,21 +959,17 @@ if $run_boole; then
       json_source="$(resolve_json_file_for_core_path "$core" || true)"
     fi
     if [ -n "$json_source" ] && [ -f "$json_source" ]; then
-      tmp_boole="$(mktemp "${TMPDIR:-/tmp}/verus-boole.${base}.XXXXXX.boole.st")"
+      mkdir -p "$(dirname "$boole_st_file")"
       set +e
-      run_cmd_quiet "$VERUS_LEAN" boole "$json_source" "$tmp_boole"
+      run_cmd_quiet "$VERUS_LEAN" boole "$json_source" "$boole_st_file"
       boole_rc=$?
       set -e
-      if [ $boole_rc -eq 0 ]; then
-        program_file="$tmp_boole"
-      else
-        rm -f "$tmp_boole"
-        tmp_boole=""
+      if [ $boole_rc -ne 0 ]; then
+        echo "Boole generation failed for $base"
       fi
     fi
-    write_boole_wrapper "$program_file" "$out_file" "$base"
-    if [ -n "$tmp_boole" ]; then
-      rm -f "$tmp_boole"
+    if [ -n "$lean_file" ] && [ -f "$boole_st_file" ]; then
+      write_boole_wrapper "$boole_st_file" "$lean_file" "$base"
     fi
   done
   if ! $any; then
