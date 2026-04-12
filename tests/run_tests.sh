@@ -733,15 +733,11 @@ if [ ${#positional[@]} -eq 1 ]; then
 fi
 
 # `--boole` is an end-to-end target. Infer prerequisite stages from the input:
-#   .rs      => Verus export + Core translation + Boole wrapping
-#   .json    => Core translation + Boole wrapping
-#   .core.st => Boole wrapping only
+#   .rs      => Verus export + Boole generation (JSON → Boole directly)
+#   .json    => Boole generation directly
 if $run_boole; then
   if [ -n "$target_rs_path" ]; then
     run_verus=true
-    run_boogie=true
-  elif [ -n "$target_json_path" ]; then
-    run_boogie=true
   fi
 fi
 
@@ -883,65 +879,29 @@ fi
 
 if $run_boole; then
   echo ""
-  echo "=== Step 2b: Core -> Boole ==="
-  core_files=()
-  if [ -n "$target_core_path" ]; then
-    case "$target_core_path" in
-      *.core.st|*.boogie.st)
-        case "$target_core_path" in
-          /*) core_files=("$target_core_path") ;;
-          *) core_files=("$ROOT_DIR/$target_core_path") ;;
-        esac
-        ;;
-      *) echo "Target is not a .core.st/.boogie.st file: $target_core_path"; exit 1 ;;
-    esac
-  elif [ -n "$target_rs_path" ] || [ -n "$target_json_path" ]; then
-    if [ -n "$target_rs_path" ]; then
-      file="$(resolve_core_file_for_rs_path "$target_rs_path" || true)"
-    else
-      file="$(resolve_core_file_for_json_path "$target_json_path" || true)"
-    fi
-    if [ -z "$file" ]; then
-      echo "Missing Core input for target path."
-      exit 1
-    fi
-    case "$file" in
-      /*) core_files=("$file") ;;
-      *) core_files=("$ROOT_DIR/$file") ;;
-    esac
-  else
-    for scan_dir in "$CORE_VLIR_DIR" "$CORE_EXAMPLES_DIR"; do
-      [ -d "$scan_dir" ] || continue
-      while IFS= read -r f; do
-        core_files+=("$f")
-      done < <(find "$scan_dir" -maxdepth 1 -type f -name '*.core.st' | sort)
-    done
+  echo "=== Step 2: JSON -> Boole ==="
+
+  # Find JSON source
+  json_source=""
+  if [ -n "$target_json_path" ]; then
+    json_source="$target_json_path"
+  elif [ -n "$target_rs_path" ]; then
+    json_source="$(json_file_for_rs_path boogie "$target_rs_path" || true)"
   fi
 
-  any=false
-  for core in "${core_files[@]}"; do
-    [ -f "$core" ] || continue
-    base="$(basename "$core" .core.st)"
-    program_file="$core"
-    tmp_boole=""
-    json_source=""
-    boole_rc=0
-    if [ -z "$target_core_path" ] && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ]; then
-      if has_primary_module_artifact "$core" ".core.st"; then
-        continue
-      fi
-    fi
-    any=true
+  if [ -n "$json_source" ] && [ -f "$json_source" ]; then
+    # Single-target mode
+    case_key="$(case_key_from_json_path "$json_source")"
+    suite="$(infer_suite_from_json_path "$json_source")"
+    base="$case_key"
     echo "Boole: $base"
-    # Determine output paths for .boole.st and .lean wrapper
     boole_st_file=""
     lean_file=""
     if [ "$custom_out_mode" = "boole" ]; then
       boole_st_file="$custom_out_path"
-      lean_file=""
     else
-      case "$core" in
-        "$CORE_VLIR_DIR"/*)
+      case "$suite" in
+        vlir-tests)
           boole_st_file="$BOOLE_DIR/vlir-tests/${base}.boole.st"
           lean_file="$BOOLE_PROGRAMS_DIR/vlir-tests/${base}.lean"
           ;;
@@ -951,32 +911,59 @@ if $run_boole; then
           ;;
       esac
     fi
-    if [ -n "$target_json_path" ]; then
-      json_source="$target_json_path"
-    elif [ -n "$target_rs_path" ]; then
-      json_source="$(json_file_for_rs_path boogie "$target_rs_path" || true)"
-    else
-      json_source="$(resolve_json_file_for_core_path "$core" || true)"
-    fi
-    if [ -n "$json_source" ] && [ -f "$json_source" ]; then
-      mkdir -p "$(dirname "$boole_st_file")"
-      set +e
-      run_cmd_quiet "$VERUS_LEAN" boole "$json_source" "$boole_st_file"
-      boole_rc=$?
-      set -e
-      if [ $boole_rc -ne 0 ]; then
-        echo "Boole generation failed for $base"
-      fi
+    mkdir -p "$(dirname "$boole_st_file")"
+    set +e
+    run_cmd_quiet "$VERUS_LEAN" boole "$json_source" "$boole_st_file"
+    boole_rc=$?
+    set -e
+    if [ $boole_rc -ne 0 ]; then
+      echo "Boole generation failed for $base"
     fi
     if [ -n "$lean_file" ] && [ -f "$boole_st_file" ]; then
       write_boole_wrapper "$boole_st_file" "$lean_file" "$base"
     fi
-  done
-  if ! $any; then
-    echo "No Core files found to wrap."
+  elif [ -z "$target_rs_path" ] && [ -z "$target_json_path" ]; then
+    # Batch mode: iterate over all JSON directories
+    any=false
+    for scan_dir in "$JSON_BOOGIE_VLIR_DIR" "$JSON_BOOGIE_EXAMPLES_DIR"; do
+      [ -d "$scan_dir" ] || continue
+      while IFS= read -r d; do
+        [ -d "$d" ] || continue
+        local_name="$(basename "$d")"
+        local_json="$d/${local_name}.json"
+        [ -f "$local_json" ] || continue
+        any=true
+        suite="$(infer_suite_from_json_path "$local_json")"
+        echo "Boole: $local_name"
+        case "$suite" in
+          vlir-tests)
+            out="$BOOLE_DIR/vlir-tests/${local_name}.boole.st"
+            lean_out="$BOOLE_PROGRAMS_DIR/vlir-tests/${local_name}.lean"
+            ;;
+          *)
+            out="$BOOLE_DIR/verus-examples/${local_name}.boole.st"
+            lean_out="$BOOLE_PROGRAMS_DIR/verus-examples/${local_name}.lean"
+            ;;
+        esac
+        mkdir -p "$(dirname "$out")"
+        set +e
+        run_cmd_quiet "$VERUS_LEAN" boole "$local_json" "$out"
+        set -e
+        if [ -f "$out" ]; then
+          write_boole_wrapper "$out" "$lean_out" "$local_name"
+        fi
+      done < <(find "$scan_dir" -mindepth 1 -maxdepth 1 -type d | sort)
+    done
+    if \! $any; then
+      echo "No JSON inputs found for Boole generation."
+      exit 1
+    fi
+  else
+    echo "json missing for target"
     exit 1
   fi
 fi
+
 
 if $run_verify; then
   echo ""
