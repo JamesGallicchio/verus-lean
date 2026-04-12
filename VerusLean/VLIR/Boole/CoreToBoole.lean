@@ -52,8 +52,8 @@ private partial def coreMonoTyToBoole : LMonoTy → BuildM BType
     | "int", [] => pure intTy
     | "string", [] => pure strTy
     | "real", [] => pure intTy
-    | "Map", [range, domain] =>
-      pure (mapTy (← coreMonoTyToBoole domain) (← coreMonoTyToBoole range))
+    | "Map", [key, value] =>
+      pure (mapTy (← coreMonoTyToBoole key) (← coreMonoTyToBoole value))
     | "Sequence", [elem] =>
       pure (seqTy (← coreMonoTyToBoole elem))
     | _, _ =>
@@ -209,6 +209,11 @@ private partial def exprToBoole : CoreExpr → BuildM BExpr
       let args' ← args.mapM exprToBoole
       pure (args'.foldl (fun acc arg => Builder.app acc arg) fn)
 
+/-- Sanitize Core assertion labels for Boole. Core uses `""` or `"||"` as
+    placeholder labels; Boole requires valid identifiers. -/
+private def sanitizeLabel (label : String) : String :=
+  if label.isEmpty || label == "||" then "check" else label
+
 /-! ## Core Statement → BooleDDM Statement -/
 
 private partial def stmtToBoole : Statement → BuildM BStmt
@@ -230,11 +235,11 @@ private partial def stmtToBoole : Statement → BuildM BStmt
   | .cmd (.cmd (.set name .nondet _)) =>
     pure (havocStmt (ppId name))
   | .cmd (.cmd (.assert label e _)) => do
-    pure (assertStmt label (← exprToBoole e))
+    pure (assertStmt (sanitizeLabel label) (← exprToBoole e))
   | .cmd (.cmd (.assume label e _)) => do
-    pure (assumeStmt label (← exprToBoole e))
+    pure (assumeStmt (sanitizeLabel label) (← exprToBoole e))
   | .cmd (.cmd (.cover label e _)) => do
-    pure (coverStmt label (← exprToBoole e))
+    pure (coverStmt (sanitizeLabel label) (← exprToBoole e))
   | .cmd (.call lhs pname args _) => do
     let args' ← args.toArray.mapM exprToBoole
     pure (callStmt (lhs.toArray.map ppId) pname args')
@@ -443,6 +448,31 @@ private def distinctToBoole (lbl : CoreIdent) (es : List CoreExpr) : BuildM BCmd
   let es' ← es.toArray.mapM exprToBoole
   pure (.command_distinct default (someLabel (ppId lbl)) (ann es'))
 
+private def recFuncBlockToBoole (fs : List Core.Function)
+    (fnDecMap : Std.HashMap String (List CoreExpr)) : BuildM BCmd := do
+  let recDecls ← fs.toArray.mapM fun f => do
+    let name := ann (ppId f.name)
+    let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
+    let (inputBindings, inputNames) ← mkMonoInputs f.inputs
+    let outputTy ← coreMonoTyToBoole f.output
+    let (body, specElts) ← withScope do
+      addBoundVars inputNames (reverse? := false)
+      let body ← match f.body with
+        | some b => exprToBoole b
+        | none => pure (boolConst true)  -- bodyless rec function: emit `true` placeholder
+      let mut elts : Array (BooleDDM.SpecElt SourceRange) := #[]
+      match fnDecMap.get? (ppId f.name) with
+      | some (d :: _) =>
+        let _d' ← exprToBoole d
+        pure ()  -- TODO: decreases
+      | _ => pure ()
+      for c in f.preconditions do
+        let e ← exprToBoole c.expr
+        elts := elts.push (.requires_spec default noLabel (ann none) e)
+      pure (body, elts)
+    pure (BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy (ann specElts) body)
+  pure (.command_recfndefs default (ann recDecls))
+
 def declToBoole (fnDecMap : Std.HashMap String (List CoreExpr))
     (d : Core.Decl) : BuildM BCmd := do
   match d with
@@ -450,15 +480,28 @@ def declToBoole (fnDecMap : Std.HashMap String (List CoreExpr))
   | .func f _ => funcToBoole f (fnDecMap.get? (ppId f.name))
   | .recFuncBlock fs _ => do
     for f in fs do addFreeVars #[ppId f.name]
-    let cmds ← fs.mapM fun f => funcToBoole f (fnDecMap.get? (ppId f.name))
-    match cmds with
-    | [] => throw "empty recursive function block"
-    | [c] => pure c
-    | _ => pure cmds.head!
+    recFuncBlockToBoole fs fnDecMap
   | .type t _ => typeConsToBoole t
   | .ax a _ => axiomToBoole a
   | .var name ty e _ => varDeclToBoole name ty e
   | .distinct lbl es _ => distinctToBoole lbl es
+
+/-- Collect all top-level names from a Core declaration (type names,
+    function names, constructor names, etc.) for pre-registration. -/
+private def collectDeclNames (d : Core.Decl) : List String :=
+  match d with
+  | .proc p _ => [ppId p.header.name]
+  | .func f _ => [ppId f.name]
+  | .recFuncBlock fs _ => fs.map (fun f => ppId f.name)
+  | .type (.con tc) _ => [tc.name]
+  | .type (.syn ts) _ => [ts.name]
+  | .type (.data dts) _ =>
+    dts.flatMap fun dt =>
+      [dt.name] ++ dt.constrs.flatMap fun c =>
+        [c.name.name, c.testerName] ++ c.args.map (fun (id, _) => id.name)
+  | .ax _ _ => []
+  | .var name _ _ _ => [ppId name]
+  | .distinct _ _ _ => []
 
 /-! ## Top-level: Core.Program → Boole text -/
 

@@ -278,7 +278,6 @@ unsafe def genBooleFromFile
   let bundleFiles ← collectJsonBundleFiles target
   let seqBooleBody? ← readSeqBoolePreludeBody?
   let vecBooleBody? ← readVecBoolePreludeBody?
-  -- Still read .core.st for the availability flag used by declsToProgram
   let seqPreludeBody? ← readSeqPreludeBody?
   let vecPreludeBody? ← readVecPreludeBody?
   let mut allDecls : List Decl := []
@@ -295,13 +294,16 @@ unsafe def genBooleFromFile
       else IO.eprintln s!"warning: skipping shard {f}: {e}"
   let availableTextPreludes : ToCore.TextPreludeAvailability :=
     { seq := seqPreludeBody?.isSome, vec := vecPreludeBody?.isSome }
-  match ToCore.declsToProgram allDecls allCallSiteTypes
+  match ToCore.declsToBooleLoweringResult allDecls allCallSiteTypes
       (availableTextPreludes := availableTextPreludes) with
   | .ok lowered =>
     let seqPreludeNeeded := lowered.neededPreludes.seq
     let vecPreludeNeeded := lowered.neededPreludes.vec
     let preludeText? := assemblePreludeText seqPreludeNeeded vecPreludeNeeded seqBooleBody? vecBooleBody?
-    match ← Boole.CoreToBoole.renderBooleProgram lowered (preludeText? := preludeText?) with
+    let coreProgram : Core.Program := { decls := lowered.coreDecls }
+    let coreLoweringResult : ToCore.ProgramLoweringResult :=
+      { program := coreProgram, fnDecMap := lowered.fnDecMap }
+    match ← Boole.CoreToBoole.renderBooleProgram coreLoweringResult (preludeText? := preludeText?) with
     | .ok rendered => printFn rendered
     | .error e => failWith e
   | .error e => failWith e

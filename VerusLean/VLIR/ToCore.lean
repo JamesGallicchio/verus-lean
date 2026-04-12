@@ -1,7 +1,8 @@
 /-
-  VLIR to Strata Core Translation (WIP)
+  VLIR to Strata Core Translation
 
   Translates the Verus-Lean IR (VLIR) to Strata Core AST.
+  The Boole backend (CoreToBoole) converts the output to BooleDDM.
 -/
 
 import Std.Data.HashMap
@@ -4729,6 +4730,42 @@ def declsToProgram (decls : List Decl)
     fnDecMap := fnDecMap
     neededPreludes := support.neededPreludes
     prunableDeclNames := support.prunableDeclNames
+  }
+
+/-! ## Boole output: VLIR → Core (internal) → BooleDDM -/
+
+structure BooleLoweringResult where
+  coreDecls : List Core.Decl
+  fnDecMap : Std.HashMap String (List CoreExpr)
+  neededPreludes : TextPreludeNeeds := {}
+
+/-- Translate VLIR declarations to BooleDDM-ready Core declarations.
+    This is the primary entry point for the Boole pipeline. The output
+    `coreDecls` are suitable for conversion to BooleDDM via CoreToBoole. -/
+def declsToBooleLoweringResult (decls : List Decl)
+    (callSiteTypes : Std.HashMap Ident (List Typ × Typ) := {})
+    (availableTextPreludes : TextPreludeAvailability := {}) :
+    Except String BooleLoweringResult := do
+  let noParamFns := collectNoParamFnNamesFromDecls decls
+  let projLayouts := buildProjLayouts decls
+  let mutArgMap := collectMutArgMapFromDecls decls
+  let sfMap := collectSpecFns decls
+  let parts ← decls.mapM (declToCore noParamFns projLayouts mutArgMap sfMap decls)
+  let translated := pruneUnreferencedSyntheticHelpers parts.flatten
+  let translated := pruneUnusedDeclOnlyLocals translated
+  let recFuncBlockNames := translated.flatMap (fun d => match d with
+    | .recFuncBlock fs _ => fs.map (fun f => CoreIdent.toPretty f.name)
+    | _ => [])
+  let translated := translated.filter (fun d => match d with
+    | .func f _ => !recFuncBlockNames.contains (CoreIdent.toPretty f.name)
+    | _ => true)
+  let translated := translated.filter (fun d => !isRedundantVecAccessProcStub d)
+  let support ← assembleSupportLayer translated callSiteTypes availableTextPreludes
+  let fnDecMap ← buildFnDecMap sfMap noParamFns
+  return {
+    coreDecls := support.decls
+    fnDecMap := fnDecMap
+    neededPreludes := support.neededPreludes
   }
 
 end ToCore
