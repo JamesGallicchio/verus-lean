@@ -5,6 +5,7 @@ import VerusLean.VLIR.ToCore
 import VerusLean.VLIR.OutputPrep
 import VerusLean.VLIR.Pretty
 import VerusLean.VLIR.Boole.CoreToBoole
+import VerusLean.VLIR.Translate
 import Strata.Languages.Core.DDMTransform.ASTtoCST
 
 open VerusLean
@@ -278,35 +279,47 @@ unsafe def genBooleFromFile
   let bundleFiles ← collectJsonBundleFiles target
   let seqBooleBody? ← readSeqBoolePreludeBody?
   let vecBooleBody? ← readVecBoolePreludeBody?
-  let seqPreludeBody? ← readSeqPreludeBody?
-  let vecPreludeBody? ← readVecPreludeBody?
   let mut allDecls : List Decl := []
-  let mut allCallSiteTypes : CallSiteTypes := {}
   for f in bundleFiles do
     match ← Decls.fromFile? f.toString with
-    | .ok (_ns, defs, thms, callTypes) =>
+    | .ok (_ns, defs, thms, _callTypes) =>
       allDecls := allDecls ++ defs ++ thms
-      for (name, sig) in callTypes.toList do
-        if !allCallSiteTypes.contains name then
-          allCallSiteTypes := allCallSiteTypes.insert name sig
     | .error e =>
       if f == target then failWith e
       else IO.eprintln s!"warning: skipping shard {f}: {e}"
-  let availableTextPreludes : ToCore.TextPreludeAvailability :=
-    { seq := seqPreludeBody?.isSome, vec := vecPreludeBody?.isSome }
-  match ToCore.declsToBooleLoweringResult allDecls allCallSiteTypes
-      (availableTextPreludes := availableTextPreludes) with
-  | .ok lowered =>
-    let seqPreludeNeeded := lowered.neededPreludes.seq
-    let vecPreludeNeeded := lowered.neededPreludes.vec
-    let preludeText? := assemblePreludeText seqPreludeNeeded vecPreludeNeeded seqBooleBody? vecBooleBody?
-    let coreProgram : Core.Program := { decls := lowered.coreDecls }
-    let coreLoweringResult : ToCore.ProgramLoweringResult :=
-      { program := coreProgram, fnDecMap := lowered.fnDecMap }
-    match ← Boole.CoreToBoole.renderBooleProgram coreLoweringResult (preludeText? := preludeText?) with
-    | .ok rendered => printFn rendered
-    | .error e => failWith e
+  -- Translate VLIR directly to BooleDDM commands
+  match Translate.translateDecls allDecls with
   | .error e => failWith e
+  | .ok cmds =>
+    -- Include Seq prelude only when declarations reference Seq/nat types.
+    -- Include Vec prelude only when declarations reference Vec types.
+    -- For simplicity, include both when available — the prelude is lightweight.
+    let preludeText? := assemblePreludeText seqBooleBody?.isSome vecBooleBody?.isSome
+        seqBooleBody? vecBooleBody?
+    -- When preludes are included, filter out support declarations that
+    -- the prelude already provides (e.g. `type nat`, `int_to_nat`).
+    let preludeProvides : List String :=
+      (if seqBooleBody?.isSome then ["nat", "int_to_nat", "Set", "Set_finite",
+        "Seq_len", "Seq_lib_insert", "Seq_new", "Seq_lib_map",
+        "Seq_lib_map_values", "Seq_lib_filter", "Seq_lib_sort_by",
+        "Seq_lib_to_set"] else []) ++
+      (if vecBooleBody?.isSome then ["Vec", "Vec_ctor", "Vec_data", "Vec_len",
+        "Vec_index", "Vec_view"] else [])
+    let cmds := cmds.filter fun cmd =>
+      match Translate.cmdDeclName? cmd with
+      | some name => !preludeProvides.contains name
+      | none => true
+    -- Load prelude ops, combine with translated ops, emit text
+    let preludeResult ←
+      match preludeText? with
+      | some text => Boole.Emit.loadPrelude text
+      | none => pure (.ok (#[], #[]))
+    match preludeResult with
+    | .error e => failWith e
+    | .ok (preludeOps, _) =>
+      let bodyOps := Boole.Emit.commandsToOps cmds
+      let pgm := Boole.Emit.mkProgram preludeOps bodyOps
+      printFn (Boole.Emit.programToString pgm)
 
 unsafe def main : List String → IO Unit
   | [path] => genFromFile path IO.println

@@ -10,3 +10,4 @@ import VerusLean.VLIR.Translation
 import VerusLean.VLIR.Boole.Builder
 import VerusLean.VLIR.Boole.Emit
 import VerusLean.VLIR.Boole.CoreToBoole
+import VerusLean.VLIR.Translate
