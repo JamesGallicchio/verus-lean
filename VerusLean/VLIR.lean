@@ -7,3 +7,6 @@ import VerusLean.VLIR.ToCore
 import VerusLean.VLIR.OutputPrep
 import VerusLean.VLIR.Pretty
 import VerusLean.VLIR.Translation
+import VerusLean.VLIR.Boole.Builder
+import VerusLean.VLIR.Boole.Emit
+import VerusLean.VLIR.Boole.CoreToBoole

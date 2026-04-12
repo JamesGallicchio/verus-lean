@@ -11,8 +11,9 @@ tests/BoogieFiles/verus-examples/*.core.st
 tests/BoogieFiles/rust-verify-generated/*.core.st
 tests/BoogieFiles/rust-verify-tests/
 tests/BoogieFiles/verus-examples-rec/
-tests/BooleFiles/verus-examples/*.lean
-tests/BooleFiles/vlir-tests/*.lean
+tests/BooleFiles/verus-examples/*.boole.st
+tests/BooleFiles/vlir-tests/*.boole.st
+tests/BoolePrograms/*
 tests/PrettyPrinterCompare/
 tests/check_official_pretty_roundtrip.sh
 tests/compare_pretty_printers.sh

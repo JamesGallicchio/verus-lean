@@ -61,6 +61,11 @@ structure PreparedProgram where
 private def ppCoreIdent (id : CoreIdent) : String :=
   CoreIdent.toPretty id
 
+private def exprOrNondetApply (f : CoreExpr → α) (default : α) :
+    Imperative.ExprOrNondet Core.Expression → α
+  | .det e => f e
+  | .nondet => default
+
 private def collectCoreApps : CoreExpr → CoreExpr × List CoreExpr
   | .app _ fn arg =>
     let (h, args) := collectCoreApps fn
@@ -88,7 +93,7 @@ private def isTrueExpr : CoreExpr → Bool
   | _ => false
 
 private def stmtSet? : Core.Statement → Option (String × CoreExpr)
-  | .cmd (.cmd (.set name e _)) => some (ppCoreIdent name, e)
+  | .cmd (.cmd (.set name (.det e) _)) => some (ppCoreIdent name, e)
   | _ => none
 
 private def stmtInitTy? : Core.Statement → Option (String × LTy)
@@ -258,7 +263,7 @@ private partial def rewriteGhostCurrentExpr
       | _ => e
 
 private def matchOptionUnwrapSet? (optName : String) : Core.Statement → Option String
-  | .cmd (.cmd (.set name e _)) =>
+  | .cmd (.cmd (.set name (.det e) _)) =>
     let (head, args) := collectCoreApps e
     match head, args with
     | .op _ id _, [arg] =>
@@ -304,7 +309,7 @@ private def matchBooleForLoop?
       | none, none => some (aliases, pref, s, tail)
   let (aliases, pref, candidate, tail) ← collectPrefix ∅ [] ss
   match candidate with
-  | .block lbl [ .loop guard measure invs loopBody _ ] _ =>
+  | .block lbl [ .loop (.det guard) measure invs loopBody _ ] _ =>
     if !isTrueExpr guard then
       none
     else
@@ -336,12 +341,12 @@ private def matchBooleForLoop?
                 | none => (optTmp, s :: rest)
               | [] => (optTmp, [])
             match rest with
-            | .ite cond thenBranch elseBranch _ :: .cmd (.cmd (.set loopVar loopNext _)) :: bodyRest =>
+            | .ite (.det cond) thenBranch elseBranch _ :: .cmd (.cmd (.set loopVar (.det loopNext) _)) :: bodyRest =>
               let loopVarName := ppCoreIdent loopVar
               let loopNextName? := exprFVarName? loopNext
               let extractedNext? :=
                 match thenBranch with
-                | [unwrapSet, .cmd (.cmd (.set nextName nextExpr _))] => do
+                | [unwrapSet, .cmd (.cmd (.set nextName (.det nextExpr) _))] => do
                   let unwrapTmp ← matchOptionUnwrapSet? optName unwrapSet
                   let forwardedTmp ← exprFVarName? nextExpr
                   if forwardedTmp == unwrapTmp then
@@ -385,18 +390,18 @@ private partial def stmtRefsForBooleStmt
     (varTypes : Std.HashMap String LTy) : Core.Statement → List String
   | .cmd (.cmd (.init name _ e _)) =>
     match e with
-    | some rhs =>
+    | .det rhs =>
       if isBooleInternalTempName (ppCoreIdent name) && isTupleUnitCtorExpr rhs then
         []
       else
         exprAllDeclRefs rhs
-    | none => []
-  | .cmd (.cmd (.set name e _)) =>
+    | .nondet => []
+  | .cmd (.cmd (.set name (.det e) _)) =>
     if isBooleInternalTempName (ppCoreIdent name) && isTupleUnitCtorExpr e then
       []
     else
       exprAllDeclRefs e
-  | .cmd (.cmd (.havoc _ _)) => []
+  | .cmd (.cmd (.set _ .nondet _)) => []
   | .cmd (.cmd (.assert _ e _)) => exprAllDeclRefs e
   | .cmd (.cmd (.assume _ e _)) => exprAllDeclRefs e
   | .cmd (.cmd (.cover _ e _)) => exprAllDeclRefs e
@@ -404,11 +409,11 @@ private partial def stmtRefsForBooleStmt
     joinRefs [callAllDeclRefs f, joinRefs <| args.map exprAllDeclRefs]
   | .block _ ss _ => stmtsRefsForBoole varTypes ss
   | .ite cond t e _ =>
-    joinRefs [exprAllDeclRefs cond, stmtsRefsForBoole varTypes t, stmtsRefsForBoole varTypes e]
+    joinRefs [exprOrNondetApply exprAllDeclRefs [] cond, stmtsRefsForBoole varTypes t, stmtsRefsForBoole varTypes e]
   | .loop guard measure invs body _ =>
     let measureRefs := match measure with | some m => exprAllDeclRefs m | none => []
     let invariantRefs := joinRefs <| invs.map exprAllDeclRefs
-    joinRefs [exprAllDeclRefs guard, measureRefs, invariantRefs, stmtsRefsForBoole varTypes body]
+    joinRefs [exprOrNondetApply exprAllDeclRefs [] guard, measureRefs, invariantRefs, stmtsRefsForBoole varTypes body]
   | .exit _ _ => []
   | .funcDecl _ _ => []
   | .typeDecl _ _ => []
@@ -491,9 +496,9 @@ private partial def pruneBooleStmtArtifacts (ss : List Core.Statement) : List Co
       let rest' := go rest
       let keepStmt :=
         match s with
-        | .cmd (.cmd (.init name _ (some rhs) _)) =>
+        | .cmd (.cmd (.init name _ (.det rhs) _)) =>
           !(isBooleInternalTempName (ppCoreIdent name) && isTupleUnitCtorExpr rhs)
-        | .cmd (.cmd (.set name rhs _)) =>
+        | .cmd (.cmd (.set name (.det rhs) _)) =>
           !(isBooleInternalTempName (ppCoreIdent name) && isTupleUnitCtorExpr rhs)
         | _ => true
       if keepStmt then
@@ -579,7 +584,7 @@ private partial def prepareStmtListForOutputDialect
     | none =>
       match ss with
       | [] => return []
-      | .cmd (.cmd (.set _name e _)) :: .cmd (.cmd (.assume "__return__" _ _)) :: rest =>
+      | .cmd (.cmd (.set _name (.det e) _)) :: .cmd (.cmd (.assume "__return__" _ _)) :: rest =>
         return .returnExpr e :: (← prepareStmtListForOutputDialect dialect varTypes rest)
       | .cmd (.cmd (.assume "__return__" _ _)) :: rest =>
         return .returnUnit :: (← prepareStmtListForOutputDialect dialect varTypes rest)
@@ -590,21 +595,28 @@ private partial def prepareStmtListForOutputDialect
 private partial def prepareStmtForOutputDialect
     (dialect : OutputDialect)
     (varTypes : Std.HashMap String LTy) : Core.Statement → Except String PreparedStmt
-  | .cmd (.cmd (.init name ty e _)) => return .init (CoreIdent.toPretty name) ty e
-  | .cmd (.cmd (.set name e _)) => return .set (CoreIdent.toPretty name) e
-  | .cmd (.cmd (.havoc name _)) => return .havoc (CoreIdent.toPretty name)
+  | .cmd (.cmd (.init name ty (.det e) _)) => return .init (CoreIdent.toPretty name) ty (some e)
+  | .cmd (.cmd (.init name ty .nondet _)) => return .init (CoreIdent.toPretty name) ty none
+  | .cmd (.cmd (.set name (.det e) _)) => return .set (CoreIdent.toPretty name) e
+  | .cmd (.cmd (.set name .nondet _)) => return .havoc (CoreIdent.toPretty name)
   | .cmd (.cmd (.assert label e _)) => return .assert label e
   | .cmd (.cmd (.assume "__return__" _ _)) => return .returnUnit
   | .cmd (.cmd (.assume label e _)) => return .assume label e
   | .cmd (.cmd (.cover label e _)) => return .cover label e
   | .cmd (.call lhs pname args _) => return .call (lhs.map CoreIdent.toPretty) pname args
   | .block lbl ss _ => return .block lbl (← prepareStmtListForOutputDialect dialect varTypes ss)
-  | .ite cond t e _ =>
+  | .ite (.det cond) t e _ =>
     return .ite cond
       (← prepareStmtListForOutputDialect dialect varTypes t)
       (← prepareStmtListForOutputDialect dialect varTypes e)
-  | .loop guard measure invs body _ =>
+  | .ite .nondet t e _ =>
+    return .ite (LExpr.boolConst () true)
+      (← prepareStmtListForOutputDialect dialect varTypes t)
+      (← prepareStmtListForOutputDialect dialect varTypes e)
+  | .loop (.det guard) measure invs body _ =>
     return .loop guard measure invs (← prepareStmtListForOutputDialect dialect varTypes body)
+  | .loop .nondet measure invs body _ =>
+    return .loop (LExpr.boolConst () true) measure invs (← prepareStmtListForOutputDialect dialect varTypes body)
   | .exit lbl _ => return .exit lbl
   | .funcDecl _ _ => throw "unexpected statement-level function declaration during output preparation"
   | .typeDecl _ _ => throw "unexpected statement-level type declaration during output preparation"
@@ -672,7 +684,8 @@ private def prepareDeclForOutputDialect
     return .recFuncBlock <| fs.map (fun f => { func := f, decreases? := fnDecMap.get? (CoreIdent.toPretty f.name) })
   | .type t _ => return .typeDecl t
   | .ax a _ => return .axiom a
-  | .var name ty e _ => return .var name ty e
+  | .var name ty (.det e) _ => return .var name ty (some e)
+  | .var name ty .nondet _ => return .var name ty none
   | .distinct lbl es _ => return .distinct lbl es
 
 def prepareProgramForOutputDialect

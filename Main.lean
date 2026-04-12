@@ -4,6 +4,7 @@ import VerusLean
 import VerusLean.VLIR.ToCore
 import VerusLean.VLIR.OutputPrep
 import VerusLean.VLIR.Pretty
+import VerusLean.VLIR.Boole.CoreToBoole
 import Strata.Languages.Core.DDMTransform.ASTtoCST
 
 open VerusLean
@@ -253,8 +254,42 @@ unsafe def genCoreFromFile
         failWith e
   | .error e => failWith e
 
+unsafe def genBooleFromFile
+    (path : String)
+    (printFn : String → IO Unit) : IO Unit := do
+  let target := System.FilePath.mk path
+  let bundleFiles ← collectJsonBundleFiles target
+  let seqPreludeBody? ← readSeqPreludeBody?
+  let vecPreludeBody? ← readVecPreludeBody?
+  let mut allDecls : List Decl := []
+  let mut allCallSiteTypes : CallSiteTypes := {}
+  for f in bundleFiles do
+    match ← Decls.fromFile? f.toString with
+    | .ok (_ns, defs, thms, callTypes) =>
+      allDecls := allDecls ++ defs ++ thms
+      for (name, sig) in callTypes.toList do
+        if !allCallSiteTypes.contains name then
+          allCallSiteTypes := allCallSiteTypes.insert name sig
+    | .error e =>
+      if f == target then failWith e
+      else IO.eprintln s!"warning: skipping shard {f}: {e}"
+  let availableTextPreludes : ToCore.TextPreludeAvailability :=
+    { seq := seqPreludeBody?.isSome, vec := vecPreludeBody?.isSome }
+  match ToCore.declsToProgram allDecls allCallSiteTypes
+      (availableTextPreludes := availableTextPreludes) with
+  | .ok lowered =>
+    let seqPreludeNeeded := lowered.neededPreludes.seq
+    let vecPreludeNeeded := lowered.neededPreludes.vec
+    let preludeText? := assemblePreludeText seqPreludeNeeded vecPreludeNeeded seqPreludeBody? vecPreludeBody?
+    match ← Boole.CoreToBoole.renderBooleProgram lowered (preludeText? := preludeText?) with
+    | .ok rendered => printFn rendered
+    | .error e => failWith e
+  | .error e => failWith e
+
 unsafe def main : List String → IO Unit
   | [path] => genFromFile path IO.println
+  | ["boole", path] => genBooleFromFile path IO.println
+  | ["boole", path, toFile] => genBooleFromFile path (IO.FS.writeFile toFile)
   | ["boogie", path] => genCoreFromFile path IO.println
   | ["boogie", path, toFile] => genCoreFromFile path (IO.FS.writeFile toFile)
   | "core" :: args =>
@@ -281,5 +316,6 @@ unsafe def main : List String → IO Unit
 
   | _ =>
     IO.println "Usage: ./verus-lean <input.json> [output.lean]\n\
+      ./verus-lean boole <input.json> [output.boole.st]\n\
       ./verus-lean boogie <input.json> [output.core.st]\n\
       ./verus-lean core [--official] [--dialect core|boole] <input.json> [output.st]"

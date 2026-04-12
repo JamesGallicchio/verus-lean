@@ -235,7 +235,11 @@ def projFieldNameOf (dt : Ident) (variant field : String) : String :=
 def emptyStmtMeta : Imperative.MetaData Core.Expression := .empty
 
 def mkInitStmt (name : CoreIdent) (ty : LTy) (rhs? : Option CoreExpr := none) : Core.Statement :=
-  Core.Statement.init name ty rhs? emptyStmtMeta
+  let e : Imperative.ExprOrNondet Core.Expression :=
+    match rhs? with
+    | some rhs => .det rhs
+    | none => .nondet
+  Core.Statement.init name ty e emptyStmtMeta
 
 def mkSetStmt (name : CoreIdent) (rhs : CoreExpr) : Core.Statement :=
   Core.Statement.set name rhs emptyStmtMeta
@@ -259,7 +263,7 @@ def mkReturnStmt : Core.Statement :=
   Core.Statement.assume "__return__" (LExpr.boolConst () false) emptyStmtMeta
 
 def mkIteStmt (cond : CoreExpr) (thenb elseb : List Core.Statement) : Core.Statement :=
-  Imperative.Stmt.ite cond thenb elseb emptyStmtMeta
+  Imperative.Stmt.ite (Imperative.ExprOrNondet.det cond) thenb elseb emptyStmtMeta
 
 def mkBlockStmt (label : String) (body : List Core.Statement) : Core.Statement :=
   Imperative.Stmt.block label body emptyStmtMeta
@@ -2639,7 +2643,7 @@ end
 
 def mkLoop (guard : CoreExpr) (measure : Option CoreExpr) (invs : List CoreExpr)
     (body : List Core.Statement) : Core.Statement :=
-  Imperative.Stmt.loop guard measure invs body emptyStmtMeta
+  Imperative.Stmt.loop (Imperative.ExprOrNondet.det guard) measure invs body emptyStmtMeta
 
 private def dropTempPrefixCoreAssigns (dropVars : List String) :
     List Core.Statement → List Core.Statement :=
@@ -3367,10 +3371,9 @@ private def concatRefLists {α : Type} (xss : List (List α)) : List α :=
 private partial def stmtModifiedVars : Core.Statement → List CoreIdent
   | .cmd (.cmd (.init name _ e _)) =>
     match e with
-    | some _ => [name]
-    | none => []
+    | .det _ => [name]
+    | .nondet => []
   | .cmd (.cmd (.set name _ _)) => [name]
-  | .cmd (.cmd (.havoc name _)) => [name]
   | .cmd (.cmd (.assert _ _ _)) => []
   | .cmd (.cmd (.assume _ _ _)) => []
   | .cmd (.cmd (.cover _ _ _)) => []
@@ -3388,8 +3391,8 @@ private def stmtsModifiedVars (ss : List Core.Statement) : List CoreIdent :=
 private partial def stmtDeclOnlyLocals : Core.Statement → List CoreIdent
   | .cmd (.cmd (.init name _ e _)) =>
     match e with
-    | some _ => []
-    | none => [name]
+    | .det _ => []
+    | .nondet => [name]
   | .cmd _ => []
   | .block _ ss _ => (ss.flatMap stmtDeclOnlyLocals).eraseDups
   | .ite _ t e _ => (t.flatMap stmtDeclOnlyLocals ++ e.flatMap stmtDeclOnlyLocals).eraseDups
@@ -3845,6 +3848,12 @@ def isSyntheticHelperName (s : String) : Bool :=
 def joinRefs (xss : List (List String)) : List String :=
   (xss.foldr (· ++ ·) []).eraseDups
 
+/-- Extract expression refs from an `ExprOrNondet`, returning `[]` for `.nondet`. -/
+private def exprOrNondetRefs (f : CoreExpr → List String) :
+    Imperative.ExprOrNondet Core.Expression → List String
+  | .det e => f e
+  | .nondet => []
+
 private def exprVarNames (e : CoreExpr) : List String :=
   ((Lambda.LExpr.LExpr.getVars e).map CoreIdent.toPretty).eraseDups
 
@@ -3855,11 +3864,11 @@ private def collectVarNamesFromChecks (checks : ListMap CoreLabel Core.Procedure
 private partial def stmtTouchedVarsExcludingDeclOnly : Core.Statement → List String
   | .cmd (.cmd (.init name _ e _)) =>
     match e with
-    | some rhs => (CoreIdent.toPretty name :: exprVarNames rhs).eraseDups
-    | none => []
-  | .cmd (.cmd (.set name e _)) =>
+    | .det rhs => (CoreIdent.toPretty name :: exprVarNames rhs).eraseDups
+    | .nondet => []
+  | .cmd (.cmd (.set name (.det e) _)) =>
     (CoreIdent.toPretty name :: exprVarNames e).eraseDups
-  | .cmd (.cmd (.havoc name _)) =>
+  | .cmd (.cmd (.set name .nondet _)) =>
     [CoreIdent.toPretty name]
   | .cmd (.cmd (.assert _ e _)) => exprVarNames e
   | .cmd (.cmd (.assume _ e _)) => exprVarNames e
@@ -3868,11 +3877,11 @@ private partial def stmtTouchedVarsExcludingDeclOnly : Core.Statement → List S
     joinRefs [(lhs.map CoreIdent.toPretty), joinRefs <| args.map exprVarNames]
   | .block _ ss _ => joinRefs <| ss.map stmtTouchedVarsExcludingDeclOnly
   | .ite cond t e _ =>
-    joinRefs [exprVarNames cond, joinRefs (t.map stmtTouchedVarsExcludingDeclOnly), joinRefs (e.map stmtTouchedVarsExcludingDeclOnly)]
+    joinRefs [exprOrNondetRefs exprVarNames cond, joinRefs (t.map stmtTouchedVarsExcludingDeclOnly), joinRefs (e.map stmtTouchedVarsExcludingDeclOnly)]
   | .loop guard measure invariant body _ =>
     let measureRefs := match measure with | some m => exprVarNames m | none => []
     let invariantRefs := joinRefs <| invariant.map exprVarNames
-    joinRefs [exprVarNames guard, measureRefs, invariantRefs, joinRefs (body.map stmtTouchedVarsExcludingDeclOnly)]
+    joinRefs [exprOrNondetRefs exprVarNames guard, measureRefs, invariantRefs, joinRefs (body.map stmtTouchedVarsExcludingDeclOnly)]
   | .exit _ _ => []
   | .funcDecl decl _ =>
     let bodyRefs := (decl.body.map exprVarNames).getD []
@@ -3888,8 +3897,8 @@ private partial def pruneUnusedDeclOnlyStmt
     (usedVars : List String) : Core.Statement → Option Core.Statement
   | .cmd (.cmd (.init name ty e md)) =>
     match e with
-    | some _ => some (.cmd (.cmd (.init name ty e md)))
-    | none =>
+    | .det _ => some (.cmd (.cmd (.init name ty e md)))
+    | .nondet =>
       if !usedVars.contains (CoreIdent.toPretty name) then
         none
       else
@@ -3941,9 +3950,12 @@ partial def stmtRefsBy
     (exprRefs : CoreExpr → List String)
     (callNameRefs : String → List String) :
     Core.Statement → List String
-  | .cmd (.cmd (.init _ _ e _)) => (e.map exprRefs).getD []
-  | .cmd (.cmd (.set _ e _)) => exprRefs e
-  | .cmd (.cmd (.havoc _ _)) => []
+  | .cmd (.cmd (.init _ _ e _)) =>
+    match e with
+    | .det rhs => exprRefs rhs
+    | .nondet => []
+  | .cmd (.cmd (.set _ (.det e) _)) => exprRefs e
+  | .cmd (.cmd (.set _ .nondet _)) => []
   | .cmd (.cmd (.assert _ e _)) => exprRefs e
   | .cmd (.cmd (.assume _ e _)) => exprRefs e
   | .cmd (.cmd (.cover _ e _)) => exprRefs e
@@ -3951,11 +3963,11 @@ partial def stmtRefsBy
     joinRefs [callNameRefs f, joinRefs <| args.map exprRefs]
   | .block _ ss _ => joinRefs <| ss.map (stmtRefsBy exprRefs callNameRefs)
   | .ite cond t e _ =>
-    joinRefs [exprRefs cond, joinRefs (t.map (stmtRefsBy exprRefs callNameRefs)), joinRefs (e.map (stmtRefsBy exprRefs callNameRefs))]
+    joinRefs [exprOrNondetRefs exprRefs cond, joinRefs (t.map (stmtRefsBy exprRefs callNameRefs)), joinRefs (e.map (stmtRefsBy exprRefs callNameRefs))]
   | .loop guard measure invariant body _ =>
     let measureRefs := match measure with | some m => exprRefs m | none => []
     let invariantRefs := joinRefs <| invariant.map exprRefs
-    joinRefs [exprRefs guard, measureRefs, invariantRefs, joinRefs (body.map (stmtRefsBy exprRefs callNameRefs))]
+    joinRefs [exprOrNondetRefs exprRefs guard, measureRefs, invariantRefs, joinRefs (body.map (stmtRefsBy exprRefs callNameRefs))]
   | .exit _ _ => []
   | .funcDecl _ _ => []
   | .typeDecl _ _ => []
@@ -3976,7 +3988,10 @@ def declRefsBy
     joinRefs [collectRefsFromChecks exprRefs p.spec.preconditions,
       collectRefsFromChecks exprRefs p.spec.postconditions,
       stmtsRefsBy exprRefs callNameRefs p.body]
-  | .var _ _ e _ => (e.map exprRefs).getD []
+  | .var _ _ e _ =>
+    match e with
+    | .det rhs => exprRefs rhs
+    | .nondet => []
   | .ax a _ => exprRefs a.e
   | .distinct _ es _ => joinRefs <| es.map exprRefs
   | .type _ _ => []
@@ -4264,8 +4279,8 @@ private partial def collectExprArity : CoreExpr → Std.HashMap String Nat → S
   | _, acc => acc
 
 private partial def collectStmtArity : Core.Statement → Std.HashMap String Nat → Std.HashMap String Nat
-  | .cmd (.cmd (.init _ _ (some e) _)), acc => collectExprArity e acc
-  | .cmd (.cmd (.set _ e _)), acc => collectExprArity e acc
+  | .cmd (.cmd (.init _ _ (.det e) _)), acc => collectExprArity e acc
+  | .cmd (.cmd (.set _ (.det e) _)), acc => collectExprArity e acc
   | .cmd (.cmd (.assert _ e _)), acc => collectExprArity e acc
   | .cmd (.cmd (.assume _ e _)), acc => collectExprArity e acc
   | .cmd (.cmd (.cover _ e _)), acc => collectExprArity e acc
@@ -4276,11 +4291,11 @@ private partial def collectStmtArity : Core.Statement → Std.HashMap String Nat
     args.foldl (init := acc) (fun a e => collectExprArity e a)
   | .block _ ss _, acc => ss.foldl (init := acc) (fun a s => collectStmtArity s a)
   | .ite cond t e _, acc =>
-    let acc := collectExprArity cond acc
+    let acc := match cond with | .det c => collectExprArity c acc | .nondet => acc
     let acc := t.foldl (init := acc) (fun a s => collectStmtArity s a)
     e.foldl (init := acc) (fun a s => collectStmtArity s a)
   | .loop guard measure invs body _, acc =>
-    let acc := collectExprArity guard acc
+    let acc := match guard with | .det g => collectExprArity g acc | .nondet => acc
     let acc := match measure with | some m => collectExprArity m acc | none => acc
     let acc := invs.foldl (init := acc) (fun a e => collectExprArity e a)
     body.foldl (init := acc) (fun a s => collectStmtArity s a)

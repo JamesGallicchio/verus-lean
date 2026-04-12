@@ -1,0 +1,256 @@
+/-
+  Boole.Builder — Uniform combinators for constructing BooleDDM AST nodes.
+
+  This module provides a Core-style uniform API that internally routes to
+  the appropriate BooleDDM constructor.  The translator speaks in terms of
+  these combinators so that:
+
+    1.  The translator's regular call-site style is preserved.
+    2.  If BooleDDM's surface API evolves, only this file changes.
+    3.  SourceRange metadata is defaulted to `default` in one place.
+-/
+import Strata.Languages.Boole.Boole
+import Strata.Languages.Core.DDMTransform.ASTtoCST
+
+namespace VerusLean.Boole.Builder
+
+open Strata
+open Strata.BooleDDM
+
+/-! ## Type abbreviations -/
+
+abbrev BExpr := BooleDDM.Expr SourceRange
+abbrev BType := BooleDDM.BooleType SourceRange
+abbrev BStmt := BooleDDM.Statement SourceRange
+abbrev BCmd  := BooleDDM.Command SourceRange
+abbrev BBlock := BooleDDM.Block SourceRange
+
+private def ann (v : α) : Strata.Ann α SourceRange := ⟨default, v⟩
+
+/-! ## Type constructors -/
+
+def boolTy : BType := .bool default
+def intTy  : BType := .int default
+def strTy  : BType := .string default
+
+def bvTy (w : Nat) : BType :=
+  match w with
+  | 1  => .bv1 default
+  | 8  => .bv8 default
+  | 16 => .bv16 default
+  | 32 => .bv32 default
+  | 64 => .bv64 default
+  | _  => .bv64 default
+
+def mapTy (key val : BType) : BType := .Map default val key
+def seqTy (elem : BType) : BType := .Sequence default elem
+def arrowTy (dom cod : BType) : BType := .arrow default dom cod
+def tvarTy (name : String) : BType := .tvar default name
+
+def fvarTy (idx : Nat) (args : Array BType := #[]) : BType :=
+  .fvar default idx args
+
+def unknownTy : BType := tvarTy "$__unknown_type"
+
+/-! ## Expression constructors — leaves -/
+
+def fvar (idx : Nat) : BExpr := .fvar default idx
+def bvar (idx : Nat) : BExpr := .bvar default idx
+
+def boolConst (b : Bool) : BExpr :=
+  if b then .btrue default else .bfalse default
+
+def intConst (n : Int) : BExpr :=
+  if n >= 0 then
+    .natToInt default ⟨default, n.toNat⟩
+  else
+    .neg_expr default unknownTy (.natToInt default ⟨default, n.natAbs⟩)
+
+def bitvecConstNat (w : Nat) (n : Nat) : BExpr :=
+  match w with
+  | 1  => .bv1Lit default ⟨default, n⟩
+  | 8  => .bv8Lit default ⟨default, n⟩
+  | 16 => .bv16Lit default ⟨default, n⟩
+  | 32 => .bv32Lit default ⟨default, n⟩
+  | 64 => .bv64Lit default ⟨default, n⟩
+  | _  => .bv64Lit default ⟨default, n⟩
+
+def bitvecConst (w : Nat) (bv : BitVec w) : BExpr :=
+  bitvecConstNat w bv.toNat
+
+/-! ## Expression constructors — compound -/
+
+def ite (c t e : BExpr) : BExpr := .if default unknownTy c t e
+
+def eq (a b : BExpr) : BExpr := .equal default unknownTy a b
+def neq (a b : BExpr) : BExpr := .not_equal default unknownTy a b
+
+/-- Curried function application: `app fn arg`. -/
+def app (fn arg : BExpr) : BExpr := .app default fn arg
+
+/-- Multi-argument function application: `appN fn [a, b, c]` = `fn(a)(b)(c)`. -/
+def appN (fn : BExpr) (args : List BExpr) : BExpr :=
+  args.foldl (fun acc arg => .app default acc arg) fn
+
+/-- Boolean operations. -/
+def boolNot (e : BExpr) : BExpr := .not default e
+def boolAnd (a b : BExpr) : BExpr := .and default a b
+def boolOr (a b : BExpr) : BExpr := .or default a b
+def boolImplies (a b : BExpr) : BExpr := .implies default a b
+def boolEquiv (a b : BExpr) : BExpr := .equiv default a b
+
+/-- Integer arithmetic. -/
+def intAdd (a b : BExpr) : BExpr := .add_expr default intTy a b
+def intSub (a b : BExpr) : BExpr := .sub_expr default intTy a b
+def intMul (a b : BExpr) : BExpr := .mul_expr default intTy a b
+def intDiv (a b : BExpr) : BExpr := .div_expr default intTy a b
+def intMod (a b : BExpr) : BExpr := .mod_expr default intTy a b
+def intNeg (e : BExpr)   : BExpr := .neg_expr default intTy e
+
+/-- Integer comparisons. -/
+def intLe (a b : BExpr) : BExpr := .le default intTy a b
+def intLt (a b : BExpr) : BExpr := .lt default intTy a b
+def intGe (a b : BExpr) : BExpr := .ge default intTy a b
+def intGt (a b : BExpr) : BExpr := .gt default intTy a b
+
+/-- Bitvector arithmetic. -/
+def bvAdd (w : Nat) (a b : BExpr) : BExpr := .add_expr default (bvTy w) a b
+def bvSub (w : Nat) (a b : BExpr) : BExpr := .sub_expr default (bvTy w) a b
+def bvMul (w : Nat) (a b : BExpr) : BExpr := .mul_expr default (bvTy w) a b
+def bvUDiv (w : Nat) (a b : BExpr) : BExpr := .div_expr default (bvTy w) a b
+def bvUMod (w : Nat) (a b : BExpr) : BExpr := .mod_expr default (bvTy w) a b
+def bvSDiv (w : Nat) (a b : BExpr) : BExpr := .bvsdiv default (bvTy w) a b
+def bvSMod (w : Nat) (a b : BExpr) : BExpr := .bvsmod default (bvTy w) a b
+def bvNeg (w : Nat) (e : BExpr) : BExpr := .neg_expr default (bvTy w) e
+
+/-- Bitvector bitwise operations. -/
+def bvAnd (w : Nat) (a b : BExpr) : BExpr := .bvand default (bvTy w) a b
+def bvOr  (w : Nat) (a b : BExpr) : BExpr := .bvor default (bvTy w) a b
+def bvXor (w : Nat) (a b : BExpr) : BExpr := .bvxor default (bvTy w) a b
+def bvNot (w : Nat) (e : BExpr)   : BExpr := .bvnot default (bvTy w) e
+def bvShl (w : Nat) (a b : BExpr) : BExpr := .bvshl default (bvTy w) a b
+def bvUShr (w : Nat) (a b : BExpr) : BExpr := .bvushr default (bvTy w) a b
+
+/-- Bitvector unsigned comparisons. -/
+def bvUle (w : Nat) (a b : BExpr) : BExpr := .le default (bvTy w) a b
+def bvUlt (w : Nat) (a b : BExpr) : BExpr := .lt default (bvTy w) a b
+def bvUge (w : Nat) (a b : BExpr) : BExpr := .ge default (bvTy w) a b
+def bvUgt (w : Nat) (a b : BExpr) : BExpr := .gt default (bvTy w) a b
+
+/-- Bitvector signed comparisons. -/
+def bvSle (w : Nat) (a b : BExpr) : BExpr := .bvsle default (bvTy w) a b
+def bvSlt (w : Nat) (a b : BExpr) : BExpr := .bvslt default (bvTy w) a b
+def bvSge (w : Nat) (a b : BExpr) : BExpr := .bvsge default (bvTy w) a b
+def bvSgt (w : Nat) (a b : BExpr) : BExpr := .bvsgt default (bvTy w) a b
+
+/-- Map operations. -/
+def mapGet (m k : BExpr) : BExpr := .map_get default unknownTy unknownTy m k
+def mapSet (m k v : BExpr) : BExpr := .map_set default unknownTy unknownTy m k v
+
+/-- Sequence length. -/
+def seqLength (s : BExpr) : BExpr := .seq_length default unknownTy s
+
+/-- Old expression (procedure pre-state). -/
+def old (e : BExpr) : BExpr := .old default unknownTy e
+
+/-! ## Quantifiers -/
+
+private def bindsToDeclList (bs : Array (String × BType)) : BooleDDM.DeclList SourceRange :=
+  if bs.isEmpty then
+    let bind := Bind.bind_mk default (ann "") (ann none) unknownTy
+    .declAtom default bind
+  else
+    let mkBind (name : String) (ty : BType) :=
+      Bind.bind_mk default (ann name) (ann none) ty
+    let first := bs[0]!
+    let init := DeclList.declAtom default (mkBind first.1 first.2)
+    bs[1:].foldl (fun acc (name, ty) =>
+      DeclList.declPush default acc (mkBind name ty))
+      init
+
+def forallExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
+  .forall_unicode default (bindsToDeclList binds) body
+
+def existsExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
+  .exists_unicode default (bindsToDeclList binds) body
+
+/-! ## Statement constructors -/
+
+private def mkLabel (label : String) : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange :=
+  ann (some (.label default (ann label)))
+
+def varStmt (name : String) (ty : BType) : BStmt :=
+  let bind := Bind.bind_mk default (ann name) (ann none) ty
+  let decls := DeclList.declAtom default bind
+  .varStatement default decls
+
+def initStmt (name : String) (ty : BType) (rhs : BExpr) : BStmt :=
+  .initStatement default ty (ann name) rhs
+
+def setStmt (name : String) (rhs : BExpr) : BStmt :=
+  let lhs := BooleDDM.Lhs.lhsIdent default (ann name)
+  .assign default unknownTy lhs rhs
+
+def havocStmt (name : String) : BStmt :=
+  .havoc_statement default (ann name)
+
+def assertStmt (label : String) (e : BExpr) : BStmt :=
+  .assert default (ann none) (mkLabel label) e
+
+def assumeStmt (label : String) (e : BExpr) : BStmt :=
+  .assume default (mkLabel label) e
+
+def coverStmt (label : String) (e : BExpr) : BStmt :=
+  .cover default (ann none) (mkLabel label) e
+
+def callStmt (lhs : Array String) (pname : String) (args : Array BExpr) : BStmt :=
+  if lhs.isEmpty then
+    .call_unit_statement default (ann pname) (ann args)
+  else
+    .call_statement default (ann (lhs.map ann)) (ann pname) (ann args)
+
+def blockStmt (label : String) (body : Array BStmt) : BStmt :=
+  .block_statement default (ann label) (.block default (ann body))
+
+def iteStmt (cond : BExpr) (thenBody : Array BStmt) (elseBody : Array BStmt) : BStmt :=
+  let thenBlock := BooleDDM.Block.block default (ann thenBody)
+  let elseNode :=
+    if elseBody.isEmpty then
+      BooleDDM.Else.else0 default
+    else
+      .else1 default (.block default (ann elseBody))
+  .if_statement default (.condDet default cond) thenBlock elseNode
+
+private def invsFromArray (invs : Array BExpr) : BooleDDM.Invariants SourceRange :=
+  invs.foldl (fun acc e =>
+    BooleDDM.Invariants.consInvariants default e acc)
+    (.nilInvariants default)
+
+private def mkMeasure (m : Option BExpr) : Strata.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange :=
+  match m with
+  | none => ann none
+  | some m => ann (some (.measure_mk default m))
+
+def whileStmt (guard : BExpr) (measure : Option BExpr)
+    (invs : Array BExpr) (body : Array BStmt) : BStmt :=
+  .while_statement default (.condDet default guard) (mkMeasure measure)
+    (invsFromArray invs) (.block default (ann body))
+
+def forToStmt (loopVar : String) (loopTy : BType)
+    (start limit : BExpr) (measure : Option BExpr)
+    (invs : Array BExpr) (body : Array BStmt) : BStmt :=
+  let binder := MonoBind.mono_bind_mk default (ann loopVar) loopTy
+  .for_to_by_statement default binder start limit (mkMeasure measure)
+    (ann none) (invsFromArray invs) (.block default (ann body))
+
+def exitStmt (label : Option String) : BStmt :=
+  match label with
+  | some l => .exit_statement default (ann l)
+  | none   => .exit_unlabeled_statement default
+
+def returnStmt (e : Option BExpr) : BStmt :=
+  match e with
+  | some e => .return_statement default (.returnArg1 default e)
+  | none   => .return_statement default (.returnArg0 default)
+
+end VerusLean.Boole.Builder
