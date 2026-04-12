@@ -403,7 +403,7 @@ private def mapPreludeTy (key val : Typ) : Typ :=
     and prelude detection logic.  See `docs/seq-vec-pipeline.md`. -/
 
 /-- Type constructors whose semantics come from the optional Seq prelude
-    snippet in `prelude/Seq.core.st`. These trigger Seq-prelude need
+    snippet in `prelude/Seq.boole.st`. These trigger Seq-prelude need
     detection and also drive the degraded fallback path when the text prelude
     is unavailable. `nat` and its bridge helpers are intentionally excluded
     because they are supplied by the translator-managed numeric support layer,
@@ -412,7 +412,7 @@ private def seqPreludeTriggerTypeNames : List String :=
   ["Set"]
 
 /-- Type constructors declared by the optional Vec prelude snippet in
-    `prelude/Vec.core.st`. Unlike Seq, there is currently no degraded fallback
+    `prelude/Vec.boole.st`. Unlike Seq, there is currently no degraded fallback
     path for these declarations. -/
 private def vecPreludeTriggerTypeNames : List String :=
   ["Vec"]
@@ -425,9 +425,9 @@ private def vecPreludeTriggerTypeNames : List String :=
     stub generation (`mkPreludeFallbackFuncDecl?`).
 
     Each entry carries an `owner` tag:
-    - `.seqPrelude`:  declared by `prelude/Seq.core.st` — used for prelude
+    - `.seqPrelude`:  declared by `prelude/Seq.boole.st` — used for prelude
       ownership checks and fallback stub generation when the prelude is absent.
-    - `.vecPrelude`:  declared by `prelude/Vec.core.st`.
+    - `.vecPrelude`:  declared by `prelude/Vec.boole.st`.
     - `.natSupport`:  translator-managed `nat` bridge helpers.
     - `.seqInlined`:  Seq operations that the translator inlines to Strata
       `Sequence.*` built-ins — no declaration is emitted, but the type
@@ -435,8 +435,8 @@ private def vecPreludeTriggerTypeNames : List String :=
     - `.translator`:  translator-internal (casts, collection helpers). -/
 
 inductive KnownFnOwner where
-  | seqPrelude   -- declared by prelude/Seq.core.st
-  | vecPrelude   -- declared by prelude/Vec.core.st
+  | seqPrelude   -- declared by prelude/Seq.boole.st
+  | vecPrelude   -- declared by prelude/Vec.boole.st
   | natSupport   -- translator-managed nat/int bridge helpers
   | seqInlined   -- inlined to Sequence.* built-ins, no declaration emitted
   | translator   -- translator-generated (casts, collection ops)
@@ -479,7 +479,7 @@ private def knownFnRegistry : List (String × KnownFnEntry) :=
   , ("Seq_lib_to_set",   ⟨[seq t], set t, .seqPrelude⟩)
   , ("Set_finite",       ⟨[set t], .Bool, .seqPrelude⟩)
   , ("nat_to_int",       ⟨[.Nat], .Int, .natSupport⟩)
-  , ("int_to_nat",       ⟨[.Int], .Nat, .natSupport⟩)
+  , ("int_to_nat",       ⟨[.Int], .Nat, .seqPrelude⟩)
   -- Vec prelude declarations
   , ("Vec_len",          ⟨[vec t], .UInt usizeBitWidth, .vecPrelude⟩)
   , ("Vec_index",        ⟨[vec t, .UInt usizeBitWidth], t, .vecPrelude⟩)
@@ -520,7 +520,7 @@ private def isVecPreludeOwnedValue (name : String) : Bool :=
   | none => false
 
 private def seqPreludeProvidedTypeNames : List String :=
-  seqPreludeTriggerTypeNames
+  seqPreludeTriggerTypeNames ++ ["nat"]
 
 private def vecPreludeProvidedTypeNames : List String :=
   vecPreludeTriggerTypeNames
@@ -4631,7 +4631,7 @@ private def finalizePreludeAssembly
   let finalOpRefs := collectDeclOpRefs decls0
   let neededPreludes := detectTextPreludeNeeds finalTypeRefs finalOpRefs
   if neededPreludes.vec && !availableTextPreludes.vec then
-    throw "Vec prelude required but prelude/Vec.core.st is unavailable"
+    throw "Vec prelude required but prelude/Vec.boole.st is unavailable"
   let seqPreludeFallbackDecls :=
     if neededPreludes.seq && !availableTextPreludes.seq then
       neededSeqPreludeFallbackDecls finalTypeRefs finalOpRefs (decls0.map declNameString)
@@ -4694,7 +4694,7 @@ private def assembleSupportLayer
 /-- Translates VLIR declarations to a Core program, a side map of
     function-name → decreases Core expressions (for Boole-only comments), a
     flag indicating whether the emitted output should prepend the text Seq
-    prelude from `prelude/Seq.core.st`, and explicit output-prep metadata such
+    prelude from `prelude/Seq.boole.st`, and explicit output-prep metadata such
     as Boole-prunable helper declarations. -/
 def declsToProgram (decls : List Decl)
     (callSiteTypes : Std.HashMap Ident (List Typ × Typ) := {})

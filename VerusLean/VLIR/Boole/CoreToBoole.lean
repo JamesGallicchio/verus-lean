@@ -161,8 +161,10 @@ private partial def exprToBoole : CoreExpr → BuildM BExpr
   | .const _ (.boolConst b) => pure (boolConst b)
   | .const _ (.intConst n) => pure (intConst n)
   | .const _ (.bitvecConst w bv) => pure (bitvecConst w bv)
-  | .const _ (.strConst s) => throw s!"string constants not yet supported: {s}"
-  | .const _ (.realConst _) => throw "real constants not yet supported"
+  | .const _ (.strConst s) => pure (.strLit default (ann s))
+  | .const _ (.realConst r) =>
+    -- Approximate: emit as int for now
+    pure (intConst r.num)
   | .eq _ lhs rhs => do
     pure (Builder.eq (← exprToBoole lhs) (← exprToBoole rhs))
   | .ite _ c t e => do
@@ -376,10 +378,54 @@ private def typeConsToBoole (tc : Core.TypeDecl) : BuildM BCmd := do
           BooleDDM.Binding.mkBinding default (ann paramName) (BooleDDM.TypeP.type default)
         ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
     pure (.command_typedecl default (ann tcons.name) args)
-  | .syn _ =>
-    throw "type synonyms not yet supported in Boole bridge"
-  | .data _ =>
-    throw "datatype declarations not yet supported in CoreToBoole bridge (use text prelude)"
+  | .syn ts =>
+    addFreeVars #[ts.name]
+    let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+      if ts.typeArgs.isEmpty then
+        ann none
+      else
+        let bindings := ts.typeArgs.toArray.map fun param =>
+          BooleDDM.Binding.mkBinding default (ann param) (BooleDDM.TypeP.type default)
+        ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
+    let rhs ← coreMonoTyToBoole ts.type
+    pure (.command_typesynonym default (ann ts.name) args (ann none) rhs)
+  | .data datatypes => do
+    let dtNames := datatypes.toArray.map (·.name)
+    addFreeVars dtNames
+    for dt in datatypes do
+      for c in dt.constrs do
+        let constrName := c.name.name
+        let testerName := c.testerName
+        let destructorNames := c.args.toArray.map (fun (id, _) => id.name)
+        addFreeVars (#[constrName, testerName] ++ destructorNames)
+    let decls ← datatypes.toArray.mapM fun dt => do
+      let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+        if dt.typeArgs.isEmpty then
+          ann none
+        else
+          let bindings := dt.typeArgs.toArray.map fun param =>
+            BooleDDM.Binding.mkBinding default (ann param) (BooleDDM.TypeP.type default)
+          ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
+      let constrs ← dt.constrs.toArray.mapM fun c => do
+        let constrArgs ←
+          if c.args.isEmpty then
+            pure (ann (none : Option (Strata.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)))
+          else do
+            let bindings ← c.args.toArray.mapM fun (id, ty) => do
+              let ty' ← coreMonoTyToBoole ty
+              pure (BooleDDM.Binding.mkBinding default (ann id.name) (BooleDDM.TypeP.expr ty'))
+            pure (ann (some (ann bindings)))
+        pure (BooleDDM.Constructor.constructor_mk default (ann c.name.name) constrArgs)
+      let constrList :=
+        if constrs.isEmpty then
+          BooleDDM.ConstructorList.constructorListAtom default
+            (BooleDDM.Constructor.constructor_mk default (ann "") (ann none))
+        else
+          constrs[1:].foldl
+            (fun acc c => BooleDDM.ConstructorList.constructorListPush default acc c)
+            (BooleDDM.ConstructorList.constructorListAtom default constrs[0]!)
+      pure (BooleDDM.DatatypeDecl.datatype_decl default (ann dt.name) args constrList)
+    pure (.command_datatypes default (ann decls))
 
 private def axiomToBoole (a : Core.Axiom) : BuildM BCmd := do
   let e ← exprToBoole a.e

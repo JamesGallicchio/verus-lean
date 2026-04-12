@@ -948,7 +948,7 @@ if $run_boole; then
     if [ -n "$json_source" ] && [ -f "$json_source" ]; then
       tmp_boole="$(mktemp "${TMPDIR:-/tmp}/verus-boole.${base}.XXXXXX.boole.st")"
       set +e
-      run_cmd_quiet "$VERUS_LEAN" core --dialect boole "$json_source" "$tmp_boole"
+      run_cmd_quiet "$VERUS_LEAN" boole "$json_source" "$tmp_boole"
       boole_rc=$?
       set -e
       if [ $boole_rc -eq 0 ]; then

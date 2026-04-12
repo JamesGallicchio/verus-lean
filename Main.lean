@@ -57,6 +57,23 @@ private def readSeqPreludeBody? : IO (Option String) :=
 private def readVecPreludeBody? : IO (Option String) :=
   readPreludeBody? "Vec.core.st"
 
+/-- Read a Boole prelude file. Unlike Core preludes, these don't need
+    header stripping — just comment removal. -/
+private def readBoolePreludeBody? (fileName : String) : IO (Option String) := do
+  let cwd ← IO.currentDir
+  let path := cwd / "prelude" / fileName
+  if ← path.pathExists then
+    let text ← IO.FS.readFile path
+    pure <| some <| stripLineComments text
+  else
+    pure none
+
+private def readSeqBoolePreludeBody? : IO (Option String) :=
+  readBoolePreludeBody? "Seq.boole.st"
+
+private def readVecBoolePreludeBody? : IO (Option String) :=
+  readBoolePreludeBody? "Vec.boole.st"
+
 private def prependPrelude (dialect : ToCore.OutputDialect) (prelude body : String) : String :=
   s!"{programHeader dialect}\n\n{prelude.trimAsciiEnd.toString}\n\n{stripProgramHeader dialect body}"
 
@@ -259,6 +276,9 @@ unsafe def genBooleFromFile
     (printFn : String → IO Unit) : IO Unit := do
   let target := System.FilePath.mk path
   let bundleFiles ← collectJsonBundleFiles target
+  let seqBooleBody? ← readSeqBoolePreludeBody?
+  let vecBooleBody? ← readVecBoolePreludeBody?
+  -- Still read .core.st for the availability flag used by declsToProgram
   let seqPreludeBody? ← readSeqPreludeBody?
   let vecPreludeBody? ← readVecPreludeBody?
   let mut allDecls : List Decl := []
@@ -280,7 +300,7 @@ unsafe def genBooleFromFile
   | .ok lowered =>
     let seqPreludeNeeded := lowered.neededPreludes.seq
     let vecPreludeNeeded := lowered.neededPreludes.vec
-    let preludeText? := assemblePreludeText seqPreludeNeeded vecPreludeNeeded seqPreludeBody? vecPreludeBody?
+    let preludeText? := assemblePreludeText seqPreludeNeeded vecPreludeNeeded seqBooleBody? vecBooleBody?
     match ← Boole.CoreToBoole.renderBooleProgram lowered (preludeText? := preludeText?) with
     | .ok rendered => printFn rendered
     | .error e => failWith e
