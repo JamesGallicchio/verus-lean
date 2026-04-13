@@ -169,15 +169,18 @@ private def bindsToDeclList (bs : Array (String × BType)) : BooleDDM.DeclList S
       init
 
 def forallExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
-  .forall_unicode default (bindsToDeclList binds) body
+  if binds.isEmpty then body else .forall_unicode default (bindsToDeclList binds) body
 
 def existsExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
-  .exists_unicode default (bindsToDeclList binds) body
+  if binds.isEmpty then body else .exists_unicode default (bindsToDeclList binds) body
 
 /-! ## Statement constructors -/
 
 private def mkLabel (label : String) : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange :=
-  ann (some (.label default (ann label)))
+  if label.isEmpty || label == "||" then
+    ann none
+  else
+    ann (some (.label default (ann label)))
 
 def varStmt (name : String) (ty : BType) : BStmt :=
   let bind := Bind.bind_mk default (ann name) (ann none) ty

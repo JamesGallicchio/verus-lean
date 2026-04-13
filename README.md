@@ -5,8 +5,8 @@ that allows for the export of verus definitions and verification conditions to L
 
 This repository now supports two main translation paths:
 - `Verus -> Lean`
-- `Verus -> Strata Core` (and `strata verify`)
-- `Verus -> Boole` (via Strata Core wrapping)
+- `Verus -> Boole` (direct VLIR -> BooleDDM)
+- `Verus -> Strata Core` is a legacy/testing path
 
 ## Building
 
@@ -33,7 +33,7 @@ or perhaps even better, `ln -s .lake/build/bin/verus-lean verus-lean`.)
 
 You can run the compiled `verus-lean` binary directly:
 ```
-./lake/build/bin/verus-lean <path/to/serialized_verus.json> [path/to/lean/output.lean]
+./lake/build/bin/verus-lean boole <path/to/serialized_verus.json> [path/to/output.boole.st]
 ```
 Alternatively, you can use a Python script that works in concert with my verus fork.
 (The script assumes that this fork is on your `$PATH`, or is (symlinked) at the root level of the project.)
@@ -90,8 +90,8 @@ BOOLE_DIR=/path/to/boole-output ./tests/run_tests.sh --boole /path/to/file.rs
 Stage options:
 - `--verus`: export Verus `.rs` to JSON
 - `--boogie`: translate JSON to Strata Core (`.core.st`)
-- `--boole`: generate Boole `.lean` end-to-end from target
-  (`.rs -> JSON -> Core -> Boole`, `.json -> Core -> Boole`, `.core.st -> Boole`)
+- `--boole`: generate Boole `.boole.st` plus a Lean verifier wrapper from target
+  (`.rs -> JSON -> Boole`, `.json -> Boole`)
 - `--lean`: translate Lean JSON to Lean output
 - `--verify`: run `strata verify` on generated Core
 - `--all`: run `--verus --boogie --verify`
@@ -109,10 +109,9 @@ Other options:
 - `.core.st` (or legacy `.boogie.st`) for verify
 
 `--boole` is end-to-end by target type:
-- `.rs`: runs Verus export + Core translation + Boole wrapping
-- `.json`: runs Core translation + Boole wrapping
-- `.core.st`: runs Boole wrapping only
-- no target: wraps existing Core files under `tests/BoogieFiles/*`
+- `.rs`: runs Verus export + Boole generation
+- `.json`: runs Boole generation
+- no target: generates Boole files from existing JSON bundles
 
 `target_path` may be relative or absolute.
 
@@ -148,17 +147,14 @@ Other options:
 # From existing JSON to Boole output
 ./tests/run_tests.sh --boole tests/JSONFilesBoogie/vlir-tests/FindMax/FindMax.json
 
-# Wrap one existing Core file into Boole output
-./tests/run_tests.sh --boole tests/BoogieFiles/vlir-tests/FindMax.core.st
-
 # Write Boole output to a custom file path
-./tests/run_tests.sh --boole tests/VerusFiles/FindMax.rs --out /tmp/FindMax.lean
+./tests/run_tests.sh --boole tests/VerusFiles/FindMax.rs --out /tmp/FindMax.boole.st
 ```
 
 
 Default Boole output directory:
-- `../cslib/Cslib/Languages/Boole/tests` (if `../cslib` exists)
-- otherwise `tests/BooleFiles`
+- Boole source files: `tests/BooleFiles`
+- Lean verifier wrappers: `tests/BoolePrograms`
 
 
 ## Contributors

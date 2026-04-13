@@ -31,16 +31,17 @@ Usage: tests/run_tests.sh [options] [target]
 
 Stages:
   --verus          Run Verus export on .rs input(s) to generate JSON files
-  --boogie         Run verus-lean on JSONFilesBoogie to generate Core files
-  --boole          Generate Boole files (.rs -> JSON -> Core -> Boole, as needed)
-  --dialect <d>    Alias for output stage selection:
-                   `core` = `--boogie`, `boole` = `--boole`
+  --boogie         (deprecated) Legacy Core-dialect generation; verus-lean
+                   no longer emits Core, so this stage is a no-op today
+  --boole          Generate Boole files (.rs -> JSON -> Boole, as needed)
+  --dialect <d>    Alias for output stage selection: `boole` = `--boole`
   --lean           Run verus-lean on JSONFilesLean to generate LeanFiles
-  --verify         Run strata verify on Core files
-  --all            Run Verus + Boogie + Verify across all suites
-  --solver <name>  strata verify solver (default: cvc5)
+  --verify         Run Strata Boole verification (lake env lean) on the
+                   generated .lean wrapper for a target
+  --all            Run Verus + Boole + Verify across all suites
+  --solver <name>  solver used by Strata verification (default: cvc5)
   --solver-timeout <sec>
-                   strata verify timeout in seconds
+                   Strata verification timeout in seconds
   --out <path>     Output file path for single-target runs
                    (applies to one stage: --lean, --boogie, or --boole)
   --verbose        Show full CLI output for external commands
@@ -48,17 +49,14 @@ Stages:
 
 Target:
   Optional and single-case only.
-  Use a file path target: *.rs, *.json, *.core.st, *.boogie.st
+  Use a file path target: *.rs, *.json, *.lean
   With --boole:
-    *.rs      runs Verus export + Core translation + Boole generation
-    *.json    runs Core translation + Boole generation
-    *.core.st wraps an existing Core file, or uses matching JSON when available
-    (no target) uses generated cases under tests/BoogieFiles/*
-
-Environment variables:
-  VERUS_LEAN_OFFICIAL=1
-    Use Strata's official pretty-printer (Core.formatProgram) instead of
-    the local one when generating Core files.
+    *.rs      runs Verus export + Boole generation
+    *.json    runs Boole generation
+    (no target) uses generated JSON cases under tests/JSONFilesBoogie/*
+  With --verify:
+    *.rs / *.json  resolves to the corresponding Boole .lean wrapper
+    *.lean         verifies the wrapper directly
 
 EOF
 }
@@ -299,6 +297,29 @@ resolve_json_file_for_core_path() {
   return 1
 }
 
+boole_wrapper_dir_for_suite() {
+  case "$1" in
+    vlir-tests) echo "$BOOLE_PROGRAMS_DIR/vlir-tests" ;;
+    *) echo "$BOOLE_PROGRAMS_DIR/verus-examples" ;;
+  esac
+}
+
+resolve_boole_wrapper_for_rs_path() {
+  local p="$1"
+  local suite case_key
+  suite="$(infer_suite_from_rs_path "$p")"
+  case_key="$(case_key_from_rs_path "$p")"
+  echo "$(boole_wrapper_dir_for_suite "$suite")/${case_key}.lean"
+}
+
+resolve_boole_wrapper_for_json_path() {
+  local p="$1"
+  local suite case_key
+  suite="$(infer_suite_from_json_path "$p")"
+  case_key="$(case_key_from_json_path "$p")"
+  echo "$(boole_wrapper_dir_for_suite "$suite")/${case_key}.lean"
+}
+
 has_primary_module_artifact() {
   local artifact_path="$1"
   local suffix="$2"
@@ -390,6 +411,35 @@ run_strata_verify() {
       return $rc
     fi
   fi
+}
+
+# Run Strata Boole verification on a .lean wrapper via `lake env lean`.
+# The wrapper's `#eval` invokes the Boole verifier. A run is considered a
+# pass iff lake exits 0 AND no `error:` lines appear (some Strata gaps
+# emit `error:` without a non-zero exit). Callers are expected to wrap
+# this call with `set +e` / `set -e` so the non-zero return can propagate.
+run_boole_verify() {
+  local lean_file="$1"
+  local output_mode="${2:-concise}"
+  local base verify_log rc
+  base="$(basename "$lean_file")"
+  if [ "$output_mode" = "full" ] || $verbose; then
+    (cd "$STRATA_DIR" && lake env lean "$lean_file")
+    return $?
+  fi
+  verify_log="$(mktemp)"
+  (cd "$STRATA_DIR" && lake env lean "$lean_file") >"$verify_log" 2>&1
+  rc=$?
+  if [ $rc -eq 0 ] && ! grep -q "error:" "$verify_log"; then
+    echo "$base: ✅"
+    rm -f "$verify_log"
+    return 0
+  fi
+  echo "$base: ❌"
+  grep "error:" "$verify_log" | head -3 || true
+  rm -f "$verify_log"
+  [ $rc -eq 0 ] && rc=1
+  return $rc
 }
 
 run_verus_export() {
@@ -566,7 +616,7 @@ run_verus_lean_jsons() {
     fi
   else
     if [ ${#failures[@]} -gt 0 ]; then
-      echo "Core generation issues: ${failures[*]}"
+      echo "Core generation issues (legacy --boogie): ${failures[*]}"
     fi
     if ! $any_json; then
       if [ "$mode" = "boogie" ]; then
@@ -595,6 +645,7 @@ run_all_flag=false
 target_rs_path=""
 target_json_path=""
 target_core_path=""
+target_lean_path=""
 custom_out_path=""
 custom_out_mode=""
 declare -a all_suite_rs_files=()
@@ -691,7 +742,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --verbose) verbose=true; shift ;;
-    --all) run_verus=true; run_boogie=true; run_verify=true; run_all_flag=true; shift ;;
+    --all) run_verus=true; run_boole=true; run_verify=true; run_all_flag=true; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; while [ $# -gt 0 ]; do positional+=("$1"); shift; done ;;
     --*) echo "Unknown option: $1"; usage; exit 1 ;;
@@ -723,10 +774,11 @@ if [ ${#positional[@]} -eq 1 ]; then
   case "$candidate_abs" in
     *.rs) target_rs_path="$candidate_abs" ;;
     *.json) target_json_path="$candidate_abs" ;;
+    *.lean) target_lean_path="$candidate_abs" ;;
     *.core.st|*.boogie.st) target_core_path="$candidate_abs" ;;
     *)
       echo "Unsupported target file type: $candidate"
-      echo "Expected .rs, .json, or .core.st/.boogie.st"
+      echo "Expected .rs, .json, .lean, or .core.st/.boogie.st"
       exit 1
       ;;
   esac
@@ -766,7 +818,7 @@ if ! $run_verus && ! $run_boogie && ! $run_boole && ! $run_lean && ! $run_verify
   exit 1
 fi
 
-if $run_all_flag && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ] && [ -z "$target_core_path" ]; then
+if $run_all_flag && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ] && [ -z "$target_core_path" ] && [ -z "$target_lean_path" ]; then
   while IFS= read -r file; do
     [ -n "$file" ] || continue
     all_suite_rs_files+=("$file")
@@ -778,7 +830,7 @@ mkdir -p "$JSON_LEAN_DIR" "$JSON_BOOGIE_DIR" "$JSON_BOOGIE_EXAMPLES_DIR" "$JSON_
 
 if $run_verus; then
   echo "=== Step 1: Verus -> JSON ==="
-  if [ -n "$target_json_path" ] || [ -n "$target_core_path" ]; then
+  if [ -n "$target_json_path" ] || [ -n "$target_core_path" ] || [ -n "$target_lean_path" ]; then
     echo "--verus requires an .rs target path (or no target)."
     exit 1
   fi
@@ -860,9 +912,13 @@ fi
 
 if $run_boogie || $run_lean; then
   echo ""
-  echo "=== Step 2: JSON -> Strata Core ==="
+  echo "=== Step 2: JSON -> verus-lean output (legacy) ==="
   if [ -n "$target_core_path" ]; then
-    echo "--boogie/--lean target must be .rs or .json (not .core.st)."
+    echo "--boogie/--lean target must be .rs or .json (not .core.st/.boogie.st)."
+    exit 1
+  fi
+  if [ -n "$target_lean_path" ]; then
+    echo "--boogie/--lean does not take a .lean target; use --verify instead."
     exit 1
   fi
   if [ ! -x "$VERUS_LEAN" ]; then
@@ -880,6 +936,10 @@ fi
 if $run_boole; then
   echo ""
   echo "=== Step 2: JSON -> Boole ==="
+  if [ -n "$target_core_path" ] || [ -n "$target_lean_path" ]; then
+    echo "--boole target must be .rs or .json (not .core.st/.boogie.st/.lean)."
+    exit 1
+  fi
 
   # Find JSON source
   json_source=""
@@ -967,62 +1027,57 @@ fi
 
 if $run_verify; then
   echo ""
-  echo "=== Step 3: strata verify ==="
-  if ! $run_boogie; then
-    if [ -n "$target_core_path" ]; then
-      echo "Note: verifying an existing Core file only; no regeneration from .rs/.json."
-    elif [ -n "$target_rs_path" ] || [ -n "$target_json_path" ]; then
-      echo "Note: --verify without --boogie uses the existing generated Core file."
-    fi
-  fi
+  echo "=== Step 3: Strata Boole verify ==="
   if [ ! -d "$STRATA_DIR" ]; then
     echo "Missing Strata repo at $STRATA_DIR"
     exit 1
   fi
   if [ -n "$target_core_path" ]; then
+    # Legacy Core-dialect verification path (.core.st / .boogie.st).
+    # The Core pipeline is deprecated; this branch exists only for targets
+    # already on disk from the old flow.
+    echo "Note: verifying a legacy Core file via 'lake exe strata verify'."
     case "$target_core_path" in
-      *.core.st|*.boogie.st)
-        case "$target_core_path" in
-          /*) verify_path="$target_core_path" ;;
-          *) verify_path="$ROOT_DIR/$target_core_path" ;;
-        esac
-        ;;
-      *) echo "Target is not a .core.st/.boogie.st file: $target_core_path"; exit 1 ;;
+      /*) verify_path="$target_core_path" ;;
+      *) verify_path="$ROOT_DIR/$target_core_path" ;;
     esac
     echo "Verify: $(basename "$verify_path")"
     run_strata_verify "$verify_path" "full"
+  elif [ -n "$target_lean_path" ]; then
+    case "$target_lean_path" in
+      /*) verify_path="$target_lean_path" ;;
+      *) verify_path="$ROOT_DIR/$target_lean_path" ;;
+    esac
+    echo "Verify: $(basename "$verify_path")"
+    run_boole_verify "$verify_path" "full"
   elif [ -n "$target_rs_path" ] || [ -n "$target_json_path" ]; then
     if [ -n "$target_rs_path" ]; then
-      file="$(resolve_core_file_for_rs_path "$target_rs_path" || true)"
+      verify_path="$(resolve_boole_wrapper_for_rs_path "$target_rs_path")"
     else
-      file="$(resolve_core_file_for_json_path "$target_json_path" || true)"
+      verify_path="$(resolve_boole_wrapper_for_json_path "$target_json_path")"
     fi
-    if [ -z "$file" ]; then
-      echo "Missing Core input for target path."
+    if [ -z "$verify_path" ] || [ ! -f "$verify_path" ]; then
+      echo "Missing Boole .lean wrapper for target: ${target_rs_path:-$target_json_path}"
+      echo "Run with --boole first (or use --boole --verify together)."
       exit 1
     fi
-    case "$file" in
-      /*) verify_path="$file" ;;
-      *) verify_path="$ROOT_DIR/$file" ;;
-    esac
     echo "Verify: $(basename "$verify_path")"
-    run_strata_verify "$verify_path" "full"
+    run_boole_verify "$verify_path" "full"
   else
     any=false
     verify_rc=0
     if $run_all_flag; then
       for rs_path in "${all_suite_rs_files[@]}"; do
-        suite="$(infer_suite_from_rs_path "$rs_path")"
+        verify_path="$(resolve_boole_wrapper_for_rs_path "$rs_path")"
         case_key="$(case_key_from_rs_path "$rs_path")"
-        file="$(resolve_core_file_for_case "$suite" "$case_key" || true)"
         any=true
-        if [ -z "$file" ] || [ ! -f "$file" ]; then
-          echo "${case_key}.core.st: missing"
+        if [ -z "$verify_path" ] || [ ! -f "$verify_path" ]; then
+          echo "${case_key}.lean: missing"
           verify_rc=1
           continue
         fi
         set +e
-        run_strata_verify "$file" "concise"
+        run_boole_verify "$verify_path" "concise"
         rc=$?
         set -e
         if [ $rc -ne 0 ]; then
@@ -1030,20 +1085,18 @@ if $run_verify; then
         fi
       done
     else
-      for scan_dir in "$CORE_VLIR_DIR" "$CORE_EXAMPLES_DIR"; do
+      for scan_dir in "$BOOLE_PROGRAMS_DIR/vlir-tests" "$BOOLE_PROGRAMS_DIR/verus-examples"; do
         [ -d "$scan_dir" ] || continue
-        for file in "$scan_dir"/*.core.st; do
+        for file in "$scan_dir"/*.lean; do
           if [ ! -f "$file" ]; then
             break
           fi
-          if [ -z "$target_core_path" ] && [ -z "$target_rs_path" ] && [ -z "$target_json_path" ]; then
-            if has_primary_module_artifact "$file" ".core.st"; then
-              continue
-            fi
+          if has_primary_module_artifact "$file" ".lean"; then
+            continue
           fi
           any=true
           set +e
-          run_strata_verify "$file" "concise"
+          run_boole_verify "$file" "concise"
           rc=$?
           set -e
           if [ $rc -ne 0 ]; then
@@ -1053,7 +1106,7 @@ if $run_verify; then
       done
     fi
     if ! $any; then
-      echo "No Core files found in $BOOGIE_DIR"
+      echo "No Boole .lean wrappers found in $BOOLE_PROGRAMS_DIR"
       exit 1
     fi
     if [ $verify_rc -ne 0 ]; then

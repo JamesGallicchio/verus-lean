@@ -71,6 +71,41 @@ private def seqPreludeProvidedNames : List String :=
 private def vecPreludeProvidedNames : List String :=
   ["Vec", "Vec_ctor", "Vec_data", "Vec_len", "Vec_index", "Vec_view"]
 
+private def booleCommandRank (cmd : Boole.Builder.BCmd) : Nat :=
+  match cmd with
+  | .command_fndef .. => 2
+  | .command_procedure _ _ _ _ _ _ bodyAnn => if bodyAnn.val.isSome then 2 else 1
+  | .command_typedecl .. => 2
+  | .command_typesynonym .. => 2
+  | .command_datatypes .. => 2
+  | _ => 1
+
+private def maxRankForName (cmds : List Boole.Builder.BCmd) (name : String) : Nat :=
+  cmds.foldl (init := 0) fun acc cmd =>
+    if Translate.cmdDeclName? cmd == some name then
+      Nat.max acc (booleCommandRank cmd)
+    else
+      acc
+
+/-- Module shards can contain both an imported declaration and the defining
+    body for the same symbol. Keep one named command, preferring definitions
+    over declarations, before building a Strata global context. -/
+private def dedupeNamedCommands (cmds : Array Boole.Builder.BCmd) :
+    Array Boole.Builder.BCmd :=
+  let all := cmds.toList
+  let rec go (seen : List String) : List Boole.Builder.BCmd → List Boole.Builder.BCmd
+    | [] => []
+    | cmd :: rest =>
+        match Translate.cmdDeclName? cmd with
+        | none => cmd :: go seen rest
+        | some name =>
+            let bestRank := maxRankForName all name
+            if booleCommandRank cmd == bestRank && !seen.contains name then
+              cmd :: go (name :: seen) rest
+            else
+              go seen rest
+  (go [] all).toArray
+
 unsafe def genBooleFromFile
     (path : String)
     (printFn : String → IO Unit) : IO Unit := do
@@ -86,28 +121,49 @@ unsafe def genBooleFromFile
     | .error e =>
       if f == target then failWith e
       else IO.eprintln s!"warning: skipping shard {f}: {e}"
-  match Translate.translateDecls allDecls with
+  -- Two-pass approach:
+  -- 1. Probe translate (without prelude) to discover which prelude names are referenced.
+  -- 2. Parse the needed preludes to get their operations and declared names.
+  -- 3. Re-translate with prelude names pre-registered, so our fvar indices
+  --    align with the indices the prelude parsing assigned.
+  -- 4. Build a `Strata.Program` whose `globalContext` contains our BuildCtx's
+  --    free vars in order (plus any extra names from parsed datatype ops that
+  --    the prelude parser registered implicitly). This lets us use Strata's
+  --    official `Program.toString` formatter instead of a custom emitter.
+  match Translate.translateDeclsWithCtx allDecls with
   | .error e => failWith e
-  | .ok cmds =>
-    let preludeText? := assemblePreludeText seqPreludeBody?.isSome vecPreludeBody?.isSome
+  | .ok (_, probeCtx) =>
+    let referencedNames := probeCtx.allFreeVars.toList
+    let needsSeq := seqPreludeProvidedNames.any (fun n => referencedNames.contains n) ||
+                    referencedNames.any (fun n => n == "Sequence" || n.startsWith "Sequence.")
+    let needsVec := vecPreludeProvidedNames.any (fun n => referencedNames.contains n)
+    let preludeText? := assemblePreludeText
+        (needsSeq && seqPreludeBody?.isSome)
+        (needsVec && vecPreludeBody?.isSome)
         seqPreludeBody? vecPreludeBody?
-    let preludeProvides : List String :=
-      (if seqPreludeBody?.isSome then seqPreludeProvidedNames else []) ++
-      (if vecPreludeBody?.isSome then vecPreludeProvidedNames else [])
-    let cmds := cmds.filter fun cmd =>
-      match Translate.cmdDeclName? cmd with
-      | some name => !preludeProvides.contains name
-      | none => true
     let preludeResult ←
       match preludeText? with
       | some text => Boole.Emit.loadPrelude text
       | none => pure (.ok (#[], #[]))
     match preludeResult with
     | .error e => failWith e
-    | .ok (preludeOps, _) =>
-      let bodyOps := Boole.Emit.commandsToOps cmds
-      let pgm := Boole.Emit.mkProgram preludeOps bodyOps
-      printFn (Boole.Emit.programToString pgm)
+    | .ok (preludeOps, preludeNames) =>
+      -- Pre-register prelude names so our fvar indices align
+      match Translate.translateDeclsWithPrelude allDecls preludeNames with
+      | .error e => failWith e
+      | .ok (cmds, finalCtx) =>
+        -- Filter out user commands whose names are already in the prelude
+        let preludeSet := preludeNames.toList
+        let cmds := cmds.filter fun cmd =>
+          match Translate.cmdDeclName? cmd with
+          | some name => !preludeSet.contains name
+          | none => true
+        let cmds := dedupeNamedCommands cmds
+        let bodyOps := Boole.Emit.commandsToOps cmds
+        -- Use Strata's official Boole.formatProgram with explicit GlobalContext
+        match Boole.Emit.renderProgram preludeOps bodyOps finalCtx.allFreeVars with
+        | .ok output => printFn output
+        | .error e => failWith e
 
 unsafe def main : List String → IO Unit
   | ["boole", path] => genBooleFromFile path IO.println

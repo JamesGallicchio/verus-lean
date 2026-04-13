@@ -232,6 +232,9 @@ def isGhostPervasiveCallName (fn : Ident) : Bool :=
 def envFromDecls (decls : List (String × Typ)) : VarEnv :=
   decls.foldl (init := (∅ : VarEnv)) (fun acc (n, t) => acc.insert n t)
 
+private def extendEnv (env : VarEnv) (decls : List (String × Typ)) : VarEnv :=
+  decls.foldl (init := env) (fun acc (n, t) => acc.insert n t)
+
 def boundIndex? (bound : BoundEnv) (name : String) : Option Nat :=
   let rec go (i : Nat) (rest : BoundEnv) : Option Nat :=
     match rest with
@@ -1241,7 +1244,337 @@ def shouldDropAssignAsForLoopScaffolding (lhs : LValue) : Bool :=
   | none => false
 
 def shouldDropForLoopScaffoldingLocal (name : String) : Bool :=
-  name.startsWith "VERUS_ghost_" || name == "VERUS_loop_result"
+  name.startsWith "VERUS_" || name.startsWith "decrease"
+
+def isForLoopScaffoldingVar (name : String) : Bool :=
+  name.startsWith "VERUS_" || name.startsWith "tmp" || name.startsWith "decrease"
+
+/-! ## For-Loop Recovery -/
+
+/-- Check whether an identifier looks like an `Iterator::next` call. -/
+private def isIteratorNextCall : Stm → Bool
+  | .Call fn _ _ => isIteratorNextName fn
+  | _ => false
+
+/-- Check whether an expression is `IsVariant(Option, Some, ...)`. -/
+private def isOptionIsSomeCheck : Exp → Bool
+  | .Unary (.IsVariant dt "Some") _ =>
+    let s := dt.toString.toLower
+    s.endsWith "option" || s.contains "option"
+  | _ => false
+
+/-- Check whether an expression is `Proj(Option, Some, 0, ...)` (i.e. unwrapping Some). -/
+private def isOptionSomeProj : Exp → Bool
+  | .Unary (.Proj dt "Some" "0" _ _) _ =>
+    let s := dt.toString.toLower
+    s.endsWith "option" || s.contains "option"
+  | _ => false
+
+/-- Flatten nested singleton blocks. -/
+private partial def flattenBody : Stm → List Stm
+  | .Block stms => stms.flatMap flattenBody
+  | s => [s]
+
+/-- Structure holding extracted for-loop information from the loop body. -/
+structure ForLoopBodyInfo where
+  loopVarName : String
+  loopVarTy : Typ
+  userBody : List Stm
+deriving Repr
+
+/--
+  Try to extract for-loop structure from the loop body.
+
+  The for-loop body after Verus desugaring follows this pattern (with some nesting):
+  1. Call Iterator::next on the exec iterator
+  2. If Option::is_Some(result):
+       - Assign loop_var := Option::Some_0(result)
+       - User body
+     Else:
+       - Break
+  3. Iterator update assignments
+
+  We try to find the If with the Option check, extract the loop variable assignment
+  and the user body from the then-branch.
+-/
+private partial def matchForLoopBody? (body : Stm) : Option ForLoopBodyInfo := do
+  let stms := flattenBody body
+  -- Find the If statement with the Option::is_Some check
+  let (ifStm, postIfStms) ← findOptionIf stms
+  -- Extract from the if statement
+  let (cond, thenBranch, elseBranch) ← match ifStm with
+    | .If c b1 b2 => some (c, b1, b2)
+    | _ => none
+  -- Verify condition is Option::is_Some
+  guard (isOptionIsSomeCheck cond)
+  -- Verify else branch contains a break
+  guard (hasBreak elseBranch)
+  -- First try: look for the loop variable assignment inside the then-branch
+  let thenStms := flattenBody thenBranch
+  match extractLoopVarFromThen thenStms with
+  | some (loopVarName, loopVarTy, userBodyInThen) =>
+    let userBody := userBodyInThen ++ filterScaffoldingStms postIfStms
+    some { loopVarName, loopVarTy, userBody }
+  | none =>
+    -- Second try: the loop variable might be assigned AFTER the If statement
+    -- Pattern: If(..., Block[VERUS_loop_val := ..., VERUS_loop_next := ...], Block[Break])
+    --          i := VERUS_loop_next (or VERUS_loop_val)
+    --          <user body>
+    match findLoopVarAfterIf postIfStms with
+    | some (loopVarName, loopVarTy, userBody) =>
+      some { loopVarName, loopVarTy, userBody }
+    | none => none
+where
+  findOptionIf (stms : List Stm) : Option (Stm × List Stm) :=
+    let rec go (rest : List Stm) : Option (Stm × List Stm) :=
+      match rest with
+      | [] => none
+      | s :: tail =>
+        match s with
+        | .If cond _ _ =>
+          if isOptionIsSomeCheck cond then some (s, tail)
+          else go tail
+        | .Block inner =>
+          match go (flattenBody (.Block inner)) with
+          | some (ifS, innerRest) => some (ifS, innerRest ++ tail)
+          | none => go tail
+        | _ => go tail
+    go stms
+
+  hasBreak : Option Stm → Bool
+    | some (.BreakOrContinue _ true) => true
+    | some (.Block stms) => stms.any fun
+      | .BreakOrContinue _ true => true
+      | _ => false
+    | _ => false
+
+  extractLoopVarFromThen (stms : List Stm) : Option (String × Typ × List Stm) :=
+    match stms with
+    | [] => none
+    | s :: rest =>
+      match s with
+      | .Assign lhs ty rhs _ =>
+        match lvalueVarName? lhs with
+        | some name =>
+          if isOptionSomeProj rhs && !isForLoopScaffoldingVar name then
+            -- Direct assignment: loopVar := Option::Some_0(...)
+            some (name, ty, filterScaffoldingStms rest)
+          else
+            extractLoopVarFromThen rest
+        | none => extractLoopVarFromThen rest
+      | _ => extractLoopVarFromThen rest
+
+  findLoopVarAfterIf (stms : List Stm) : Option (String × Typ × List Stm) :=
+    match stms with
+    | [] => none
+    | s :: rest =>
+      match s with
+      | .Assign lhs ty _rhs _ =>
+        match lvalueVarName? lhs with
+        | some name =>
+          if !isForLoopScaffoldingVar name then
+            -- Found the loop variable assignment (e.g. i := VERUS_loop_next)
+            some (name, ty, filterScaffoldingStms rest)
+          else
+            findLoopVarAfterIf rest
+        | none => findLoopVarAfterIf rest
+      | _ => findLoopVarAfterIf rest
+
+  filterScaffoldingStms (stms : List Stm) : List Stm :=
+    stms.filter fun
+      | .Assign lhs _ _ _ =>
+        match lvalueVarName? lhs with
+        | some name => !isForLoopScaffoldingVar name
+        | none => true
+      | .Call fn _ _ =>
+        !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
+      | .Assume (.Const (.Bool false)) => false
+      | _ => true
+
+/--
+  Find the Range start/end from pre-loop context.
+
+  Before the for-loop, Verus generates:
+  - Assign(tmp_start, startExpr)
+  - Call(vec.len, ...) or similar → tmp_end
+  - Assign(VERUS_iter, StructCtor(Range, [("start", startExpr), ("end", endExpr)]))
+  - Call(into_iter, ...) → iterator
+  - Various iterator setup assignments
+
+  We look for the StructCtor(Range, ...) to extract start/end.
+-/
+structure ForLoopRangeInfo where
+  startExp : Exp
+  endExp : Exp
+  iterVarName : Option String := none
+deriving Repr
+
+/-- Strip Box/Unbox wrappers from an expression. -/
+private partial def stripBoxUnbox : Exp → Exp
+  | .Unary (.Box _) e => stripBoxUnbox e
+  | .Unary (.Unbox _) e => stripBoxUnbox e
+  | e => e
+
+/--
+  Scan a list of statements preceding the for-loop to find the Range constructor
+  and extract the start/end expressions.
+-/
+private partial def findRangeSetup? (preStms : List Stm) : Option ForLoopRangeInfo := do
+  -- Build substitution map from temp assignments
+  let subs := preStms.filterMap fun
+    | .Assign lhs _ rhs _ =>
+      match lvalueVarName? lhs with
+      | some name => some (name, rhs)
+      | none => none
+    | _ => none
+  -- Find the Range StructCtor assignment
+  let rangeInfo ← preStms.findSome? fun
+    | .Assign _lhs _ (.StructCtor dt fields) _ =>
+      if isRangeTypeName dt then
+        match fields with
+        | [("start", startE), ("end", endE)] =>
+          some (stripBoxUnbox (substExps subs startE), stripBoxUnbox (substExps subs endE))
+        | _ => none
+      else none
+    | _ => none
+  some { startExp := rangeInfo.1, endExp := rangeInfo.2 }
+
+/--
+  Check if an expression is a ghost iterator reference pattern:
+  `If(IsVariant(Option, Some, ghost_peek_next(iter)),
+      Proj(Option, Some, 0, ghost_peek_next(iter)),
+      arbitrary())`
+  This pattern represents "the current value of the for-loop iterator",
+  which in a recovered for-loop is just the loop variable itself.
+-/
+private partial def isGhostIteratorPeekPattern : Exp → Bool
+  | .If cond thenE _elseE =>
+    isOptionIsSomeCheck cond && isOptionSomeProj thenE
+  | _ => false
+
+/--
+  Check if an invariant expression is a "ghost iterator" internal invariant
+  (exec_invariant, ghost_advance, ghost_ensures, etc.) that should be dropped.
+-/
+private partial def isGhostIteratorInvariant : Exp → Bool
+  | .Unary (.Unbox _) e => isGhostIteratorInvariant e
+  | .Unary (.Box _) e => isGhostIteratorInvariant e
+  | .Call fn _ _ =>
+    let s := (CallFun.name fn).toString.toLower
+    s.contains "forloopghostiterator" || s.contains "ghost_invariant" ||
+    s.contains "exec_invariant" || s.contains "ghost_ensures" ||
+    s.contains "ghost_advance"
+  | .Unary _ e => isGhostIteratorInvariant e
+  | _ => false
+
+/--
+  Rewrite a for-loop invariant expression.
+
+  User-written invariants in a for-loop are wrapped as:
+  `Bind(Let("i", ty, <ghost_peek_expr>), <actual_invariant>)`
+
+  where `<ghost_peek_expr>` computes the current iterator value through the ghost
+  iterator machinery. In a recovered for-loop, the loop variable `i` is bound
+  directly, so we strip this outer let-binding.
+
+  Within the actual invariant body, references to the loop variable are already
+  just `Var("i")`, so no further rewriting is needed.
+-/
+private partial def rewriteForLoopInvariant (loopVar : String) : Exp → Exp
+  | .Bind (.Let v _ty rhs) body =>
+    if v == loopVar then
+      let isGhostPeek := isGhostPeekRhs rhs
+      if isGhostPeek then
+        -- Strip the ghost peek Let binding but substitute the loop variable
+        -- into the body so references to `v` resolve to the for-loop's `i`.
+        substExp v (.Var loopVar) body
+      else .Bind (.Let v _ty (rewriteForLoopInvariant loopVar rhs)) (rewriteForLoopInvariant loopVar body)
+    else
+      -- Non-loop-var Let: check if the *rhs* is a ghost peek pattern
+      let isGhostPeek := isGhostPeekRhs rhs
+      if isGhostPeek then
+        substExp v (.Var loopVar) (rewriteForLoopInvariant loopVar body)
+      else
+        .Bind (.Let v _ty (rewriteForLoopInvariant loopVar rhs)) (rewriteForLoopInvariant loopVar body)
+  | .Unary (.Unbox _) e => rewriteForLoopInvariant loopVar e
+  | .Unary (.Box _) e => rewriteForLoopInvariant loopVar e
+  | e => e
+where
+  isGhostPeekRhs : Exp → Bool
+    | .Bind (.Let _ _ innerRhs) innerBody =>
+      hasGhostPeekCall innerRhs || isGhostIteratorPeekPattern innerBody || isGhostPeekRhs innerBody
+    | .If cond thenE _elseE =>
+      isOptionIsSomeCheck cond && isOptionSomeProj thenE
+    | .Unary (.Unbox _) e | .Unary (.Box _) e => isGhostPeekRhs e
+    | .Call fn _ _ =>
+      let s := (CallFun.name fn).toString.toLower
+      s.contains "ghost_peek" || s.contains "ghost_peek_next"
+    | _ => false
+
+  hasGhostPeekCall : Exp → Bool
+    | .Call fn _ _ =>
+      let s := (CallFun.name fn).toString.toLower
+      s.contains "ghost_peek" || s.contains "ghost_peek_next"
+    | .Unary _ e => hasGhostPeekCall e
+    | _ => false
+
+/--
+  Process for-loop invariants:
+  1. Drop system-generated ghost iterator invariants
+  2. Rewrite user invariants to strip the ghost peek let-binding
+-/
+private def processForLoopInvariants (loopVar : String) (invs : List LoopInvariant)
+    : List LoopInvariant :=
+  invs.filterMap fun inv =>
+    if isGhostIteratorInvariant inv.body then none
+    else
+      let rewritten := rewriteForLoopInvariant loopVar inv.body
+      some { inv with body := rewritten }
+
+/--
+  Process for-loop decrease expressions, similarly stripping ghost iterator bindings.
+-/
+private def processForLoopDecrease (loopVar : String) (decrease : List Exp) : List Exp :=
+  decrease.map (rewriteForLoopInvariant loopVar)
+
+/--
+  Collect all statements from a block and preceding blocks that form the for-loop preamble.
+  This includes Range construction, into_iter call, and iterator setup.
+-/
+private partial def collectForLoopPreamble (stms : List Stm) :
+    (List Stm × Option (List Stm × Stm)) :=
+  -- Walk the statements looking for a Loop with isForLoop=true
+  -- Return (pre-loop statements, Some (remaining, loop))
+  let rec go (preAcc : List Stm) (rest : List Stm) :
+      (List Stm × Option (List Stm × Stm)) :=
+    match rest with
+    | [] => (preAcc.reverse, none)
+    | s :: tail =>
+      match s with
+      | .Loop true _ _ _ _ _ => (preAcc.reverse, some (tail, s))
+      | .Block inner =>
+        -- The loop might be nested inside blocks
+        match findLoopInBlock inner with
+        | some (innerPre, loopStm, innerPost) =>
+          ((preAcc.reverse ++ innerPre), some (innerPost ++ tail, loopStm))
+        | none => go (s :: preAcc) tail
+      | _ => go (s :: preAcc) tail
+  go [] stms
+where
+  findLoopInBlock (stms : List Stm) : Option (List Stm × Stm × List Stm) :=
+    let rec goInner (pre : List Stm) (rest : List Stm) : Option (List Stm × Stm × List Stm) :=
+      match rest with
+      | [] => none
+      | s :: tail =>
+        match s with
+        | .Loop true _ _ _ _ _ => some (pre.reverse, s, tail)
+        | .Block inner =>
+          match findLoopInBlock inner with
+          | some (innerPre, loopStm, innerPost) =>
+            some (pre.reverse ++ innerPre, loopStm, innerPost ++ tail)
+          | none => goInner (s :: pre) tail
+        | _ => goInner (s :: pre) tail
+    goInner [] stms
 
 def queryBodyStms : Stm → List Stm
   | .Block [s] => queryBodyStms s
@@ -1320,6 +1653,18 @@ private def specFnIsGenericFull (f : SpecFn) : Bool :=
   let inputTVars := f.inputs.flatMap (fun (_, ty) => typTypeVars ty)
   let retTVars := typTypeVars f.returnType
   !(inputTVars ++ retTVars).isEmpty
+
+private def fnTypeParams (inputs : List (String × Typ)) (ret : Typ) : List String :=
+  ((inputs.flatMap (fun (_, ty) => typTypeVars ty)) ++ typTypeVars ret).eraseDups
+
+private def mkTypeArgsAnn (params : List String) :
+    Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+  if params.isEmpty then
+    ann none
+  else
+    let vars := params.toArray.map fun p =>
+      BooleDDM.TypeVar.type_var default (ann p)
+    ann (some (BooleDDM.TypeArgs.type_args default (ann vars)))
 
 private def mkRevealAssume (f : SpecFn) : Option Stm :=
   if specFnIsGenericFull f then none
@@ -1454,11 +1799,6 @@ partial def bindUnlabeledLoopControlTo (loopLabel : String) : Stm → Stm
   | s@(.Loop ..) => s
   | s => s
 
-/-! ## Label sanitization -/
-
-private def sanitizeLabel (label : String) : String :=
-  if label.isEmpty || label == "||" then "check" else label
-
 /-! ## Expression Translation -/
 
 mutual
@@ -1490,8 +1830,10 @@ private partial def comparisonPrelude
     let r ← coerceNumeric rhsNum? (some .int) r0
     return (argTy?, l, r)
   else
-    let l0 ← expToBoole env bound argTy? lhs
-    let r0 ← expToBoole env bound argTy? rhs
+    let lExpected? := if lhsInfo?.isSome then none else argTy?
+    let rExpected? := if rhsInfo?.isSome then none else argTy?
+    let l0 ← expToBoole env bound lExpected? lhs
+    let r0 ← expToBoole env bound rExpected? rhs
     let targetInfo? := argTy?.bind bitInfoOfTyp
     let l ← coerceBvBv lhsInfo? targetInfo? l0
     let r ← coerceBvBv rhsInfo? targetInfo? r0
@@ -1588,8 +1930,10 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         if hasMixedSignedBitArgs then none else some e
       | none, none => none
     let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
-    let l0 ← expToBoole env bound argTy? lhs
-    let r0 ← expToBoole env bound argTy? rhs
+    let lExpected? := if lhsInfo?.isSome then none else argTy?
+    let rExpected? := if rhsInfo?.isSome then none else argTy?
+    let l0 ← expToBoole env bound lExpected? lhs
+    let r0 ← expToBoole env bound rExpected? rhs
     let l ← coerceBvBv lhsInfo? info? l0
     let r ← coerceBvBv rhsInfo? info? r0
     match op with
@@ -1672,6 +2016,15 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let srcKind? := numKindOfTyp? t
         let tgtKind? := expected?.bind numKindOfTyp?
         coerceNumeric srcKind? tgtKind? inner
+      | .BitNot w? =>
+        let srcInfo? := inferBitInfo env bound e
+        let annotFallback := w?.bind (fun w0 =>
+          if isSupportedBvWidth w0 then some (w0, false) else none)
+        let targetInfo? := expected?.bind bitInfoOfTyp <|> srcInfo? <|> annotFallback
+        let innerExpected? :=
+          if srcInfo?.isSome then none
+          else targetInfo?.map (fun (w, signed) => bitTypOfInfo w signed)
+        expToBoole env bound innerExpected? e
       | _ => expToBoole env bound expected? e
     match op with
     | .Clip _ _ => return x
@@ -1879,7 +2232,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       expToBoole env bound expected? body'
     | .Quant q vars _trigs => do
       let body' ← withScope do
-        addBoundVars (vars.map Prod.fst).toArray.reverse (reverse? := false)
+        addBoundVars (vars.map Prod.fst).toArray (reverse? := false)
         expToBoole env (vars.reverse ++ bound) (some .Bool) body
       let binds ← vars.toArray.mapM (fun (v, ty) => do
         let ty' ← typToBooleType ty
@@ -1889,7 +2242,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | .Exists => return existsExpr binds body'
     | .Lambda vars => do
       let body' ← withScope do
-        addBoundVars (vars.map Prod.fst).toArray.reverse (reverse? := false)
+        addBoundVars (vars.map Prod.fst).toArray (reverse? := false)
         expToBoole env (vars.reverse ++ bound) none body
       -- Lambda is represented as a quantifier for now (like CoreToBoole)
       let binds ← vars.toArray.mapM (fun (v, ty) => do
@@ -1948,7 +2301,7 @@ private def mkQueryObligation (env : VarEnv) (label : String) (requires ensures 
         | [] => boolConst true
         | e :: rest => rest.foldl boolAnd e
       boolImplies reqConj ensConj
-  return [assertStmt (sanitizeLabel label) obligation]
+  return [assertStmt label obligation]
 
 /-! ## Projected Assignment Support -/
 
@@ -2175,6 +2528,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       | none => pure []
     return [iteStmt c thenStms.toArray elseStms.toArray]
   | .Loop _isForLoop label cond body invs decrease => do
+    -- For-loop recovery is handled in stmListToBooleAux; if we get here, emit while loop
     let (guardFromBody?, body') :=
       match extractLoopGuardFromBody body with
       | some (g, b') => (some g, b')
@@ -2222,14 +2576,115 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
   | .Reveal .. =>
     return []
 
+/--
+  Try to recover a for-loop from a list of statements containing a `Stm.Loop true`.
+  Scans the statement list for:
+  1. Pre-loop assignments that include a Range construction (start/end)
+  2. A `Loop` with `isForLoop = true` whose body matches the iterator pattern
+  If successful, emits a `forToStmt` and returns `some (emitted, remaining)`.
+  Otherwise returns `none`.
+-/
+partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
+    (mutArgMap : MutArgMap) (retVar? : Option (String × Typ))
+    (stms : List Stm) : BuildM (Option (List BStmt × List Stm)) := do
+  -- Find the first for-loop in the statement list
+  match findForLoop [] stms with
+  | none => pure none
+  | some (preStms, loopStm, postStms) =>
+    match loopStm with
+    | .Loop true _label _cond body invs decrease =>
+      match matchForLoopBody? body with
+      | none => pure none
+      | some info =>
+        -- Find Range start/end from pre-loop context
+        let allPreStms := flattenAllBlocks preStms
+        match findRangeSetup? allPreStms with
+        | none => pure none
+        | some rangeInfo =>
+          -- Successfully matched! Emit the for-loop.
+          let processedInvs := processForLoopInvariants info.loopVarName invs
+          let processedDecrease := processForLoopDecrease info.loopVarName decrease
+
+          let loopVarTy ← typToBooleType info.loopVarTy
+          let loopVarSan := sanitizeVarName info.loopVarName
+
+          let startExpr ← expToBooleFlat env (some info.loopVarTy) rangeInfo.startExp
+          let endE ← expToBooleFlat env (some info.loopVarTy) rangeInfo.endExp
+          let limitExpr ← match bitWidthOfTyp info.loopVarTy with
+            | some w => pure (bvSub w endE (bitvecConstNat w 1))
+            | none => pure (intSub endE (intConst 1))
+
+          -- Push the loop variable into scope for invariants, decreases, and body
+          let (invExprs, measureExpr?, bodyStms) ← withScope do
+            pushBoundVar loopVarSan
+            let invExprs ← processedInvs.toArray.mapM (fun inv =>
+              expToBooleFlat env (some .Bool) inv.body)
+            let measureExpr? ← match processedDecrease with
+              | [] => pure none
+              | e :: _ => do
+                let ce0 ← expToBooleFlat env none e
+                let srcKind? := inferNumKind env [] e
+                let ce ← coerceNumeric srcKind? (some .int) ce0
+                pure (some ce)
+            let userBodyStm := Stm.Block info.userBody
+            let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? userBodyStm
+            pure (invExprs, measureExpr?, bodyStms)
+
+          let loopStmt := forToStmt loopVarSan loopVarTy startExpr limitExpr
+            measureExpr? invExprs bodyStms.toArray
+
+          -- Emit any non-scaffolding pre-loop statements, then the for-loop
+          let preFiltered := allPreStms.filter fun
+            | .Assign lhs _ _ _ =>
+              match lvalueVarName? lhs with
+              | some name => !isForLoopScaffoldingVar name && !name.startsWith "decrease"
+              | none => true
+            | .Call fn _ _ =>
+              !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
+            | _ => true
+          let preBoole ← preFiltered.mapM (stmToBoole env projLayouts mutArgMap retVar?)
+          pure (some (preBoole.flatten ++ [loopStmt], postStms))
+    | _ => pure none
+where
+  findForLoop (pre : List Stm) (rest : List Stm) :
+      Option (List Stm × Stm × List Stm) :=
+    match rest with
+    | [] => none
+    | s :: tail =>
+      match s with
+      | .Loop true _ _ _ _ _ => some (pre.reverse, s, tail)
+      | .Block inner =>
+        -- Check if the loop is nested inside blocks
+        match findForLoop [] (flattenAllBlocks [.Block inner]) with
+        | some (innerPre, loopStm, innerPost) =>
+          some (pre.reverse ++ innerPre, loopStm, innerPost ++ tail)
+        | none => findForLoop (s :: pre) tail
+      | _ => findForLoop (s :: pre) tail
+  flattenAllBlocks (stms : List Stm) : List Stm :=
+    stms.flatMap fun
+      | .Block inner => flattenAllBlocks inner
+      | s => [s]
+
 partial def stmListToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap)
     (retVar? : Option (String × Typ)) :
     List Stm → BuildM (List BStmt)
-  | stms =>
+  | stms => do
     let normalized :=
       (flattenSeqBlocks (recoverComputeProofs (inlineTemps stms))).map stripSingletonBlocks
-    stmListToBooleAux env projLayouts mutArgMap retVar? normalized
+    -- Try for-loop recovery before normal processing
+    let hasForLoop := normalized.any fun
+      | .Loop true _ _ _ _ _ => true
+      | _ => false
+    if hasForLoop then
+      match ← tryForLoopRecovery env projLayouts mutArgMap retVar? normalized with
+      | some (forStms, postStms) =>
+        let rest ← stmListToBooleAux env projLayouts mutArgMap retVar? postStms
+        return forStms ++ rest
+      | none =>
+        stmListToBooleAux env projLayouts mutArgMap retVar? normalized
+    else
+      stmListToBooleAux env projLayouts mutArgMap retVar? normalized
 
 partial def stmListToBooleAux (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap)
@@ -2319,15 +2774,24 @@ partial def collectSetVars : Stm → List LocalDeclInfo
   | .Block stms => stms.flatMap collectSetVars
   | _ => []
 
-private def localShouldEmit (decl : LocalDeclInfo) : Bool :=
+private def localShouldEmit (hasForLoop : Bool) (decl : LocalDeclInfo) : Bool :=
   !decl.isSourceDecreases &&
     !shouldDropForLoopScaffoldingLocal decl.name &&
+    !(hasForLoop && isForLoopScaffoldingVar decl.name) &&
     !isUnitLikeTyp decl.ty
+
+private partial def stmHasForLoop : Stm → Bool
+  | .Loop true _ _ _ _ _ => true
+  | .Block stms => stms.any stmHasForLoop
+  | .If _ b1 b2 => stmHasForLoop b1 || (b2.map stmHasForLoop).getD false
+  | .DeadEnd stm => stmHasForLoop stm
+  | _ => false
 
 private def collectProcedureLocals
     (sourceLocals : List LocalDeclInfo)
     (inputNames retNames : List String)
-    (setVars : List LocalDeclInfo) : List LocalDeclInfo :=
+    (setVars : List LocalDeclInfo)
+    (hasForLoop : Bool := false) : List LocalDeclInfo :=
   let declaredInInputsRetOrLocals := fun (n : String) =>
     inputNames.any (fun x => x == n) ||
     retNames.any (fun x => x == n) ||
@@ -2338,7 +2802,7 @@ private def collectProcedureLocals
     (sourceLocals.filter (fun decl =>
       !(inputNames.any (fun x => x == decl.name) || retNames.any (fun x => x == decl.name))) ++
       implicitSetLocals)
-  localsAll.filter localShouldEmit
+  localsAll.filter (localShouldEmit hasForLoop)
 
 /-! ### Building BooleDDM Commands -/
 
@@ -2483,21 +2947,27 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
   let name := ann fnName
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
+  let typeArgs := mkTypeArgsAnn (fnTypeParams f.inputs f.returnType)
   let (inputBindings, inputNames) ← mkMonoInputs f.inputs
   let outputTy ← typToBooleType f.returnType
+  let envLocal := extendEnv env f.inputs
   let (body?, specElts) ← withScope do
     addBoundVars inputNames (reverse? := false)
     let body? ← if emitBody then
       match f.body with
-      | some b => pure (some (← expToBooleFlat env (some f.returnType) b))
+      | some b => pure (some (← expToBooleFlat envLocal (some f.returnType) b))
       | none => pure none
     else pure none
     let elts : Array (BooleDDM.SpecElt SourceRange) := #[]
     pure (body?, elts)
   match body? with
   | some body =>
-    pure (.command_fndef default name typeArgs inputBindings outputTy (ann specElts) body (ann none))
+    if f.isRecursive then
+      let recDecl :=
+        BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy (ann specElts) body
+      pure (.command_recfndefs default (ann #[recDecl]))
+    else
+      pure (.command_fndef default name typeArgs inputBindings outputTy (ann specElts) body (ann none))
   | none =>
     pure (.command_fndecl default name typeArgs inputBindings outputTy)
 
@@ -2508,7 +2978,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
   let name := ann fnName
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
+  let typeArgs := mkTypeArgsAnn (fnTypeParams f.inputs f.returnType)
   let hasRet := match f.returnType with | .Unit | .Empty => false | _ => true
   let retDecls := if hasRet then [(f.retName, f.returnType)] else []
   let retNames := if hasRet then [f.retName] else []
@@ -2517,20 +2987,22 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     let b := stripDecreaseArtifacts b
     match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s)
   let setVars := match bodyStm? with | some body => collectSetVars body | none => []
+  let bodyHasForLoop := match bodyStm? with | some body => stmHasForLoop body | none => false
   let inputNames := f.inputs.map Prod.fst
-  let localsAll := collectProcedureLocals f.locals inputNames retNames setVars
+  let localsAll := collectProcedureLocals f.locals inputNames retNames setVars (hasForLoop := bodyHasForLoop)
   let outputs := retDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
   let outputsAnn := ann outputDecls?
+  let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
   let (specElts, body) ← withScope do
-    addBoundVars outputNamesSan (reverse? := false)
     addBoundVars inputNamesSan (reverse? := false)
-    let specElts ← mkSpecElts env f.requires f.ensures []
+    addBoundVars outputNamesSan (reverse? := false)
+    let specElts ← mkSpecElts envLocal f.requires f.ensures []
     let localStmts ← localsToVarStmts localsAll
     let retVar? := if hasRet then some (f.retName, f.returnType) else none
     let bodyStmts ← match bodyStm? with
-      | some stm => stmToBoole env projLayouts mutArgMap retVar? stm
+      | some stm => stmToBoole envLocal projLayouts mutArgMap retVar? stm
       | none => pure []
     let allStmts := localStmts ++ bodyStmts
     let body := BooleDDM.Block.block default (ann allStmts.toArray)
@@ -2543,7 +3015,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
   let name := ann fnName
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
+  let typeArgs := mkTypeArgsAnn (fnTypeParams f.inputs f.returnType)
   let mutOutDecls :=
     f.inputs.filterMap (fun (n, t) =>
       (mutRefPayload? t).map (fun payloadTy => (n, s!"{n}_out", payloadTy)))
@@ -2558,16 +3030,18 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let inputNames := f.inputs.map Prod.fst
   let retNames := (if hasRet then [f.retName] else []) ++ mutOutputDecls.map Prod.fst
   let setVars := collectSetVars rewrittenBody
-  let localsAll := collectProcedureLocals f.locals inputNames retNames setVars
+  let bodyHasForLoop := stmHasForLoop rewrittenBody
+  let localsAll := collectProcedureLocals f.locals inputNames retNames setVars (hasForLoop := bodyHasForLoop)
   let outputs := retDecls ++ mutOutputDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
   let outputsAnn := ann outputDecls?
   let isDeclOnly := match f.body with | .Block [] => true | _ => false
+  let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
   let (specElts, body) ← withScope do
-    addBoundVars outputNamesSan (reverse? := false)
     addBoundVars inputNamesSan (reverse? := false)
-    let specElts ← mkSpecElts env f.requires rewrittenEnsures []
+    addBoundVars outputNamesSan (reverse? := false)
+    let specElts ← mkSpecElts envLocal f.requires rewrittenEnsures []
     if isDeclOnly then
       let body := BooleDDM.Block.block default (ann #[])
       pure (specElts, body)
@@ -2578,7 +3052,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
         let inExpr ← resolveVar inName
         pure (setStmt (sanitizeVarName outName) inExpr))
       let retVar? := if hasRet then some (f.retName, f.returnType) else none
-      let bodyStmts ← stmToBoole env projLayouts mutArgMap retVar? rewrittenBody
+      let bodyStmts ← stmToBoole envLocal projLayouts mutArgMap retVar? rewrittenBody
       let allStmts := localStmts ++ mutOutInits ++ bodyStmts
       let body := BooleDDM.Block.block default (ann allStmts.toArray)
       pure (specElts, body)
@@ -2683,14 +3157,15 @@ def funcCheckSstToBoole (env : VarEnv) (f : FuncCheckSst) : BuildM BCmd := do
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
   let name := ann fnName
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
+  let typeArgs := mkTypeArgsAnn (fnTypeParams f.decls .Unit)
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.decls
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs []
   let outputsAnn := ann outputDecls?
+  let envLocal := extendEnv env f.decls
   let (specElts, body) ← withScope do
-    addBoundVars outputNamesSan (reverse? := false)
     addBoundVars inputNamesSan (reverse? := false)
-    let specElts ← mkSpecElts env f.reqs f.postCondition []
+    addBoundVars outputNamesSan (reverse? := false)
+    let specElts ← mkSpecElts envLocal f.reqs f.postCondition []
     let body := BooleDDM.Block.block default (ann #[])
     pure (specElts, body)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
@@ -2732,13 +3207,14 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       let recDecls ← specFns.toArray.mapM fun f => do
         let fnName := identToBoole f.name
         let name := ann fnName
-        let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
+        let typeArgs := mkTypeArgsAnn (fnTypeParams f.inputs f.returnType)
         let (inputBindings, inputNames) ← mkMonoInputs f.inputs
         let outputTy ← typToBooleType f.returnType
+        let envLocal := extendEnv env f.inputs
         let (body, specElts) ← withScope do
           addBoundVars inputNames (reverse? := false)
           let body ← match f.body with
-            | some b => expToBooleFlat env (some f.returnType) b
+            | some b => expToBooleFlat envLocal (some f.returnType) b
             | none => pure (boolConst true)
           let elts : Array (BooleDDM.SpecElt SourceRange) := #[]
           pure (body, elts)
@@ -2801,7 +3277,50 @@ private def buildEnv (decls : List Decl)
   let env := addDatatypeAccessorRetTypes env decls
   env
 
+/-- Extract the primary name from a VLIR declaration. -/
+private def declPrimaryName : Decl → String
+  | .assertion a => a.name.toString
+  | .specFn f => f.name.toString
+  | .proofFn f => f.name.toString
+  | .execFn f => f.name.toString
+  | .struct s => s.name.toString
+  | .enum e => e.name.toString
+  | .func f => f.name.toString
+  | .mutualBlock ds => match ds with | d :: _ => declPrimaryName d | [] => ""
+
+/-- Check whether a VLIR declaration is purely for-loop iterator scaffolding
+    that should be pruned when for-loops are successfully recovered. -/
+private def isForLoopScaffoldingDecl (name : String) : Bool :=
+  let lower := name.toLower
+  -- Iterator next/into_iter procedures
+  lower.endsWith "next" && lower.contains "iterator" ||
+  lower.endsWith "into_iter" && lower.contains "collect" ||
+  -- Ghost pervasive functions (ForLoopGhostIterator, ForLoopGhostIteratorNew)
+  lower.contains "pervasive" && (lower.contains "ghost" || lower.contains "forloop") ||
+  -- Range datatype (core.ops.range.Range or Ops_Range_range)
+  (lower.contains "range" && (lower.contains "ops" || lower.contains "ops_range")) ||
+  -- Option datatype (core.option.Option or Option_option)
+  (lower.contains "option" && (lower.contains "core" || lower.contains "option_option")) ||
+  -- Std specs for iterators (std_specs.range, std_specs.core.iter)
+  lower.contains "std_specs" && (lower.contains "iter" || lower.contains "range") ||
+  -- RangeGhostIterator
+  lower.contains "rangeghost"
+
+/-- Check whether any ExecFn in a declaration list has a for-loop body. -/
+private def declsHaveForLoop (decls : List Decl) : Bool :=
+  decls.any fun
+    | .execFn f => stmHasForLoop f.body
+    | .proofFn f => f.body.map stmHasForLoop |>.getD false
+    | _ => false
+
 /-- Main entry point: translate a list of VLIR declarations into BooleDDM commands. -/
+private def isSupportCastName (name : String) : Bool :=
+  isBvToIntCastName name || isBvToNatCastName name || isIntToBvCastName name ||
+  isBvWidenCastName name || name == "nat_to_int" || name == "int_to_nat"
+
+private def isSupportTypeName (name : String) : Bool :=
+  name == "nat"
+
 def declsToBooleProgram (decls : List Decl) :
     BuildM (Array BCmd) := do
   let noParamFns := collectNoParamFnNamesFromDecls decls
@@ -2809,32 +3328,50 @@ def declsToBooleProgram (decls : List Decl) :
   let mutArgMap := collectMutArgMapFromDecls decls
   let sfMap := collectSpecFns decls
   let env := buildEnv decls noParamFns sfMap
-  -- Emit support declarations: nat type, cast functions
+  -- Detect whether any for-loop will be recovered
+  let hasForLoop := declsHaveForLoop decls
+  -- When for-loop recovery is active, skip translating iterator scaffolding declarations
+  let filteredDecls := if hasForLoop then
+    decls.filter fun d =>
+      let name := declPrimaryName d
+      !isForLoopScaffoldingDecl name
+    else decls
+  -- Translate user declarations first to discover which support names are needed
+  let mut userCmds : Array BCmd := #[]
+  for d in filteredDecls do
+    let cmds ← declToBoole env projLayouts mutArgMap sfMap decls d
+    userCmds := userCmds ++ cmds.toArray
+  -- Collect free variable names referenced by translation
+  let ctx ← get
+  let referencedNames := ctx.allFreeVars
+  -- Only emit support declarations for names actually referenced
   let mut supportCmds : Array BCmd := #[]
-  -- nat type
-  supportCmds := supportCmds.push (← mkAbstractTypeDecl "nat" [])
-  -- nat_to_int, int_to_nat
-  supportCmds := supportCmds.push (← mkCastFnDecl "nat_to_int" .Nat .Int)
-  supportCmds := supportCmds.push (← mkCastFnDecl "int_to_nat" .Int .Nat)
-  -- bv cast functions (emit all widths; pruning can happen later)
+  if referencedNames.any (· == "nat") then
+    supportCmds := supportCmds.push (← mkAbstractTypeDecl "nat" [])
+  if referencedNames.any (· == "nat_to_int") then
+    supportCmds := supportCmds.push (← mkCastFnDecl "nat_to_int" .Nat .Int)
+  if referencedNames.any (· == "int_to_nat") then
+    supportCmds := supportCmds.push (← mkCastFnDecl "int_to_nat" .Int .Nat)
   for w in supportedBvWidths do
-    supportCmds := supportCmds.push (← mkCastFnDecl (bvToIntCastName w false) (.UInt w) .Int)
-    supportCmds := supportCmds.push (← mkCastFnDecl (bvToIntCastName w true) (.SInt w) .Int)
-    supportCmds := supportCmds.push (← mkCastFnDecl (bvToNatCastName w false) (.UInt w) .Nat)
-    supportCmds := supportCmds.push (← mkCastFnDecl (bvToNatCastName w true) (.SInt w) .Nat)
-    supportCmds := supportCmds.push (← mkCastFnDecl (intToBvCastName w false) .Int (.UInt w))
-    supportCmds := supportCmds.push (← mkCastFnDecl (intToBvCastName w true) .Int (.SInt w))
-  -- bv widen cast functions
+    let castNames := [
+      (bvToIntCastName w false, (.UInt w), Typ.Int),
+      (bvToIntCastName w true, (.SInt w), Typ.Int),
+      (bvToNatCastName w false, (.UInt w), Typ.Nat),
+      (bvToNatCastName w true, (.SInt w), Typ.Nat),
+      (intToBvCastName w false, Typ.Int, (.UInt w)),
+      (intToBvCastName w true, Typ.Int, (.SInt w))]
+    for (name, inTy, outTy) in castNames do
+      if referencedNames.any (· == name) then
+        supportCmds := supportCmds.push (← mkCastFnDecl name inTy outTy)
   for fromW in supportedBvWidths do
     for toW in supportedBvWidths do
       if fromW < toW then
-        supportCmds := supportCmds.push (← mkCastFnDecl (bvWidenCastName fromW toW false) (.UInt fromW) (.UInt toW))
-        supportCmds := supportCmds.push (← mkCastFnDecl (bvWidenCastName fromW toW true) (.SInt fromW) (.SInt toW))
-  -- Translate each declaration
-  let mut userCmds : Array BCmd := #[]
-  for d in decls do
-    let cmds ← declToBoole env projLayouts mutArgMap sfMap decls d
-    userCmds := userCmds ++ cmds.toArray
+        let uName := bvWidenCastName fromW toW false
+        let sName := bvWidenCastName fromW toW true
+        if referencedNames.any (· == uName) then
+          supportCmds := supportCmds.push (← mkCastFnDecl uName (.UInt fromW) (.UInt toW))
+        if referencedNames.any (· == sName) then
+          supportCmds := supportCmds.push (← mkCastFnDecl sName (.SInt fromW) (.SInt toW))
   return supportCmds ++ userCmds
 
 /-- Convenience: run the full translation pipeline and return the resulting
@@ -2842,6 +3379,22 @@ def declsToBooleProgram (decls : List Decl) :
 def translateDecls (decls : List Decl) : Except String (Array BCmd) :=
   match (declsToBooleProgram decls).run emptyCtx with
   | .ok (cmds, _) => .ok cmds
+  | .error e => .error e
+
+/-- Like `translateDecls` but also returns the build context for name resolution. -/
+def translateDeclsWithCtx (decls : List Decl) : Except String (Array BCmd × BuildCtx) :=
+  match (declsToBooleProgram decls).run emptyCtx with
+  | .ok (cmds, ctx) => .ok (cmds, ctx)
+  | .error e => .error e
+
+/-- Like `translateDeclsWithCtx` but pre-registers prelude names so fvar
+    indices align with Strata's `Program.globalContext` when the prelude is
+    prepended to the output. -/
+def translateDeclsWithPrelude (decls : List Decl) (preludeNames : Array String) :
+    Except String (Array BCmd × BuildCtx) :=
+  let initCtx := emptyCtx.addGlobalFreeVars preludeNames
+  match (declsToBooleProgram decls).run initCtx with
+  | .ok (cmds, ctx) => .ok (cmds, ctx)
   | .error e => .error e
 
 /-- Extract the declared name from a BooleDDM command, if it has one. -/
@@ -2856,7 +3409,7 @@ def cmdDeclName? : BCmd → Option String
   | .command_axiom _ _ _ => none
   | .command_var _ bind => some (match bind with | .bind_mk _ name _ _ => name.val)
   | .command_distinct _ _ _ => none
-  | .command_constdecl _ _ _ _ => none
+  | .command_constdecl _ name _ _ => some name.val
   | .command_block _ _ => none
 
 end Translate
