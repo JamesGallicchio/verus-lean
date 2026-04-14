@@ -138,7 +138,11 @@ def renderProgram
   | .ok booleProg =>
     let gctx := buildGlobalContext freeVarNames
     let formatted := Strata.Boole.formatProgram booleProg gctx Strata.Boole_map
-    let output := Std.Format.pretty formatted 100
+    let body := Std.Format.pretty formatted 100
+    -- `Boole.formatProgram` emits only the program body; the dialect header
+    -- is required for the output to be re-parseable (this mirrors the fix
+    -- Strata PR #767 applied to `Core.formatProgram` for `program Core;`).
+    let output := s!"program Boole;\n\n{body}"
     let output := if output.endsWith "\n" then output else output ++ "\n"
     .ok output
 
