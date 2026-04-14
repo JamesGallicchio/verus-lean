@@ -251,9 +251,11 @@ def exitStmt (label : Option String) : BStmt :=
   | some l => .exit_statement default (ann l)
   | none   => .exit_unlabeled_statement default
 
-def returnStmt (e : Option BExpr) : BStmt :=
-  match e with
-  | some e => .return_statement default (.returnArg1 default e)
-  | none   => .return_statement default (.returnArg0 default)
+/-- Early return: emit `exit <procName>;`. Strata's procedure translation
+    wraps the body in a labeled block named after the procedure, so exiting
+    the block named `procName` exits the procedure. Callers that want to
+    "return e" should set the output variable first, then call this. -/
+def returnStmt (procName : String) : BStmt :=
+  .exit_statement default (ann procName)
 
 end VerusLean.Boole.Builder

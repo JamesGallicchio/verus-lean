@@ -2404,7 +2404,8 @@ mutual
 
 partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap)
-    (retVar? : Option (String × Typ)) :
+    (retVar? : Option (String × Typ))
+    (procName : String) :
     Stm → BuildM (List BStmt)
   | .Call fn _typArgs args => do
     if isGhostPervasiveCallName fn then
@@ -2438,7 +2439,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     | some (reqs, enss) =>
       mkQueryObligation env (assertQueryModeLabel mode) reqs enss
     | none =>
-      stmToBoole env projLayouts mutArgMap retVar? body
+      stmToBoole env projLayouts mutArgMap retVar? procName body
   | .AssertCompute exp => do
     let e ← expToBooleFlat env (some .Bool) exp
     return [assertStmt "compute" e]
@@ -2504,17 +2505,17 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
         return [setStmt (sanitizeVarName rootName) updatedRoot]
   | .DeadEnd stm =>
-    stmToBoole env projLayouts mutArgMap retVar? stm
+    stmToBoole env projLayouts mutArgMap retVar? procName stm
   | .Return exp => do
     match exp, retVar? with
     | some e, some (retName, retTy) =>
       match e with
       | .EnumCtor _ "tuple%0" [] | .TupleCtor 0 [] | .StructCtor _ [] =>
-        return [returnStmt none]
+        return [returnStmt procName]
       | _ =>
         let rhs ← expToBooleFlat env (some retTy) e
-        return [setStmt (sanitizeVarName retName) rhs, returnStmt none]
-    | _, _ => return [returnStmt none]
+        return [setStmt (sanitizeVarName retName) rhs, returnStmt procName]
+    | _, _ => return [returnStmt procName]
   | .BreakOrContinue label isBreak =>
     match label with
     | some l => return [exitStmt (some (sanitizeIdent l))]
@@ -2522,9 +2523,9 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       throw s!"unsupported unlabeled {(if isBreak then "break" else "continue")} after loop normalization"
   | .If cond b1 b2 => do
     let c ← expToBooleFlat env (some .Bool) cond
-    let thenStms ← stmToBoole env projLayouts mutArgMap retVar? b1
+    let thenStms ← stmToBoole env projLayouts mutArgMap retVar? procName b1
     let elseStms ← match b2 with
-      | some s => stmToBoole env projLayouts mutArgMap retVar? s
+      | some s => stmToBoole env projLayouts mutArgMap retVar? procName s
       | none => pure []
     return [iteStmt c thenStms.toArray elseStms.toArray]
   | .Loop _isForLoop label cond body invs decrease => do
@@ -2563,16 +2564,16 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         let ce ← coerceNumeric srcKind? (some .int) ce0
         pure (some ce)
     let bodyBound := match loopLabel? with | some l => bindUnlabeledLoopControlTo l body' | none => body'
-    let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? bodyBound
+    let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? procName bodyBound
     let loopStmt := whileStmt condExpr measureExpr? invExprs bodyStms.toArray
     let stmt := match loopLabel? with | some l => blockStmt l #[loopStmt] | none => loopStmt
     return [stmt]
   | .OpenInvariant stm =>
-    stmToBoole env projLayouts mutArgMap retVar? stm
+    stmToBoole env projLayouts mutArgMap retVar? procName stm
   | .ClosureInner body =>
-    stmToBoole env projLayouts mutArgMap retVar? body
+    stmToBoole env projLayouts mutArgMap retVar? procName body
   | .Block stms =>
-    stmListToBoole env projLayouts mutArgMap retVar? stms
+    stmListToBoole env projLayouts mutArgMap retVar? procName stms
   | .Reveal .. =>
     return []
 
@@ -2586,6 +2587,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
 -/
 partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap) (retVar? : Option (String × Typ))
+    (procName : String)
     (stms : List Stm) : BuildM (Option (List BStmt × List Stm)) := do
   -- Find the first for-loop in the statement list
   match findForLoop [] stms with
@@ -2627,7 +2629,7 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
                 let ce ← coerceNumeric srcKind? (some .int) ce0
                 pure (some ce)
             let userBodyStm := Stm.Block info.userBody
-            let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? userBodyStm
+            let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? procName userBodyStm
             pure (invExprs, measureExpr?, bodyStms)
 
           let loopStmt := forToStmt loopVarSan loopVarTy startExpr limitExpr
@@ -2642,7 +2644,7 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
             | .Call fn _ _ =>
               !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
             | _ => true
-          let preBoole ← preFiltered.mapM (stmToBoole env projLayouts mutArgMap retVar?)
+          let preBoole ← preFiltered.mapM (stmToBoole env projLayouts mutArgMap retVar? procName)
           pure (some (preBoole.flatten ++ [loopStmt], postStms))
     | _ => pure none
 where
@@ -2667,7 +2669,8 @@ where
 
 partial def stmListToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap)
-    (retVar? : Option (String × Typ)) :
+    (retVar? : Option (String × Typ))
+    (procName : String) :
     List Stm → BuildM (List BStmt)
   | stms => do
     let normalized :=
@@ -2677,60 +2680,61 @@ partial def stmListToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       | .Loop true _ _ _ _ _ => true
       | _ => false
     if hasForLoop then
-      match ← tryForLoopRecovery env projLayouts mutArgMap retVar? normalized with
+      match ← tryForLoopRecovery env projLayouts mutArgMap retVar? procName normalized with
       | some (forStms, postStms) =>
-        let rest ← stmListToBooleAux env projLayouts mutArgMap retVar? postStms
+        let rest ← stmListToBooleAux env projLayouts mutArgMap retVar? procName postStms
         return forStms ++ rest
       | none =>
-        stmListToBooleAux env projLayouts mutArgMap retVar? normalized
+        stmListToBooleAux env projLayouts mutArgMap retVar? procName normalized
     else
-      stmListToBooleAux env projLayouts mutArgMap retVar? normalized
+      stmListToBooleAux env projLayouts mutArgMap retVar? procName normalized
 
 partial def stmListToBooleAux (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap)
-    (retVar? : Option (String × Typ)) :
+    (retVar? : Option (String × Typ))
+    (procName : String) :
     List Stm → BuildM (List BStmt)
   | (.BreakOrContinue none true) :: (.Assume (.Const (.Bool false))) :: rest => do
-    let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? rest
+    let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? procName rest
     return [assumeStmt "" (boolConst false)] ++ s2
   | a :: (.Assume e) :: next :: rest =>
     if isAssertAssumeEcho a e then
-      stmListToBooleAux env projLayouts mutArgMap retVar? (a :: next :: rest)
+      stmListToBooleAux env projLayouts mutArgMap retVar? procName (a :: next :: rest)
     else if isTrivialTrueAssert a && isQueryScaffoldingAssume e next then
-      stmListToBooleAux env projLayouts mutArgMap retVar? (next :: rest)
+      stmListToBooleAux env projLayouts mutArgMap retVar? procName (next :: rest)
     else if isTrivialTrueAssert a then
-      stmListToBooleAux env projLayouts mutArgMap retVar? ((.AssertCompute e) :: next :: rest)
+      stmListToBooleAux env projLayouts mutArgMap retVar? procName ((.AssertCompute e) :: next :: rest)
     else do
-      let s1 ← stmToBoole env projLayouts mutArgMap retVar? a
-      let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? ((.Assume e) :: next :: rest)
+      let s1 ← stmToBoole env projLayouts mutArgMap retVar? procName a
+      let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? procName ((.Assume e) :: next :: rest)
       return s1 ++ s2
   | (.Assume e) :: next :: rest =>
     if isQueryScaffoldingAssume e next then
-      stmListToBooleAux env projLayouts mutArgMap retVar? (next :: rest)
+      stmListToBooleAux env projLayouts mutArgMap retVar? procName (next :: rest)
     else do
-      let s1 ← stmToBoole env projLayouts mutArgMap retVar? (.Assume e)
-      let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? (next :: rest)
+      let s1 ← stmToBoole env projLayouts mutArgMap retVar? procName (.Assume e)
+      let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? procName (next :: rest)
       return s1 ++ s2
   | a :: next :: rest =>
     match next with
     | .Assume e =>
       if isAssertAssumeEcho a e then
-        stmListToBooleAux env projLayouts mutArgMap retVar? (a :: rest)
+        stmListToBooleAux env projLayouts mutArgMap retVar? procName (a :: rest)
       else if isTrivialTrueAssert a then
-        stmListToBooleAux env projLayouts mutArgMap retVar? ((.AssertCompute e) :: rest)
+        stmListToBooleAux env projLayouts mutArgMap retVar? procName ((.AssertCompute e) :: rest)
       else do
-        let s1 ← stmToBoole env projLayouts mutArgMap retVar? a
-        let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? (next :: rest)
+        let s1 ← stmToBoole env projLayouts mutArgMap retVar? procName a
+        let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? procName (next :: rest)
         return s1 ++ s2
     | _ =>
       if isTrivialTrueAssert a && isQueryStmt next then
-        stmListToBooleAux env projLayouts mutArgMap retVar? (next :: rest)
+        stmListToBooleAux env projLayouts mutArgMap retVar? procName (next :: rest)
       else do
-        let s1 ← stmToBoole env projLayouts mutArgMap retVar? a
-        let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? (next :: rest)
+        let s1 ← stmToBoole env projLayouts mutArgMap retVar? procName a
+        let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? procName (next :: rest)
         return s1 ++ s2
   | [stm] =>
-    stmToBoole env projLayouts mutArgMap retVar? stm
+    stmToBoole env projLayouts mutArgMap retVar? procName stm
   | [] => return []
 end
 
@@ -3002,7 +3006,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     let localStmts ← localsToVarStmts localsAll
     let retVar? := if hasRet then some (f.retName, f.returnType) else none
     let bodyStmts ← match bodyStm? with
-      | some stm => stmToBoole envLocal projLayouts mutArgMap retVar? stm
+      | some stm => stmToBoole envLocal projLayouts mutArgMap retVar? fnName stm
       | none => pure []
     let allStmts := localStmts ++ bodyStmts
     let body := BooleDDM.Block.block default (ann allStmts.toArray)
@@ -3052,7 +3056,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
         let inExpr ← resolveVar inName
         pure (setStmt (sanitizeVarName outName) inExpr))
       let retVar? := if hasRet then some (f.retName, f.returnType) else none
-      let bodyStmts ← stmToBoole envLocal projLayouts mutArgMap retVar? rewrittenBody
+      let bodyStmts ← stmToBoole envLocal projLayouts mutArgMap retVar? fnName rewrittenBody
       let allStmts := localStmts ++ mutOutInits ++ bodyStmts
       let body := BooleDDM.Block.block default (ann allStmts.toArray)
       pure (specElts, body)

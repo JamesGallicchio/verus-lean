@@ -70,7 +70,7 @@ case_key_from_rs_path() {
   local rel
   case "$p_real" in
     "$vlir_root"/*) rel="${p_real#$vlir_root/}" ;;
-    "$adopted_rvt_root"/*) rel="$(basename "$p_real")" ;;
+    "$adopted_rvt_root"/*) rel="tests__adopted_rust_verify_test__$(basename "$p_real")" ;;
     "$verus_root/tests"/*) rel="${p_real#$verus_root/}" ;;
     "$examples_root"/*) rel="${p_real#$examples_root/}" ;;
     *) rel="$(basename "$p_real")" ;;
