@@ -3,7 +3,7 @@ import VerusLean.VLIR.Delab
 import VerusLean.VLIR.Elab
 import VerusLean.VLIR.Parser
 import VerusLean.VLIR.Pp
-import VerusLean.VLIR.Translation
+import VerusLean.VLIR.VstdHelpers
 import VerusLean.VLIR.Boole.Builder
 import VerusLean.VLIR.Boole.Emit
-import VerusLean.VLIR.Translate
+import VerusLean.VLIR.Boole.Translate

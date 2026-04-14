@@ -16,7 +16,7 @@ import VerusLean.VLIR.Defs
 import VerusLean.VLIR.Boole.Builder
 import VerusLean.VLIR.Boole.Emit
 
-namespace VerusLean
+namespace VerusLean.Boole
 
 namespace Translate
 
@@ -3418,4 +3418,4 @@ def cmdDeclName? : BCmd → Option String
 
 end Translate
 
-end VerusLean
+end VerusLean.Boole

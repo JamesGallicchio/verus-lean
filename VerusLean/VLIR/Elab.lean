@@ -5,7 +5,7 @@ import Lean.Elab
 import VerusLean.Vstd.Seq.Defs
 import VerusLean.Vstd.Set.Defs
 import VerusLean.Vstd.Map.Defs
-import VerusLean.VLIR.Translation
+import VerusLean.VLIR.VstdHelpers
 
 open Lean in
 def String.toIdent (s : String) : CoreM Lean.Ident :=

@@ -1,9 +1,10 @@
 import Lean
 import VerusLean
-import VerusLean.VLIR.Translate
+import VerusLean.VLIR.Boole.Translate
 import VerusLean.VLIR.Boole.Emit
 
 open VerusLean
+open VerusLean.Boole
 
 /-- Text preludes keep source comments for maintainability, but generated
     output files should stay concise. Drop standalone `// ...` lines before
