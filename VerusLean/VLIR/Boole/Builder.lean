@@ -65,7 +65,7 @@ def intConst (n : Int) : BExpr :=
   if n >= 0 then
     .natToInt default ⟨default, n.toNat⟩
   else
-    .neg_expr default unknownTy (.natToInt default ⟨default, n.natAbs⟩)
+    .neg_expr default intTy (.natToInt default ⟨default, n.natAbs⟩)
 
 def bitvecConstNat (w : Nat) (n : Nat) : BExpr :=
   match w with
@@ -82,9 +82,12 @@ def bitvecConst (w : Nat) (bv : BitVec w) : BExpr :=
 /-! ## Expression constructors — compound -/
 
 def ite (c t e : BExpr) : BExpr := .if default unknownTy c t e
+def iteTyped (ty : BType) (c t e : BExpr) : BExpr := .if default ty c t e
 
 def eq (a b : BExpr) : BExpr := .equal default unknownTy a b
 def neq (a b : BExpr) : BExpr := .not_equal default unknownTy a b
+def eqTyped (ty : BType) (a b : BExpr) : BExpr := .equal default ty a b
+def neqTyped (ty : BType) (a b : BExpr) : BExpr := .not_equal default ty a b
 
 /-- Curried function application: `app fn arg`. -/
 def app (fn arg : BExpr) : BExpr := .app default fn arg
@@ -153,6 +156,7 @@ def seqLength (s : BExpr) : BExpr := .seq_length default unknownTy s
 
 /-- Old expression (procedure pre-state). -/
 def old (e : BExpr) : BExpr := .old default unknownTy e
+def oldTyped (ty : BType) (e : BExpr) : BExpr := .old default ty e
 
 /-! ## Quantifiers -/
 

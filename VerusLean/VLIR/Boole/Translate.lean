@@ -20,6 +20,7 @@ import VerusLean.VLIR.Boole.ForLoop
 import VerusLean.VLIR.Boole.Names
 import VerusLean.VLIR.Boole.Normalize
 import VerusLean.VLIR.Boole.Signatures
+import VerusLean.VLIR.Boole.SupportEmit
 
 namespace VerusLean.Boole
 
@@ -34,6 +35,7 @@ open VerusLean.Boole.ForLoop
 open VerusLean.Boole.Names
 open VerusLean.Boole.Normalize
 open VerusLean.Boole.Signatures
+open VerusLean.Boole.SupportEmit
 
 -- `Boole.Bld` re-exports Builder symbols under a short prefix so Translate
 -- can refer to them as `Bld.fvar`, `Bld.app`, etc. without `open`-ing
@@ -197,6 +199,10 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
   | .AirNamed str => do
     let idx ← resolveFreeVar str
     pure (fvarTy idx)
+
+private def typToBooleTypeOrUnknown : Option Typ → BuildM BType
+  | some ty => typToBooleType ty
+  | none => pure unknownTy
 
 def isSeqTyp : Typ → Bool
   | .Struct name _ => datatypeNameOf name == "Seq"
@@ -717,11 +723,13 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
   | .Binary (.ExtEq deep ty) lhs rhs => do
     extEqExpToBoole env bound deep ty lhs rhs
   | .Binary (.Eq _) lhs rhs => do
-    let (_, l, r) ← comparisonPrelude env bound lhs rhs
-    return Bld.eq l r
+    let (argTy?, l, r) ← comparisonPrelude env bound lhs rhs
+    let argTy ← typToBooleTypeOrUnknown argTy?
+    return Bld.eqTyped argTy l r
   | .Binary .Ne lhs rhs => do
-    let (_, l, r) ← comparisonPrelude env bound lhs rhs
-    return Bld.neq l r
+    let (argTy?, l, r) ← comparisonPrelude env bound lhs rhs
+    let argTy ← typToBooleTypeOrUnknown argTy?
+    return Bld.neqTyped argTy l r
   | .Binary .Xor lhs rhs => do
     let l ← expToBoole env bound none lhs
     let r ← expToBoole env bound none rhs
@@ -878,7 +886,9 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let x' ← coerceBvBv srcInfo? targetInfo? x
         return bvNot w x'
       | none => throw "missing bitvector width for op Not"
-    | .Old => return Bld.old x
+    | .Old => do
+      let ty ← typToBooleTypeOrUnknown expected?
+      return Bld.oldTyped ty x
     | .Trigger => return x
     | .Box _ => return x
     | .Unbox _ => return x
@@ -909,7 +919,8 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     let c' ← expToBoole env bound (some .Bool) c
     let t' ← expToBoole env bound expected? t
     let e' ← expToBoole env bound expected? e
-    return Bld.ite c' t' e'
+    let resultTy ← typToBooleTypeOrUnknown expected?
+    return Bld.iteTyped resultTy c' t' e'
   | .Call fn _typs args => do
     let fname := CallFun.name fn
     let fnameStr := identToBoole fname
@@ -1123,7 +1134,7 @@ private partial def extEqExpToBoole
   let rhs' ← expToBoole env bound (some ty) rhs
   -- Simplified: use plain equality for all types
   -- Full version would do pointwise comparison for sequences/sets/maps
-  return Bld.eq lhs' rhs'
+  return Bld.eqTyped (← typToBooleType ty) lhs' rhs'
 
 end
 
@@ -2033,64 +2044,6 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       return acc ++ cmds) []
     return recCmds ++ otherCmds
 
-/-! ## Support Layer: Cast/Stub Declarations -/
-
-private def mkCastFnDecl (name : String) (inputTy outputTy : Typ) : BuildM BCmd := do
-  addFreeVars #[name]
-  let nameAnn := ann name
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
-  let inputBinding := BooleDDM.Binding.mkBinding default (ann "x") (BooleDDM.TypeP.expr (← typToBooleType inputTy))
-  let inputBindings := BooleDDM.Bindings.mkBindings default (ann #[inputBinding])
-  let outputTy' ← typToBooleType outputTy
-  pure (.command_fndecl default nameAnn typeArgs inputBindings outputTy')
-
-private def mkAbstractTypeDecl (name : String) (params : List String) : BuildM BCmd := do
-  addFreeVars #[name]
-  let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
-    if params.isEmpty then ann none
-    else
-      let bindings := params.toArray.map fun p =>
-        BooleDDM.Binding.mkBinding default (ann p) (BooleDDM.TypeP.type default)
-      ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
-  pure (.command_typedecl default (ann name) args)
-
-/-- Emit the polymorphic 2-ary tuple datatype:
-    `datatype Tuple (T0 : Type, T1 : Type) { Tuple_ctor_2(_0 : T0, _1 : T1) };`.
-    Using a datatype (rather than a type decl + uninterpreted function stubs,
-    as the old Core pipeline did) gives the verifier native ctor/accessor
-    reasoning so obligations like `Tuple.._0(Tuple_ctor_2(x, y)) == x` are
-    discharged without extra axioms. VLIR represents every tuple as a
-    nested pair (`Typ.Tuple ty₁ ty₂`), so a single 2-ary datatype covers
-    the surface; `Unit` (0-ary) is handled separately by the existing
-    `Unit` support.
-
-    Field binding names use the `_0` / `_1` numeric-accessor convention from
-    `Names.fieldAccessorNameOf`, so the destructors become `Tuple.._0` and
-    `Tuple.._1` — matching how struct/enum field accesses are already
-    emitted. -/
-private def mkTupleDatatypeDecl : BuildM BCmd := do
-  addFreeVars #["Tuple", "Tuple_ctor_2", "Tuple.._0", "Tuple.._1"]
-  let typeParamBindings : Array (BooleDDM.Binding SourceRange) := #[
-    BooleDDM.Binding.mkBinding default (ann "T0") (BooleDDM.TypeP.type default),
-    BooleDDM.Binding.mkBinding default (ann "T1") (BooleDDM.TypeP.type default)]
-  let typeArgs : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
-    ann (some (BooleDDM.Bindings.mkBindings default (ann typeParamBindings)))
-  -- Reference the datatype's own type parameters by the same fvar-resolution
-  -- path struct emission uses; the Boole parser binds T0/T1 within the
-  -- datatype declaration's scope.
-  let t0Idx ← resolveFreeVar "T0"
-  let t1Idx ← resolveFreeVar "T1"
-  let field0 :=
-    BooleDDM.Binding.mkBinding default (ann "_0") (BooleDDM.TypeP.expr (fvarTy t0Idx))
-  let field1 :=
-    BooleDDM.Binding.mkBinding default (ann "_1") (BooleDDM.TypeP.expr (fvarTy t1Idx))
-  let ctorArgs : Strata.Ann (Option (Strata.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)) SourceRange :=
-    ann (some (ann #[field0, field1]))
-  let ctor := BooleDDM.Constructor.constructor_mk default (ann "Tuple_ctor_2") ctorArgs
-  let constrList := BooleDDM.ConstructorList.constructorListAtom default ctor
-  let dtDecl := BooleDDM.DatatypeDecl.datatype_decl default (ann "Tuple") typeArgs constrList
-  pure (.command_datatypes default (ann #[dtDecl]))
-
 /-! ## Prelude and Entry Point -/
 
 private def buildEnv (decls : List Decl)
@@ -2171,36 +2124,7 @@ def declsToBooleProgram (decls : List Decl) :
   -- during lowering, not from incidental free-variable references.
   let ctx ← get
   let supportNeeds := ctx.supportNeeds
-  -- Only emit support declarations for names actually referenced
-  let mut supportCmds : Array BCmd := #[]
-  if supportNeeds.any (· == .tuple) then
-    supportCmds := supportCmds.push (← mkTupleDatatypeDecl)
-  if supportNeeds.any (· == .nat) then
-    supportCmds := supportCmds.push (← mkAbstractTypeDecl "nat" [])
-  if supportNeeds.any (· == .natToInt) then
-    supportCmds := supportCmds.push (← mkCastFnDecl "nat_to_int" .Nat .Int)
-  if supportNeeds.any (· == .intToNat) then
-    supportCmds := supportCmds.push (← mkCastFnDecl "int_to_nat" .Int .Nat)
-  for w in supportedBvWidths do
-    let castNames := [
-      ((.bvToInt w false : SupportDecl), bvToIntCastName w false, (.UInt w), Typ.Int),
-      ((.bvToInt w true : SupportDecl), bvToIntCastName w true, (.SInt w), Typ.Int),
-      ((.bvToNat w false : SupportDecl), bvToNatCastName w false, (.UInt w), Typ.Nat),
-      ((.bvToNat w true : SupportDecl), bvToNatCastName w true, (.SInt w), Typ.Nat),
-      ((.intToBv w false : SupportDecl), intToBvCastName w false, Typ.Int, (.UInt w)),
-      ((.intToBv w true : SupportDecl), intToBvCastName w true, Typ.Int, (.SInt w))]
-    for (need, name, inTy, outTy) in castNames do
-      if supportNeeds.any (· == need) then
-        supportCmds := supportCmds.push (← mkCastFnDecl name inTy outTy)
-  for fromW in supportedBvWidths do
-    for toW in supportedBvWidths do
-      if fromW < toW then
-        let uName := bvWidenCastName fromW toW false
-        let sName := bvWidenCastName fromW toW true
-        if supportNeeds.any (· == (.bvWiden fromW toW false : SupportDecl)) then
-          supportCmds := supportCmds.push (← mkCastFnDecl uName (.UInt fromW) (.UInt toW))
-        if supportNeeds.any (· == (.bvWiden fromW toW true : SupportDecl)) then
-          supportCmds := supportCmds.push (← mkCastFnDecl sName (.SInt fromW) (.SInt toW))
+  let supportCmds ← supportDeclCommands typToBooleType supportNeeds
   return supportCmds ++ userCmds
 
 /-- Convenience: run the full translation pipeline and return the resulting

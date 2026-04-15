@@ -11,6 +11,7 @@ import VerusLean.VLIR.Boole.Bld
 import VerusLean.VLIR.Boole.Builder
 import VerusLean.VLIR.Boole.Coercions
 import VerusLean.VLIR.Boole.Emit
+import VerusLean.VLIR.Boole.Support
 
 namespace VerusLean.Boole.Cast
 
@@ -18,6 +19,7 @@ open VerusLean
 open VerusLean.Boole.Bld
 open VerusLean.Boole.Coercions
 open VerusLean.Boole.Emit
+open VerusLean.Boole.Support
 
 /-- Resolve a cast helper to a `BExpr` (free variable). -/
 private def castFnExpr (need : SupportDecl) : BuildM BExpr := do

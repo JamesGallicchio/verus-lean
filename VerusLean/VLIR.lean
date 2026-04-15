@@ -15,4 +15,6 @@ import VerusLean.VLIR.Boole.Names
 import VerusLean.VLIR.Boole.Normalize
 import VerusLean.VLIR.Boole.Prelude
 import VerusLean.VLIR.Boole.Signatures
+import VerusLean.VLIR.Boole.Support
+import VerusLean.VLIR.Boole.SupportEmit
 import VerusLean.VLIR.Boole.Translate

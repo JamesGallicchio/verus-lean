@@ -10,11 +10,8 @@
   The `BuildM`-valued cast-insertion helpers live in `Cast.lean`.
 -/
 import VerusLean.VLIR.Defs
-import VerusLean.VLIR.Boole.Context
 
 namespace VerusLean.Boole.Coercions
-
-open VerusLean.Boole.Context (SupportDecl)
 
 open VerusLean
 
@@ -75,20 +72,6 @@ def intToBvCastName (w : Nat) (signed : Bool) : String :=
 
 def bvWidenCastName (fromW toW : Nat) (signed : Bool) : String :=
   if signed then s!"bv{fromW}_to_bv{toW}_s" else s!"bv{fromW}_to_bv{toW}_u"
-
-def supportDeclName : SupportDecl → String
-  | .nat => "nat"
-  | .natToInt => "nat_to_int"
-  | .intToNat => "int_to_nat"
-  | .bvToInt w signed => bvToIntCastName w signed
-  | .bvToNat w signed => bvToNatCastName w signed
-  | .intToBv w signed => intToBvCastName w signed
-  | .bvWiden fromW toW signed => bvWidenCastName fromW toW signed
-  | .tuple => "Tuple"
-
-def supportDeclUsesNat : SupportDecl → Bool
-  | .nat | .natToInt | .intToNat | .bvToNat .. => true
-  | _ => false
 
 def canPromoteBvWidths (fromW toW : Nat) : Bool :=
   isSupportedBvWidth fromW && isSupportedBvWidth toW && fromW <= toW

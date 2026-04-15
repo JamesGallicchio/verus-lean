@@ -15,14 +15,14 @@ export VerusLean.Boole.Builder (
   BExpr BType BStmt BCmd BBlock
   boolTy intTy strTy bvTy mapTy seqTy arrowTy tvarTy fvarTy unknownTy
   fvar bvar boolConst intConst bitvecConstNat bitvecConst
-  ite eq neq app appN
+  ite iteTyped eq neq eqTyped neqTyped app appN
   boolNot boolAnd boolOr boolImplies boolEquiv
   intAdd intSub intMul intDiv intMod intNeg
   intLe intLt intGe intGt
   bvAdd bvSub bvMul bvUDiv bvUMod bvSDiv bvSMod bvNeg
   bvAnd bvOr bvXor bvNot bvShl bvUShr
   bvUle bvUlt bvUge bvUgt bvSle bvSlt bvSge bvSgt
-  mapGet mapSet seqLength old
+  mapGet mapSet seqLength old oldTyped
   forallExpr existsExpr
   varStmt initStmt setStmt havocStmt
   assertStmt assumeStmt coverStmt callStmt blockStmt setStmtTyped

@@ -6,11 +6,13 @@
   returned by parsing the prelude text.
 -/
 import VerusLean.VLIR.Defs
+import VerusLean.VLIR.Boole.Coercions
 import VerusLean.VLIR.Boole.Names
 
 namespace VerusLean.Boole.Prelude
 
 open VerusLean
+open VerusLean.Boole.Coercions
 open VerusLean.Boole.Names
 
 /-- Names whose references require `prelude/Seq.boole.st`.
@@ -28,17 +30,67 @@ def seqTriggerNames : List String :=
 def vecTriggerNames : List String :=
   ["Vec", "Vec_ctor", "Vec_data", "Vec_len", "Vec_index", "Vec_view"]
 
+def seqDirectBuiltinNames : List String :=
+  ["Seq_index", "Seq_update", "Seq_push", "Seq_take", "Seq_skip", "Seq_add",
+   "Seq_first", "Seq_last", "Seq_subrange", "Seq_lib_contains",
+   "Seq_lib_drop_last", "Seq_lib_remove", "Seq_empty"]
+
+def seqTyp (elem : Typ) : Typ :=
+  Typ.Struct (.str (.str .anonymous "vstd") "Seq") [elem]
+
+def setTyp (elem : Typ) : Typ :=
+  Typ.Struct (.str (.str .anonymous "vstd") "Set") [elem]
+
+def vecTyp (elem : Typ) : Typ :=
+  Typ.Struct (.str (.str .anonymous "vstd") "Vec") [elem]
+
+def seqKnownSignatures : List (String × (List Typ × Typ)) :=
+  let t := Typ.TypParam "T"
+  let a := Typ.TypParam "A"
+  let b := Typ.TypParam "B"
+  let seqT := seqTyp t
+  let setT := setTyp t
+  [ ("Seq_index",         ([seqT, .Int], t))
+  , ("Seq_update",        ([seqT, .Int, t], seqT))
+  , ("Seq_push",          ([seqT, t], seqT))
+  , ("Seq_take",          ([seqT, .Int], seqT))
+  , ("Seq_skip",          ([seqT, .Int], seqT))
+  , ("Seq_add",           ([seqT, seqT], seqT))
+  , ("Seq_first",         ([seqT], t))
+  , ("Seq_last",          ([seqT], t))
+  , ("Seq_subrange",      ([seqT, .Int, .Int], seqT))
+  , ("Seq_lib_contains",  ([seqT, t], .Bool))
+  , ("Seq_lib_drop_last", ([seqT], seqT))
+  , ("Seq_lib_remove",    ([seqT, .Int], seqT))
+  , ("Seq_len",           ([seqT], .Nat))
+  , ("Seq_lib_insert",    ([seqT, .Int, t], seqT))
+  , ("Seq_new",           ([.Nat, .SpecFn [.Int] t], seqT))
+  , ("Seq_lib_map",       ([seqTyp a, .SpecFn [.Int, a] b], seqTyp b))
+  , ("Seq_lib_map_values",([seqTyp a, .SpecFn [a] b], seqTyp b))
+  , ("Seq_lib_filter",    ([seqT, .SpecFn [t] .Bool], seqT))
+  , ("Seq_lib_sort_by",   ([seqT, .SpecFn [t, t] .Bool], seqT))
+  , ("Seq_lib_to_set",    ([seqT], setT))
+  , ("Set_finite",        ([setT], .Bool))
+  ]
+
+def vecKnownSignatures : List (String × (List Typ × Typ)) :=
+  let t := Typ.TypParam "T"
+  let seqT := seqTyp t
+  let vecT := vecTyp t
+  [ ("Vec_len",   ([vecT], .UInt usizeBitWidth))
+  , ("Vec_index", ([vecT, .UInt usizeBitWidth], t))
+  , ("Vec_view",  ([vecT], seqT))
+  ]
+
+def knownPreludeSignatures : List (String × (List Typ × Typ)) :=
+  seqKnownSignatures ++ vecKnownSignatures
+
 def needsSeqPrelude (referencedNames : List String) : Bool :=
   seqTriggerNames.any (fun n => referencedNames.contains n) ||
     referencedNames.any (fun n => n == "Sequence" || n.startsWith "Sequence.")
 
 def needsVecPrelude (referencedNames : List String) : Bool :=
   vecTriggerNames.any (fun n => referencedNames.contains n)
-
-private def seqDirectBuiltinNames : List String :=
-  ["Seq_index", "Seq_update", "Seq_push", "Seq_take", "Seq_skip", "Seq_add",
-   "Seq_first", "Seq_last", "Seq_subrange", "Seq_lib_contains",
-   "Seq_lib_drop_last", "Seq_lib_remove", "Seq_empty"]
 
 private def refsOfTyp : Typ → List String
   | .Empty | .Unit | .Bool | .Int | .Nat | .UInt _ | .SInt _ | .Char | .StrSlice => []
