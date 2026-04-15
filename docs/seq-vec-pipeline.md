@@ -3,14 +3,15 @@
 This document describes the **live** Seq/Vec translation path in
 `verus-boogie`: which pieces come directly from Verus SST (JSON), which come
 from the text Seq prelude, which are synthesized by the translator, and which
-operations lower directly to Core built-ins without emitting declarations.
+operations lower directly to Boole/Strata built-ins without emitting
+declarations.
 
 The active prelude model remains **text-first**:
-- `prelude/Seq.core.st` and `prelude/Vec.core.st` are both part of the live
+- `prelude/Seq.boole.st` and `prelude/Vec.boole.st` are both part of the live
   translation path and may be prepended to emitted output.
-- Seq still has a degraded internal fallback when its text prelude is absent.
-- Vec currently does not have such a fallback; if the lowered program needs
-  Vec support, `prelude/Vec.core.st` must be available.
+- If a lowered program needs a text prelude and the corresponding prelude file
+  is absent, that is a configuration problem; the live path no longer treats
+  stale generated Core files as the prelude source of truth.
 
 The Lean translator separately carries exact metadata about:
 - which names are provided by the Seq prelude
@@ -18,7 +19,12 @@ The Lean translator separately carries exact metadata about:
 - which translator-generated numeric/support decls are synthesized internally
 
 That metadata is used for type inference, Seq-prelude need detection,
-duplicate filtering, and the degraded Seq fallback path.
+and duplicate filtering.
+
+Prelude loading is planned from VLIR syntax before BooleDDM construction.  The
+translator no longer performs a probe translation just to discover incidental
+free-variable references, so prelude selection is independent of fvar allocation
+side effects.
 
 Checked-in generated files under `tests/BoogieFiles/` and `tests/BooleFiles/`
 are **snapshots**, not the normative specification of the current pipeline.
@@ -45,8 +51,8 @@ supply paths, plus one direct non-declaration lowering path:
    `append`, `insert`, `remove`, `swap_remove`) via Verus
    `assume_specification` declarations in `vstd/std_specs/vec.rs`.
 
-2. **Prelude files** (`prelude/Seq.core.st`, `prelude/Vec.core.st`) — provide
-   text-first Core declarations for shared Seq/Vec helper types and functions
+2. **Prelude files** (`prelude/Seq.boole.st`, `prelude/Vec.boole.st`) — provide
+   text-first Boole declarations for shared Seq/Vec helper types and functions
    that are not recovered directly from the JSON. The Vec prelude owns the
    datatype plus the accessor names `Vec_len`, `Vec_index`, and `Vec_view`.
 
@@ -54,24 +60,22 @@ supply paths, plus one direct non-declaration lowering path:
    directly during lowering and synthesizes small support declarations on
    demand when the JSON and text preludes do not already provide them. This
    covers numeric support (`nat`, `nat_to_int`, `int_to_nat`), bitvector cast
-   helpers, and collection support decls, but not the pure Vec accessors. The
-   only degraded fallback path is still for the Seq prelude.
+   helpers, and collection support decls, but not the pure Vec accessors.
 
 4. **Direct built-in lowering (no declaration emitted)** — some Seq
    operations are translated straight to `Sequence.*` expressions in the
-   emitted Core program, so they affect behavior without contributing any new
+   emitted Boole program, so they affect behavior without contributing any new
    declaration.
 
 These are not disjoint provenance buckets for the whole program. They overlap
 at the symbol-family level:
 - the `Vec` story is intentionally split between JSON-exported mutation
   procedure stubs and Vec-prelude-owned pure accessors like `Vec_view`
-- Seq-prelude-provided names and translator fallback declarations can overlap
-  by exact name, in which case the fallback is only used when the text Seq
-  prelude is unavailable
+- Seq-prelude-provided names and translator support declarations can overlap
+  by exact name, in which case the active prelude declaration is kept
 
 They are also not a complete partition of all translated declarations:
-- ordinary user/program declarations still come from the main JSON-to-Core
+- ordinary user/program declarations still come from the main JSON-to-Boole
   lowering pipeline
 - the four paths above are only meant to explain the Seq/Vec-specific support
   layer
@@ -85,7 +89,7 @@ it is sanitized to a name like `Seq_push`, then translated **inline** to the
 corresponding Strata `Sequence.*` built-in.  No function declaration is
 emitted — the built-in call appears directly in the output expression.
 
-| Verus SST name     | Core output                                              |
+| Verus SST name     | Boole output                                             |
 |---------------------|----------------------------------------------------------|
 | `Seq_index(s, i)`   | `Sequence.select(s, i)`                                  |
 | `Seq_push(s, x)`    | `Sequence.build(s, x)`                                   |
@@ -104,13 +108,13 @@ emitted — the built-in call appears directly in the output expression.
 ### Declared in Seq Prelude
 
 Functions that cannot be expressed as Strata built-in calls are declared in
-`prelude/Seq.core.st`.  Some have concrete bodies; others are abstract.
+`prelude/Seq.boole.st`.  Some have concrete bodies; others are abstract.
 
 | Function              | Body                                         | Why abstract?                        |
 |-----------------------|----------------------------------------------|--------------------------------------|
 | `Seq_len(s)`          | `int_to_nat(Sequence.length(s))` (concrete)  | —                                    |
 | `Seq_lib_insert(s,i,v)` | `Sequence.append(Sequence.build(Sequence.take(s,i),v), Sequence.drop(s,i))` (concrete) | — |
-| `Seq_new(len, f)`     | abstract                                     | Requires iteration — not expressible in Core function syntax |
+| `Seq_new(len, f)`     | abstract                                     | Requires iteration — not expressible in first-order Boole function syntax |
 | `Seq_lib_map(s, f)`   | abstract                                     | Higher-order iteration               |
 | `Seq_lib_map_values`  | abstract                                     | Higher-order iteration               |
 | `Seq_lib_filter`      | abstract                                     | Higher-order iteration               |
@@ -130,15 +134,11 @@ Those declarations are emitted from the same support assembly as the other
 translator-generated cast helpers, so later nat-using features do not depend
 on the Seq prelude just to get the `nat` bridge functions.
 
-### Fallback Path (No Prelude File)
+### Missing Prelude Files
 
-If `prelude/Seq.core.st` is absent, the translator generates equivalent
-**abstract** function stubs via `neededSeqPreludeFallbackDecls`, using the
-Seq-prelude portion of the translator's known-function registry. These stubs
-have no concrete bodies — the fallback path is a degraded mode.
-
-There is currently **no degraded fallback** for the live Vec path. Vec support
-requires the text Vec prelude.
+The live Boole pipeline treats the text preludes as the maintained model.  If a
+needed prelude is missing, fix the prelude configuration rather than relying on
+old generated `.core.st` snapshots.
 
 ## Vec Operations
 
@@ -146,7 +146,7 @@ requires the text Vec prelude.
 
 The live translator uses the Vec prelude datatype:
 
-- a Vec-typed variable `v : Vec<T>` lowers to a Core variable `v : Vec T`
+- a Vec-typed variable `v : Vec<T>` lowers to a Boole variable `v : Vec T`
 - procedure headers and local declarations keep that datatype directly
 - ghost/spec-facing sequence views go through the abstract prelude helper
   `Vec_view(v) : Sequence T`
@@ -155,7 +155,7 @@ The live translator uses the Vec prelude datatype:
 
 When the translator encounters Vec operations in expressions:
 
-| Verus SST call                   | Core output                         |
+| Verus SST call                   | Boole output                        |
 |----------------------------------|-------------------------------------|
 | `view::View::view(v)` on a Vec  | `Vec_view(v)`                       |
 | `spec_vec_len(v)` or `vec::len` | `Vec_len(v)`                        |
@@ -172,7 +172,7 @@ with `has_body=False` and ensures clauses derived from Verus's
 these as **body-less procedure stubs** — Strata treats the ensures as
 trusted axioms at call sites.
 
-| Verus SST declaration          | Core procedure (conceptually) | Ensures (after Vec lowering)                     |
+| Verus SST declaration          | Boole procedure (conceptually) | Ensures (after Vec lowering)                    |
 |---------------------------------|-------------------------------|--------------------------------------------------|
 | `vec::impl&%0::new`            | `Vec_new<T>()`                | `Vec_view(v) == Sequence.empty`                  |
 | `vec::impl&%1::push`           | `Vec_push<T>(vec, val)`       | `Vec_view(out) == Sequence.build(Vec_view(vec), val)` |
@@ -195,23 +195,18 @@ canonicalized by `stripImplSegment`, which removes `_Impl__N_` segments:
 
 ## Prelude Inclusion Logic
 
-1. `declsToProgram` computes structured text-prelude needs from the emitted
-   Core references using exact trigger manifests:
+1. `Main.lean` probes `declsToBooleProgram` to compute text-prelude needs
+   from emitted Boole references using exact trigger manifests:
    - Seq prelude is needed if any Seq-prelude trigger type/value is referenced
    - Vec prelude is needed if any Vec-prelude trigger type/value is referenced
 
-2. If the text Seq prelude is unavailable, `neededSeqPreludeFallbackDecls`
-   synthesizes abstract fallback declarations for the Seq-prelude-owned names.
-
-3. If the text Vec prelude is unavailable when needed, translation fails fast.
-
-4. In `Main.lean`, the requested Seq and Vec prelude texts are prepended in
+2. In `Main.lean`, the requested Seq and Vec prelude texts are prepended in
    that order.
 
-5. Declarations provided by the active Seq/Vec preludes are filtered from the
+3. Declarations provided by the active Seq/Vec preludes are filtered from the
    translator output by exact name.
 
-6. Type inference for Seq-prelude-provided names and direct built-in lowering
+4. Type inference for Seq-prelude-provided names and direct built-in lowering
    still uses Lean-side metadata tables so lowering can assign expected types
    before the textual prelude is spliced in.
 

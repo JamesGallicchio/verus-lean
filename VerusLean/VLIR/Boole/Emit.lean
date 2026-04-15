@@ -3,15 +3,15 @@
 
   This module owns the final step:  `Array BooleDDM.Command → String`.
   It handles:
-    • Name resolution context (ToCSTContext) for free/bound variable indices.
+    • Name resolution context for free/bound variable indices.
     • Prelude text loading + merging.
     • Calling Strata's official formatter (`Boole.formatProgram`).
 -/
 import VerusLean.VLIR.Boole.Builder
+import VerusLean.VLIR.Boole.Context
 
 import Strata.Languages.Boole.Boole
 import Strata.Languages.Boole.Verify
-import Strata.Languages.Core.DDMTransform.ASTtoCST
 import Strata.Util.IO
 
 namespace VerusLean.Boole.Emit
@@ -19,23 +19,19 @@ namespace VerusLean.Boole.Emit
 open Strata
 open Strata.BooleDDM
 open VerusLean.Boole.Builder
+open VerusLean.Boole.Context
 
-/-- The build context tracks free/bound variable scopes for de Bruijn index
-    resolution when constructing BooleDDM nodes. -/
-abbrev BuildCtx := ToCSTContext SourceRange
-abbrev BuildM := StateT BuildCtx (Except String)
-
-def emptyCtx : BuildCtx := ToCSTContext.empty
+export VerusLean.Boole.Context (BuildCtx BuildM SupportDecl emptyCtx requireSupport freshLoopLabelId)
 
 /-- Run a sub-computation in a fresh scope (pushes and pops). -/
 def withScope (k : BuildM α) : BuildM α := do
-  modify ToCSTContext.pushScope
+  modify BuildCtx.pushScope
   try
     let out ← k
-    modify ToCSTContext.popScope
+    modify BuildCtx.popScope
     pure out
   catch e =>
-    modify ToCSTContext.popScope
+    modify BuildCtx.popScope
     throw e
 
 /-- Add names as bound variables in the current scope.
@@ -44,13 +40,8 @@ def withScope (k : BuildM α) : BuildM α := do
     Keep binders in source order here and make lookup search from the right;
     this preserves source binder order while producing verifier-compatible
     de Bruijn indices. -/
-def addBoundVars (names : Array String) (reverse? : Bool := false) : BuildM Unit := do
-  let names := if reverse? then names.reverse else names
-  modify fun ctx =>
-    let idx := ctx.scopes.size - 1
-    let scope := ctx.scopes[idx]!
-    let newScope := { scope with boundVars := scope.boundVars ++ names }
-    { ctx with scopes := ctx.scopes.set! idx newScope }
+def addBoundVars (names : Array String) : BuildM Unit := do
+  modify (·.addBoundVars names)
 
 /-- Push a single bound var to current scope (convenience for init stmts). -/
 def pushBoundVar (name : String) : BuildM Unit :=
@@ -79,10 +70,9 @@ private def findBoundVarIndex? (vars : Array String) (name : String) : Option Na
     match remaining with
     | 0 => none
     | i + 1 =>
-        if vars[i]! == name then
-          some offset
-        else
-          go i (offset + 1)
+        match vars[i]? with
+        | some v => if v == name then some offset else go i (offset + 1)
+        | none => none
   go vars.size 0
 
 /-- Look up a bound variable by name. Returns `none` if not in scope. -/
@@ -141,7 +131,7 @@ def renderProgram
     let body := Std.Format.pretty formatted 100
     -- `Boole.formatProgram` emits only the program body; the dialect header
     -- is required for the output to be re-parseable (this mirrors the fix
-    -- Strata PR #767 applied to `Core.formatProgram` for `program Core;`).
+    -- Strata PR #767 applied the same header fix to Core formatting.
     let output := s!"program Boole;\n\n{body}"
     let output := if output.endsWith "\n" then output else output ++ "\n"
     .ok output

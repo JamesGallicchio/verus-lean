@@ -1,7 +1,7 @@
 /-
   Boole.Builder — Uniform combinators for constructing BooleDDM AST nodes.
 
-  This module provides a Core-style uniform API that internally routes to
+  This module provides a small uniform API that internally routes to
   the appropriate BooleDDM constructor.  The translator speaks in terms of
   these combinators so that:
 
@@ -40,7 +40,8 @@ def bvTy (w : Nat) : BType :=
   | 16 => .bv16 default
   | 32 => .bv32 default
   | 64 => .bv64 default
-  | _  => .bv64 default
+  | _  => panic! s!"bvTy: unsupported bitvector width {w} (expected 1|8|16|32|64); \
+    callers must filter via Coercions.isSupportedBvWidth"
 
 def mapTy (key val : BType) : BType := .Map default val key
 def seqTy (elem : BType) : BType := .Sequence default elem
@@ -73,7 +74,7 @@ def bitvecConstNat (w : Nat) (n : Nat) : BExpr :=
   | 16 => .bv16Lit default ⟨default, n⟩
   | 32 => .bv32Lit default ⟨default, n⟩
   | 64 => .bv64Lit default ⟨default, n⟩
-  | _  => .bv64Lit default ⟨default, n⟩
+  | _  => panic! s!"bitvecConstNat: unsupported bitvector width {w} (expected 1|8|16|32|64)"
 
 def bitvecConst (w : Nat) (bv : BitVec w) : BExpr :=
   bitvecConstNat w bv.toNat
@@ -190,9 +191,12 @@ def varStmt (name : String) (ty : BType) : BStmt :=
 def initStmt (name : String) (ty : BType) (rhs : BExpr) : BStmt :=
   .initStatement default ty (ann name) rhs
 
-def setStmt (name : String) (rhs : BExpr) : BStmt :=
+def setStmtTyped (ty : BType) (name : String) (rhs : BExpr) : BStmt :=
   let lhs := BooleDDM.Lhs.lhsIdent default (ann name)
-  .assign default unknownTy lhs rhs
+  .assign default ty lhs rhs
+
+def setStmt (name : String) (rhs : BExpr) : BStmt :=
+  setStmtTyped unknownTy name rhs
 
 def havocStmt (name : String) : BStmt :=
   .havoc_statement default (ann name)

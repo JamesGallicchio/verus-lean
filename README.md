@@ -6,7 +6,6 @@ that allows for the export of verus definitions and verification conditions to L
 This repository now supports two main translation paths:
 - `Verus -> Lean`
 - `Verus -> Boole` (direct VLIR -> BooleDDM)
-- `Verus -> Strata Core` is a legacy/testing path
 
 ## Building
 
@@ -78,7 +77,7 @@ VERUS_DIR=/path/to/verus STRATA_DIR=/path/to/Strata ./tests/run_tests.sh --all /
 You can also override direct binaries if needed:
 
 ```bash
-VERUS_BIN=/path/to/verus VERUS_LEAN=/path/to/verus-lean ./tests/run_tests.sh --boogie /path/to/file.json
+VERUS_BIN=/path/to/verus VERUS_LEAN=/path/to/verus-lean ./tests/run_tests.sh --boole /path/to/file.json
 ```
 
 Boole output directory can be overridden:
@@ -89,24 +88,22 @@ BOOLE_DIR=/path/to/boole-output ./tests/run_tests.sh --boole /path/to/file.rs
 
 Stage options:
 - `--verus`: export Verus `.rs` to JSON
-- `--boogie`: translate JSON to Strata Core (`.core.st`)
 - `--boole`: generate Boole `.boole.st` plus a Lean verifier wrapper from target
   (`.rs -> JSON -> Boole`, `.json -> Boole`)
-- `--lean`: translate Lean JSON to Lean output
-- `--verify`: run `strata verify` on generated Core
-- `--all`: run `--verus --boogie --verify`
+- `--verify`: run Strata Boole verification on generated Lean wrappers
+- `--all`: run `--verus --boole --verify`
 
 Other options:
 - `--solver <name>` (default: `cvc5`)
 - `--solver-timeout <sec>`
 - `--out <path>` output file path for single-target runs
-  (supported for exactly one output stage: `--lean`, `--boogie`, or `--boole`)
+  (supported for single-target `--boole` runs)
 - `--verbose`
 
 `target_path` is optional. If provided, it should be a file path:
-- `.rs` for Verus export (and downstream boogie/verify if selected)
-- `.json` for boogie/lean translation
-- `.core.st` (or legacy `.boogie.st`) for verify
+- `.rs` for Verus export and downstream Boole generation/verification
+- `.json` for Boole generation
+- `.lean` for Boole verification wrappers
 
 `--boole` is end-to-end by target type:
 - `.rs`: runs Verus export + Boole generation
@@ -114,29 +111,6 @@ Other options:
 - no target: generates Boole files from existing JSON bundles
 
 `target_path` may be relative or absolute.
-
-### Verus -> Lean
-
-```bash
-# Export + Lean translation for one Verus file
-./tests/run_tests.sh --verus --lean tests/VerusFiles/FindMax.rs
-
-# Lean translation from an existing Lean JSON
-./tests/run_tests.sh --lean tests/JSONFilesLean/FindMax.json
-```
-
-### Verus -> Strata Core / strata verify
-
-```bash
-# Export + Core translation + Strata verification
-./tests/run_tests.sh --all tests/VerusFiles/FindMax.rs
-
-# Translate one exported JSON file
-./tests/run_tests.sh --boogie tests/JSONFilesBoogie/vlir-tests/FindMax/FindMax.json
-
-# Verify one generated Core file
-./tests/run_tests.sh --verify tests/BoogieFiles/vlir-tests/FindMax.core.st
-```
 
 ### Verus -> Boole
 
@@ -155,6 +129,26 @@ Other options:
 Default Boole output directory:
 - Boole source files: `tests/BooleFiles`
 - Lean verifier wrappers: `tests/BoolePrograms`
+
+### Boole translation internals
+
+The Boole path lowers VLIR directly to `BooleDDM`:
+
+- `VerusLean/VLIR/Boole/Context.lean` tracks fvar/bvar scope state and typed
+  support-declaration needs.
+- `Names.lean`, `Coercions.lean`, `Signatures.lean`, and `Prelude.lean` hold
+  name normalization, numeric coercion policy, known helper signatures, and
+  text-prelude planning metadata.
+- `Normalize.lean` performs pure VLIR rewrites before BooleDDM construction:
+  temp inlining, compute-proof recovery, decrease stripping, return-artifact
+  stripping, and capture-avoiding substitution.
+- `ForLoop.lean` recognizes Verus iterator scaffolding and returns a recovered
+  source-style loop plan; `Translate.lean` emits that plan as BooleDDM.
+- `Emit.lean` parses selected text preludes, merges operations, and renders via
+  Strata's Boole formatter.
+
+`docs/seq-vec-pipeline.md` documents the live Seq/Vec support path.
+`docs/boole-translation-todo.md` tracks remaining cleanup work.
 
 
 ## Contributors

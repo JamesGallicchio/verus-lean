@@ -4,6 +4,15 @@ import VerusLean.VLIR.Elab
 import VerusLean.VLIR.Parser
 import VerusLean.VLIR.Pp
 import VerusLean.VLIR.VstdHelpers
+import VerusLean.VLIR.Boole.Bld
 import VerusLean.VLIR.Boole.Builder
+import VerusLean.VLIR.Boole.Cast
+import VerusLean.VLIR.Boole.Context
+import VerusLean.VLIR.Boole.Coercions
 import VerusLean.VLIR.Boole.Emit
+import VerusLean.VLIR.Boole.ForLoop
+import VerusLean.VLIR.Boole.Names
+import VerusLean.VLIR.Boole.Normalize
+import VerusLean.VLIR.Boole.Prelude
+import VerusLean.VLIR.Boole.Signatures
 import VerusLean.VLIR.Boole.Translate

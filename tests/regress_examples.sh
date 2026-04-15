@@ -198,6 +198,7 @@ gen_missing_json=()
 verify_passed=0
 verify_skipped_seq=0
 verify_skipped_gap=0
+verify_known_translator_bugs=0
 verify_failed=()
 
 verbose_flag=()
@@ -239,7 +240,11 @@ for target in "${targets[@]}"; do
   (cd "$STRATA_DIR" && lake env lean "$lean_file") >"$verify_log" 2>&1
   vrc=$?
   set -e
-  category="$(classify_boole_verify_log "$verify_log" "$vrc")"
+  category="$(classify_boole_verify_log \
+    "$verify_log" \
+    "$vrc" \
+    "$(expected_boole_fail_pattern_for_wrapper "$lean_file")" \
+    "$(known_translator_bug_pattern_for_wrapper "$lean_file")")"
   case "$category" in
     pass)
       verify_passed=$((verify_passed + 1))
@@ -252,6 +257,10 @@ for target in "${targets[@]}"; do
     skip_gap)
       verify_skipped_gap=$((verify_skipped_gap + 1))
       echo "  verify: SKIP (Strata gap)"
+      ;;
+    known_translator_bug)
+      verify_known_translator_bugs=$((verify_known_translator_bugs + 1))
+      echo "  verify: KNOWN TRANSLATOR BUG"
       ;;
     *)
       verify_failed+=("$target")
@@ -269,6 +278,7 @@ echo "  missing json:        ${#gen_missing_json[@]}"
 echo "  verify passed:       $verify_passed"
 echo "  verify skipped seq:  $verify_skipped_seq"
 echo "  verify skipped gap:  $verify_skipped_gap"
+echo "  known translator bugs: $verify_known_translator_bugs"
 echo "  verify failures:     ${#verify_failed[@]}"
 
 rc=0

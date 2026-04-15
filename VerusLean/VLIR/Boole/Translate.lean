@@ -4,17 +4,22 @@
   Translates the Verus-Lean IR (VLIR) directly to BooleDDM AST,
   bypassing the intermediate Strata Core representation.
 
-  This is a rewrite of ToCore.lean that produces `BExpr`/`BStmt`/`BCmd`
-  (from Builder.lean) instead of `CoreExpr`/`Core.Statement`/`Core.Decl`.
-
-  The monad is `BuildM` (from Emit.lean), which tracks free/bound variable
-  scopes for de Bruijn index resolution in BooleDDM nodes.
+  This module produces `BExpr`/`BStmt`/`BCmd` nodes from Builder.lean.
+  Name-to-index state lives in Boole.Context and is used because BooleDDM
+  represents source variables with numeric bvar/fvar indices.
 -/
 
 import Std.Data.HashMap
 import VerusLean.VLIR.Defs
+import VerusLean.VLIR.Boole.Bld
 import VerusLean.VLIR.Boole.Builder
+import VerusLean.VLIR.Boole.Cast
+import VerusLean.VLIR.Boole.Coercions
 import VerusLean.VLIR.Boole.Emit
+import VerusLean.VLIR.Boole.ForLoop
+import VerusLean.VLIR.Boole.Names
+import VerusLean.VLIR.Boole.Normalize
+import VerusLean.VLIR.Boole.Signatures
 
 namespace VerusLean.Boole
 
@@ -22,37 +27,32 @@ namespace Translate
 
 open Strata
 open Strata.BooleDDM
+open VerusLean.Boole.Cast
+open VerusLean.Boole.Coercions
 open VerusLean.Boole.Emit
+open VerusLean.Boole.ForLoop
+open VerusLean.Boole.Names
+open VerusLean.Boole.Normalize
+open VerusLean.Boole.Signatures
 
--- We intentionally do NOT `open VerusLean.Boole.Builder` because some of its
--- names (`fvar`, `bvar`, `app`, `eq`, `old`, …) conflict with Lean builtins
--- or BooleDDM constructors inside `mutual` blocks.  Instead we re-export
--- under the short prefix `Bld.*`.
-namespace Bld
-  export VerusLean.Boole.Builder (
-    BExpr BType BStmt BCmd BBlock
-    boolTy intTy strTy bvTy mapTy seqTy arrowTy tvarTy fvarTy unknownTy
-    fvar bvar boolConst intConst bitvecConstNat bitvecConst
-    ite eq neq app appN
-    boolNot boolAnd boolOr boolImplies boolEquiv
-    intAdd intSub intMul intDiv intMod intNeg
-    intLe intLt intGe intGt
-    bvAdd bvSub bvMul bvUDiv bvUMod bvSDiv bvSMod bvNeg
-    bvAnd bvOr bvXor bvNot bvShl bvUShr
-    bvUle bvUlt bvUge bvUgt bvSle bvSlt bvSge bvSgt
-    mapGet mapSet seqLength old
-    forallExpr existsExpr
-    varStmt initStmt setStmt havocStmt
-    assertStmt assumeStmt coverStmt callStmt blockStmt
-    iteStmt whileStmt forToStmt exitStmt returnStmt
-  )
-end Bld
-open Bld
+-- `Boole.Bld` re-exports Builder symbols under a short prefix so Translate
+-- can refer to them as `Bld.fvar`, `Bld.app`, etc. without `open`-ing
+-- Builder directly (whose names collide with Lean builtins and BooleDDM
+-- constructors inside `mutual` blocks).
+open VerusLean.Boole.Bld
 
 private def ann (v : α) : Strata.Ann α SourceRange := ⟨default, v⟩
 private def noLabel : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange := ann none
 private def someLabel (s : String) : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange :=
   ann (some (.label default (ann s)))
+
+/-- Predicate passed to `Normalize.inlineTemps`: which call-function names
+    are safe to inline through temp-assignment prefixes without changing
+    semantics. This is the translator-side view of library-shape names —
+    kept here so `Normalize.lean` stays independent of `Names.lean`. -/
+private def isPureBooleBuiltinCallName (fn : Ident) : Bool :=
+  isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
+    || isVecIndexSpecName fn || isVecIndexExecName fn
 
 /-! ## Type Aliases -/
 
@@ -64,168 +64,6 @@ structure MutArgInfo where
   ty : Typ
 
 abbrev MutArgMap := Std.HashMap String (List MutArgInfo)
-
-/-! ## Utilities -/
-
-/-- Sanitize an identifier for Boole emission.
-    First char: [A-Za-z_], rest: [A-Za-z0-9_'?!].
-    Characters outside this set are replaced by `_`. -/
-def sanitizeIdent (s : String) : String :=
-  match s.toList with
-  | [] => "_"
-  | c :: cs =>
-    let first := if c.isAlpha || c == '_' then c else '_'
-    let rest := cs.map (fun c =>
-      if c.isAlphanum || c == '_' || c == '\'' || c == '?' || c == '!' then c else '_')
-    let out := String.ofList (first :: rest)
-    if out == "type" then "type_" else out
-
-/-- Drop the leading namespace segment from a dotted/double-colon identifier. -/
-def stripLeadingNamespace (s : String) : String :=
-  let dropFirstSegment (sep : String) : Option String :=
-    match s.splitOn sep with
-    | _ :: rest@(_ :: _) => some (String.intercalate sep rest)
-    | _ => none
-  let dropLeadingModulePrefix : Option String :=
-    match s.splitOn "_" with
-    | p :: rest@(_ :: _) =>
-      let startsUpper := match p.toList.head? with
-        | some c => c.isUpper
-        | none => false
-      let alphaNum := p.toList.all (fun c => c.isAlpha || c.isDigit)
-      if startsUpper && alphaNum then
-        some (String.intercalate "_" rest)
-      else
-        none
-    | _ => none
-  (dropFirstSegment "." <|> dropFirstSegment "::" <|> dropLeadingModulePrefix).getD s
-
-/-- Strip `_Impl__N_` segments from sanitized names. -/
-private def stripImplSegment (name : String) : String :=
-  let tryStrip (sep : String) : Option String :=
-    match name.splitOn sep with
-    | [before, after] =>
-      let digits := after.toList.takeWhile Char.isDigit
-      if digits.isEmpty then none
-      else
-        let rest := after.drop digits.length
-        let rest := if rest.startsWith "_" then rest.drop 1 else rest
-        if rest.isEmpty then some before
-        else some s!"{before}_{rest}"
-    | _ => none
-  (tryStrip "_Impl__" <|> tryStrip "_impl__").getD name
-
-def identToBoole (i : Ident) : String :=
-  stripImplSegment (sanitizeIdent (stripLeadingNamespace i.toString))
-
-def sanitizeVarName (s : String) : String :=
-  sanitizeIdent (s.replace "%" "_pct_")
-
-def usizeBitWidth : Nat := 64
-
-def isSupportedBvWidth (w : Nat) : Bool :=
-  w == 1 || w == 8 || w == 16 || w == 32 || w == 64
-
-private def supportedBvWidths : List Nat := [1, 8, 16, 32, 64]
-
-/-! ## Name Helpers -/
-
-private def strataReservedTypeNames : List String :=
-  ["Seq", "Set", "Map", "Multiset", "Triggers", "TriggerGroup"]
-
-private def canonicalStdlibTypeName? (dt : Ident) : Option String :=
-  let raw := dt.toString
-  let rawLower := raw.toLower
-  let short := sanitizeIdent (stripLeadingNamespace raw)
-  if rawLower.contains "vstd" then
-    if short == "Seq" && rawLower.contains "seq" then some "Seq"
-    else if short == "Set" && rawLower.contains "set" then some "Set"
-    else if short == "Multiset" && rawLower.contains "multiset" then some "Multiset"
-    else none
-  else
-    none
-
-def datatypeNameOf (dt : Ident) : String :=
-  match canonicalStdlibTypeName? dt with
-  | some name => name
-  | none =>
-    let name := sanitizeIdent (stripLeadingNamespace dt.toString)
-    if strataReservedTypeNames.contains name then s!"Verus_{name}" else name
-
-def structCtorNameOf (dt : Ident) : String :=
-  datatypeNameOf dt ++ "_ctor"
-
-def enumCtorNameOf (dt : Ident) (variant : String) : String :=
-  datatypeNameOf dt ++ "_" ++ sanitizeIdent variant
-
-def fieldAccessorNameOf (field : String) : String :=
-  match field.toNat? with
-  | some i => s!"_{i}"
-  | none => sanitizeIdent field
-
-def datatypeDestructorNameOf (dt : Ident) (field : String) : String :=
-  s!"{datatypeNameOf dt}..{fieldAccessorNameOf field}"
-
-def enumTesterNameOf (dt : Ident) (variant : String) : String :=
-  let dtName := datatypeNameOf dt
-  let ctorName := enumCtorNameOf dt variant
-  s!"{dtName}..is{ctorName}"
-
-def projFieldNameOf (dt : Ident) (variant field : String) : String :=
-  if field == "_" then
-    s!"{datatypeNameOf dt}_{sanitizeIdent variant}_0"
-  else
-    match field.toNat? with
-    | some i => s!"{datatypeNameOf dt}_{sanitizeIdent variant}_{i}"
-    | none =>
-      let dtName := datatypeNameOf dt
-      let variantName := sanitizeIdent variant
-      if variantName.toLower == dtName.toLower then
-        field
-      else
-        s!"{dtName}_{variantName}_{sanitizeIdent field}"
-
-/-! ## Vec/Seq Name Recognition -/
-
-def isVecTypeName (name : Ident) : Bool :=
-  let s := name.toString
-  s.endsWith "Vec" || s.endsWith "vec"
-
-def isVecLenSpecName (name : Ident) : Bool :=
-  let s := name.toString
-  s.endsWith "spec_vec_len" || s.endsWith "Seq.len" || s.endsWith "seq.len"
-
-def isVecLenExecName (name : Ident) : Bool :=
-  let s := name.toString
-  let hasAlloc := (s.find? "Alloc").isSome || (s.find? "alloc").isSome
-  let hasVec := (s.find? "Vec").isSome || (s.find? "vec").isSome
-  s.endsWith "len" && hasAlloc && hasVec
-
-def isVecIndexSpecName (name : Ident) : Bool :=
-  let s := name.toString
-  s.endsWith "Seq.index" || s.endsWith "seq.index"
-
-def isVecIndexExecName (name : Ident) : Bool :=
-  name.toString.endsWith "vec_index"
-
-def isViewName (name : Ident) : Bool :=
-  name.toString.endsWith ".view"
-
-def isRangeTypeName (name : Ident) : Bool :=
-  let s := name.toString.toLower
-  s.endsWith "range.range" || s.endsWith "range::range"
-
-def isIteratorNextName (name : Ident) : Bool :=
-  let s := name.toString.toLower
-  s.endsWith "next" && s.contains "iterator"
-
-def isIntoIterName (name : Ident) : Bool :=
-  let s := name.toString.toLower
-  s.endsWith "into_iter" && s.contains "collect"
-
-def isGhostPervasiveCallName (fn : Ident) : Bool :=
-  let s := fn.toString.toLower
-  s.contains "pervasive" && s.contains "ghost_"
 
 /-! ## Environment Helpers -/
 
@@ -285,13 +123,6 @@ def mutArgInfos (inputs : List (String × Typ)) : List MutArgInfo :=
       here ++ go (i + 1) tail
   go 0 inputs
 
-def isFuelVar : Exp → Bool
-  | .Var name => name.startsWith "fuel%" || name.startsWith "fuel_"
-  | _ => false
-
-def normalizeCallArgs (args : List Exp) : List Exp :=
-  args.filter (fun e => !isFuelVar e)
-
 private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : List Exp) : List Exp :=
   let fnameStr := identToBoole fname
   let argsNoFuel := normalizeCallArgs args
@@ -312,6 +143,7 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
     let idx ← resolveFreeVar "Unit"
     pure (fvarTy idx)
   | .Tuple t1 t2 => do
+    requireSupport .tuple
     let idx ← resolveFreeVar "Tuple"
     let a1 ← typToBooleType t1
     let a2 ← typToBooleType t2
@@ -319,6 +151,7 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
   | .Bool => pure boolTy
   | .Int => pure intTy
   | .Nat => do
+    requireSupport .nat
     let idx ← resolveFreeVar "nat"
     pure (fvarTy idx)
   | .UInt w | .SInt w =>
@@ -365,30 +198,6 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
     let idx ← resolveFreeVar str
     pure (fvarTy idx)
 
-def bitWidthOfTyp : Typ → Option Nat
-  | .UInt w | .SInt w => if isSupportedBvWidth w then some w else none
-  | .Decorated _ ty => bitWidthOfTyp ty
-  | _ => none
-
-def bitInfoOfTyp : Typ → Option (Nat × Bool)
-  | .UInt w => if isSupportedBvWidth w then some (w, false) else none
-  | .SInt w => if isSupportedBvWidth w then some (w, true) else none
-  | .Decorated _ ty => bitInfoOfTyp ty
-  | _ => none
-
-def isIntTyp : Typ → Bool
-  | .Int => true
-  | .Decorated _ ty => isIntTyp ty
-  | _ => false
-
-def isUnitLikeTyp : Typ → Bool
-  | .Unit | .Empty => true
-  | .Decorated _ ty => isUnitLikeTyp ty
-  | _ => false
-
-def bitTypOfInfo (w : Nat) (signed : Bool) : Typ :=
-  if signed then Typ.SInt w else Typ.UInt w
-
 def isSeqTyp : Typ → Bool
   | .Struct name _ => datatypeNameOf name == "Seq"
   | .Decorated _ ty => isSeqTyp ty
@@ -399,175 +208,6 @@ def vecElemTyp? : Typ → Option Typ
     if isVecTypeName name then params.head? else none
   | .Decorated _ ty => vecElemTyp? ty
   | _ => none
-
-/-! ## Numeric Coercion -/
-
-/-- Numeric type classification for coercion decisions. -/
-inductive NumKind where
-  | int
-  | nat
-  | bv (w : Nat) (signed : Bool)
-  deriving DecidableEq, Repr
-
-def numKindOfTyp? : Typ → Option NumKind
-  | .Int => some .int
-  | .Nat => some .nat
-  | .UInt w => if isSupportedBvWidth w then some (.bv w false) else none
-  | .SInt w => if isSupportedBvWidth w then some (.bv w true) else none
-  | .Decorated _ ty => numKindOfTyp? ty
-  | _ => none
-
-def bvToIntCastName (w : Nat) (signed : Bool) : String :=
-  if signed then s!"bv{w}_to_int_s" else s!"bv{w}_to_int_u"
-
-def bvToNatCastName (w : Nat) (signed : Bool) : String :=
-  if signed then s!"bv{w}_to_nat_s" else s!"bv{w}_to_nat_u"
-
-def intToBvCastName (w : Nat) (signed : Bool) : String :=
-  if signed then s!"int_to_bv{w}_s" else s!"int_to_bv{w}_u"
-
-def bvWidenCastName (fromW toW : Nat) (signed : Bool) : String :=
-  if signed then s!"bv{fromW}_to_bv{toW}_s" else s!"bv{fromW}_to_bv{toW}_u"
-
-def isBvToIntCastName (s : String) : Bool :=
-  s.endsWith "_to_int_u" || s.endsWith "_to_int_s"
-
-def isBvToNatCastName (s : String) : Bool :=
-  s.endsWith "_to_nat_u" || s.endsWith "_to_nat_s"
-
-def isIntToBvCastName (s : String) : Bool :=
-  s.startsWith "int_to_bv" && (s.endsWith "_u" || s.endsWith "_s")
-
-def isBvWidenCastName (s : String) : Bool :=
-  (s.startsWith "bv" && (s.find? "_to_bv").isSome && (s.endsWith "_u" || s.endsWith "_s"))
-
-private def canPromoteBvWidths (fromW toW : Nat) : Bool :=
-  isSupportedBvWidth fromW && isSupportedBvWidth toW && fromW <= toW
-
-private def choosePromotionWidth? (w1 w2 : Nat) : Option Nat :=
-  let w := max w1 w2
-  if canPromoteBvWidths w1 w && canPromoteBvWidths w2 w then some w else none
-
-private def chooseBitPromotionInfo?
-    (lhsInfo rhsInfo : Nat × Bool) : Option (Nat × Bool) :=
-  let (w1, s1) := lhsInfo
-  let (w2, s2) := rhsInfo
-  if s1 == s2 then
-    (choosePromotionWidth? w1 w2).map (fun w => (w, s1))
-  else
-    none
-
-/-- Resolve a cast function name to a BExpr (free variable). -/
-private def castFnExpr (name : String) : BuildM BExpr := do
-  let idx ← resolveFreeVar name
-  pure (Bld.fvar idx)
-
-/-- Apply a unary cast function. -/
-private def applyCast (castName : String) (e : BExpr) : BuildM BExpr := do
-  let fn ← castFnExpr castName
-  pure (Bld.app fn e)
-
-private def castExprToWiderBvB (fromW toW : Nat) (signed : Bool) (e : BExpr) : BuildM BExpr := do
-  if fromW == toW then pure e
-  else applyCast (bvWidenCastName fromW toW signed) e
-
-/-- Insert a single numeric coercion. Returns the expression unchanged when
-    no coercion is needed. -/
-def coerceNumeric (src? target? : Option NumKind) (e : BExpr) :
-    BuildM BExpr :=
-  match src?, target? with
-  | _, none | none, _ => pure e
-  | some src, some target =>
-    if src == target then pure e
-    else match src, target with
-    | .bv w s, .int => applyCast (bvToIntCastName w s) e
-    | .bv w s, .nat => applyCast (bvToNatCastName w s) e
-    | .nat, .int => applyCast "nat_to_int" e
-    | .int, .bv w s => applyCast (intToBvCastName w s) e
-    | .nat, .bv w s => do
-      let eInt ← applyCast "nat_to_int" e
-      applyCast (intToBvCastName w s) eInt
-    | .bv sw ss, .bv tw ts =>
-      if ss == ts && canPromoteBvWidths sw tw then
-        castExprToWiderBvB sw tw ss e
-      else do
-        let eInt ← applyCast (bvToIntCastName sw ss) e
-        applyCast (intToBvCastName tw ts) eInt
-    | .int, .nat => pure e
-    | .int, .int | .nat, .nat => pure e
-
-/-- Coerce between bitvector widths when both source and target are known. -/
-def coerceBvBv (srcInfo? targetInfo? : Option (Nat × Bool)) (e : BExpr) :
-    BuildM BExpr := do
-  match srcInfo?, targetInfo? with
-  | some (sw, ss), some (tw, ts) =>
-    if sw == tw && ss == ts then pure e
-    else if ss == ts && canPromoteBvWidths sw tw then
-      castExprToWiderBvB sw tw ss e
-    else do
-      let eInt ← applyCast (bvToIntCastName sw ss) e
-      applyCast (intToBvCastName tw ts) eInt
-  | _, _ => pure e
-
-/-! ## Known Function Registry -/
-
-private def knownFnSignature? (fname : String) : Option (List Typ × Typ) :=
-  let t := Typ.TypParam "T"
-  let a := Typ.TypParam "A"
-  let b := Typ.TypParam "B"
-  let seqT := Typ.Struct (.str (.str .anonymous "vstd") "Seq") [t]
-  let setT := Typ.Struct (.str (.str .anonymous "vstd") "Set") [t]
-  let vecT := Typ.Struct (.str (.str .anonymous "vstd") "Vec") [t]
-  let mapAB := Typ.Struct (.str (.str .anonymous "vstd") "Map") [a, b]
-  let registry : List (String × (List Typ × Typ)) :=
-    [ ("Seq_index",        ([seqT, .Int], t))
-    , ("Seq_update",       ([seqT, .Int, t], seqT))
-    , ("Seq_push",         ([seqT, t], seqT))
-    , ("Seq_take",         ([seqT, .Int], seqT))
-    , ("Seq_skip",         ([seqT, .Int], seqT))
-    , ("Seq_add",          ([seqT, seqT], seqT))
-    , ("Seq_first",        ([seqT], t))
-    , ("Seq_last",         ([seqT], t))
-    , ("Seq_subrange",     ([seqT, .Int, .Int], seqT))
-    , ("Seq_lib_contains", ([seqT, t], .Bool))
-    , ("Seq_lib_drop_last",([seqT], seqT))
-    , ("Seq_lib_remove",   ([seqT, .Int], seqT))
-    , ("Seq_len",          ([seqT], .Nat))
-    , ("Seq_lib_insert",   ([seqT, .Int, t], seqT))
-    , ("Seq_new",          ([.Nat, .SpecFn [.Int] t], seqT))
-    , ("Seq_lib_map",      ([Typ.Struct (.str (.str .anonymous "vstd") "Seq") [a], .SpecFn [.Int, a] b],
-                            Typ.Struct (.str (.str .anonymous "vstd") "Seq") [b]))
-    , ("Seq_lib_map_values",([Typ.Struct (.str (.str .anonymous "vstd") "Seq") [a], .SpecFn [a] b],
-                             Typ.Struct (.str (.str .anonymous "vstd") "Seq") [b]))
-    , ("Seq_lib_filter",   ([seqT, .SpecFn [t] .Bool], seqT))
-    , ("Seq_lib_sort_by",  ([seqT, .SpecFn [t, t] .Bool], seqT))
-    , ("Seq_lib_to_set",   ([seqT], setT))
-    , ("Set_finite",       ([setT], .Bool))
-    , ("nat_to_int",       ([.Nat], .Int))
-    , ("int_to_nat",       ([.Int], .Nat))
-    , ("Vec_len",          ([vecT], .UInt usizeBitWidth))
-    , ("Vec_index",        ([vecT, .UInt usizeBitWidth], t))
-    , ("Vec_view",         ([vecT], seqT))
-    , ("Set_contains",     ([setT, a], .Bool))
-    , ("Map_index",        ([mapAB, a], b))
-    ]
-  -- Also check cast function signatures
-  let castSig := supportedBvWidths.findSome? (fun w =>
-    if fname == s!"bv{w}_to_int_u" then some ([.UInt w], .Int)
-    else if fname == s!"bv{w}_to_int_s" then some ([.SInt w], .Int)
-    else if fname == s!"bv{w}_to_nat_u" then some ([.UInt w], .Nat)
-    else if fname == s!"bv{w}_to_nat_s" then some ([.SInt w], .Nat)
-    else if fname == s!"int_to_bv{w}_u" then some ([.Int], .UInt w)
-    else if fname == s!"int_to_bv{w}_s" then some ([.Int], .SInt w)
-    else none)
-  (registry.find? (fun (n, _) => n == fname) |>.map Prod.snd) <|> castSig
-
-private def lookupKnownFnRetType (fname : String) : Option Typ :=
-  (knownFnSignature? fname).map Prod.snd
-
-private def lookupKnownFnParamType (fname : String) (idx : Nat) : Option Typ := do
-  let (params, _) ← knownFnSignature? fname
-  params.drop idx |>.head?
 
 /-! ## Full lookups combining env + known functions -/
 
@@ -714,393 +354,6 @@ def inferNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=
     | some .Nat => some .nat
     | _ => none
 
-/-! ## Expression Substitution -/
-
-private partial def expVarRefs : Exp → List String :=
-  let merge (xs : List (List String)) : List String := (xs.foldl (· ++ ·) []).eraseDups
-  fun
-  | .Const _ => []
-  | .Var x => [x]
-  | .Call _ _ args => merge (args.map expVarRefs)
-  | .CallLambda body args => (expVarRefs body ++ merge (args.map expVarRefs)).eraseDups
-  | .StructCtor _ fields => merge <| fields.map (fun (_, e) => expVarRefs e)
-  | .EnumCtor _ _ data => merge <| data.map (fun (_, e) => expVarRefs e)
-  | .TupleCtor _ data => merge (data.map expVarRefs)
-  | .Unary _ e => expVarRefs e
-  | .Binary _ e1 e2 => (expVarRefs e1 ++ expVarRefs e2).eraseDups
-  | .If c t f => (expVarRefs c ++ expVarRefs t ++ expVarRefs f).eraseDups
-  | .Bind (.Let _ _ e) body => (expVarRefs e ++ expVarRefs body).eraseDups
-  | .Bind (.Quant _ _ trigs) body =>
-    merge ((trigs.map (fun g => merge <| g.map expVarRefs)) ++ [expVarRefs body])
-  | .Bind (.Lambda _) body => expVarRefs body
-  | .ArrayLiteral elems => merge (elems.map expVarRefs)
-  | .MatchBlock (scrut, _) body => (expVarRefs scrut ++ expVarRefs body).eraseDups
-
-private def freshenedName (base : String) (used : List String) : String :=
-  if !used.contains base then base
-  else
-    let rec go : List Nat → String
-      | [] => s!"{base}_fresh"
-      | i :: rest =>
-        let cand := s!"{base}_{i}"
-        if used.contains cand then go rest else cand
-    go (List.range (used.length + 1))
-
-private def triggerVarRefs (trigs : List (List Exp)) : List String :=
-  let flatten (xs : List (List String)) : List String := (xs.foldl (· ++ ·) []).eraseDups
-  flatten <| trigs.map (fun g => flatten <| g.map expVarRefs)
-
-mutual
-partial def substExp (name : String) (rhs : Exp) : Exp → Exp
-  | .Const c => .Const c
-  | .Var x => if x == name then rhs else .Var x
-  | .Call fn typs exps => .Call fn typs (exps.map (substExp name rhs))
-  | .CallLambda body args =>
-    .CallLambda (substExp name rhs body) (args.map (substExp name rhs))
-  | .StructCtor dt fields =>
-    .StructCtor dt (fields.map fun (n, e) => (n, substExp name rhs e))
-  | .EnumCtor dt variant data =>
-    .EnumCtor dt variant (data.map fun (n, e) => (n, substExp name rhs e))
-  | .TupleCtor size data =>
-    .TupleCtor size (data.map (substExp name rhs))
-  | .Unary .Old e => .Unary .Old e
-  | .Unary op e => .Unary op (substExp name rhs e)
-  | .Binary op e1 e2 => .Binary op (substExp name rhs e1) (substExp name rhs e2)
-  | .If c t f => .If (substExp name rhs c) (substExp name rhs t) (substExp name rhs f)
-  | .Bind bind body =>
-    match bind with
-    | .Let v ty e =>
-      let e' := substExp name rhs e
-      if v == name then .Bind (.Let v ty e') body
-      else
-        let rhsRefs := expVarRefs rhs
-        if rhsRefs.contains v then
-          let v' := freshenedName v (rhsRefs ++ expVarRefs body ++ [name])
-          let bodyRenamed := substExp v (.Var v') body
-          .Bind (.Let v' ty e') (substExp name rhs bodyRenamed)
-        else
-          .Bind (.Let v ty e') (substExp name rhs body)
-    | .Quant q vars trigs =>
-      if vars.any (fun (v, _) => v == name) then .Bind (.Quant q vars trigs) body
-      else
-        let rhsRefs := expVarRefs rhs
-        let (vars', trigs', body') := renameBinderPack vars trigs body rhsRefs [name]
-        let trigs'' := trigs'.map (fun g => g.map (substExp name rhs))
-        .Bind (.Quant q vars' trigs'') (substExp name rhs body')
-    | .Lambda vars =>
-      if vars.any (fun (v, _) => v == name) then .Bind (.Lambda vars) body
-      else
-        let rhsRefs := expVarRefs rhs
-        let (vars', _, body') := renameBinderPack vars [] body rhsRefs [name]
-        .Bind (.Lambda vars') (substExp name rhs body')
-  | .ArrayLiteral elems => .ArrayLiteral (elems.map (substExp name rhs))
-  | .MatchBlock scrut body =>
-    let (e, t) := scrut
-    .MatchBlock (substExp name rhs e, t) (substExp name rhs body)
-
-private partial def renameBinderPack
-    (vars : List (String × Typ))
-    (trigs : List (List Exp))
-    (body : Exp)
-    (rhsRefs : List String)
-    (avoid : List String) :
-    (List (String × Typ) × List (List Exp) × Exp) :=
-  let rec go
-      (rest : List (String × Typ))
-      (used : List String)
-      (trigsAcc : List (List Exp))
-      (bodyAcc : Exp)
-      (revVars : List (String × Typ)) :
-      (List (String × Typ) × List (List Exp) × Exp) :=
-    match rest with
-    | [] => (revVars.reverse, trigsAcc, bodyAcc)
-    | (v, ty) :: tail =>
-      if rhsRefs.contains v then
-        let v' := freshenedName v used
-        let renameExpr := substExp v (.Var v')
-        let trigs' := trigsAcc.map (fun g => g.map renameExpr)
-        let body' := renameExpr bodyAcc
-        go tail (v' :: used) trigs' body' ((v', ty) :: revVars)
-      else
-        go tail (v :: used) trigsAcc bodyAcc ((v, ty) :: revVars)
-  go vars
-    (avoid ++ rhsRefs ++ vars.map Prod.fst ++ expVarRefs body ++ triggerVarRefs trigs)
-    trigs body []
-end
-
-def substExps (subs : List (String × Exp)) (e : Exp) : Exp :=
-  subs.foldl (fun acc (n, rhs) => substExp n rhs acc) e
-
-/-! ## Statement Substitution -/
-
-partial def substStm (name : String) (rhs : Exp) : Stm → Stm
-  | .Call fn typs args => .Call fn typs (args.map (substExp name rhs))
-  | .Assert e => .Assert (substExp name rhs e)
-  | .AssertBitVector reqs ens =>
-    .AssertBitVector (reqs.map (substExp name rhs)) (ens.map (substExp name rhs))
-  | .AssertQuery mode body => .AssertQuery mode (substStm name rhs body)
-  | .AssertCompute e => .AssertCompute (substExp name rhs e)
-  | .AssertLean e => .AssertLean (substExp name rhs e)
-  | .Assume e => .Assume (substExp name rhs e)
-  | .Assign lhs lhsTy e lhsIsInit =>
-    .Assign lhs lhsTy (substExp name rhs e) lhsIsInit
-  | .DeadEnd stm => .DeadEnd (substStm name rhs stm)
-  | .Return e => .Return (e.map (substExp name rhs))
-  | .BreakOrContinue label isBreak => .BreakOrContinue label isBreak
-  | .If cond b1 b2 =>
-    .If (substExp name rhs cond) (substStm name rhs b1) (b2.map (substStm name rhs))
-  | .Loop isFor label cond body invs decrease =>
-    let cond' := cond.map (fun (s, e) => (substStm name rhs s, substExp name rhs e))
-    let invs' := invs.map (fun inv => { inv with body := substExp name rhs inv.body })
-    let decrease' := decrease.map (substExp name rhs)
-    .Loop isFor label cond' (substStm name rhs body) invs' decrease'
-  | .OpenInvariant stm => .OpenInvariant (substStm name rhs stm)
-  | .ClosureInner body => .ClosureInner (substStm name rhs body)
-  | .Block stms => .Block (stms.map (substStm name rhs))
-  | .Reveal fn fuel => .Reveal fn fuel
-
-partial def renameStmVar (src dst : String) : Stm → Stm :=
-  substStm src (.Var dst)
-
-def applyNameSubstsExp (subs : List (String × String)) (e : Exp) : Exp :=
-  subs.foldl (fun acc (src, dst) => substExp src (.Var dst) acc) e
-
-def applyNameSubstsStm (subs : List (String × String)) (s : Stm) : Stm :=
-  subs.foldl (fun acc (src, dst) => renameStmVar src dst acc) s
-
-/-! ## Temporary Inlining -/
-
-partial def stripSingletonBlocks : Stm → Stm
-  | .Block [s] => stripSingletonBlocks s
-  | s => s
-
-def isTempName (s : String) : Bool :=
-  if s.startsWith "tmp" then
-    let tail := s.drop 3
-    !tail.isEmpty && tail.all Char.isDigit
-  else
-    false
-
-def lvalueVarName? : LValue → Option String
-  | .Var s => some s
-  | _ => none
-
-private def isPureBuiltinCallExp : Exp → Bool
-  | .Call fn _ _ =>
-    let fn := CallFun.name fn
-    isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
-      || isVecIndexSpecName fn || isVecIndexExecName fn
-  | _ => false
-
-def tempAssignFromPrefix : Stm → Option (String × Exp)
-  | s =>
-    match stripSingletonBlocks s with
-    | .Assign lhs _ rhs true =>
-      match lvalueVarName? lhs with
-      | some name =>
-        if !isTempName name then none
-        else match rhs with
-          | .Call _ _ _ => if isPureBuiltinCallExp rhs then some (name, rhs) else none
-          | _ => some (name, rhs)
-      | none => none
-    | _ => none
-
-def guardTempAssignFromPrefix : Stm → Option (String × Exp)
-  | s =>
-    match stripSingletonBlocks s with
-    | .Assign lhs _ rhs true =>
-      match lvalueVarName? lhs with
-      | some name => if isTempName name then some (name, rhs) else none
-      | none => none
-    | _ => none
-
-def dropCondTempAssignFromPrefix : Stm → Option String
-  | s =>
-    match stripSingletonBlocks s with
-    | .Assign lhs _ rhs true =>
-      match lvalueVarName? lhs with
-      | some name =>
-        if !isTempName name then none
-        else match rhs with
-          | .Call _ _ _ => if isPureBuiltinCallExp rhs then some name else none
-          | _ => some name
-      | none => none
-    | _ => none
-
-def isEmptyElse (b2 : Option Stm) : Bool :=
-  match b2 with
-  | none => true
-  | some (Stm.Block []) => true
-  | _ => false
-
-def breakGuardFromPrefix : Stm → Option Exp
-  | s =>
-    match stripSingletonBlocks s with
-    | .If (.Unary .Not guard) (.BreakOrContinue none true) b2 =>
-      if isEmptyElse b2 then some guard else none
-    | _ => none
-
-def splitGuardTempPrefix (stms : List Stm) : List (String × Exp) × List Stm :=
-  let rec go (subsRev : List (String × Exp)) (rest : List Stm) :
-      List (String × Exp) × List Stm :=
-    match rest with
-    | s :: tail =>
-      match guardTempAssignFromPrefix s with
-      | some sub => go (sub :: subsRev) tail
-      | none => (subsRev.reverse, rest)
-    | [] => (subsRev.reverse, [])
-  go [] stms
-
-def splitDropCondTempPrefix (stms : List Stm) : List String × List Stm :=
-  let rec go (namesRev : List String) (rest : List Stm) :
-      List String × List Stm :=
-    match rest with
-    | s :: tail =>
-      match dropCondTempAssignFromPrefix s with
-      | some n => go (n :: namesRev) tail
-      | none => (namesRev.reverse, rest)
-    | [] => (namesRev.reverse, [])
-  go [] stms
-
-def assignFromPrefix : Stm → Option (String × Exp)
-  | s =>
-    match stripSingletonBlocks s with
-    | .Assign lhs _ rhs true =>
-      match lvalueVarName? lhs with
-      | some name => some (name, rhs)
-      | none => none
-    | _ => none
-
-def splitAssignPrefix (stms : List Stm) : List (String × Exp) × List Stm :=
-  let rec go (subsRev : List (String × Exp)) (rest : List Stm) :
-      List (String × Exp) × List Stm :=
-    match rest with
-    | s :: tail =>
-      match assignFromPrefix s with
-      | some sub => go (sub :: subsRev) tail
-      | none => (subsRev.reverse, rest)
-    | [] => (subsRev.reverse, [])
-  go [] stms
-
-partial def flattenSeqBlocks : List Stm → List Stm
-  | [] => []
-  | (.Block stms) :: rest => flattenSeqBlocks stms ++ flattenSeqBlocks rest
-  | s :: rest => s :: flattenSeqBlocks rest
-
-def extractLoopGuardFromBody : Stm → Option (Exp × Stm)
-  | .Block stms =>
-    let linear := (flattenSeqBlocks stms).map stripSingletonBlocks
-    let (subs, rest) := splitGuardTempPrefix linear
-    match rest with
-    | s :: tail =>
-      match breakGuardFromPrefix s with
-      | some guard => some (substExps subs guard, Stm.Block tail)
-      | none => none
-    | [] => none
-  | _ => none
-
-private partial def isEmptyProofShell : Stm → Bool
-  | .Block [] => true
-  | .Block [s] => isEmptyProofShell s
-  | _ => false
-
-mutual
-  private partial def recoverComputeProofStm : Stm → Stm
-    | .AssertQuery mode body => .AssertQuery mode (recoverComputeProofStm body)
-    | .DeadEnd stm => .DeadEnd (recoverComputeProofStm stm)
-    | .If cond b1 b2 =>
-      .If cond (recoverComputeProofStm b1) (b2.map recoverComputeProofStm)
-    | .Loop isFor label cond body invs decrease =>
-      let cond' := cond.map (fun (s, e) => (recoverComputeProofStm s, e))
-      .Loop isFor label cond' (recoverComputeProofStm body) invs decrease
-    | .OpenInvariant stm => .OpenInvariant (recoverComputeProofStm stm)
-    | .ClosureInner body => .ClosureInner (recoverComputeProofStm body)
-    | .Block stms => .Block (recoverComputeProofs stms)
-    | s => s
-
-  private partial def recoverComputeProofs : List Stm → List Stm
-    | proofShell :: (.Assume e) :: rest =>
-      if isEmptyProofShell proofShell then
-        .AssertCompute e :: recoverComputeProofs rest
-      else
-        recoverComputeProofStm proofShell :: recoverComputeProofs ((.Assume e) :: rest)
-    | s :: rest => recoverComputeProofStm s :: recoverComputeProofs rest
-    | [] => []
-end
-
-private partial def expMentionsVar (target : String) : Exp → Bool
-  | .Var x => x == target
-  | .Call _ _ args => args.any (expMentionsVar target)
-  | .CallLambda body args =>
-    expMentionsVar target body || args.any (expMentionsVar target)
-  | .StructCtor _ fields => fields.any (fun (_, e) => expMentionsVar target e)
-  | .EnumCtor _ _ fields => fields.any (fun (_, e) => expMentionsVar target e)
-  | .TupleCtor _ elems => elems.any (expMentionsVar target)
-  | .Unary _ e => expMentionsVar target e
-  | .Binary _ e1 e2 => expMentionsVar target e1 || expMentionsVar target e2
-  | .If c t f => expMentionsVar target c || expMentionsVar target t || expMentionsVar target f
-  | .Bind (.Let _ _ e) body => expMentionsVar target e || expMentionsVar target body
-  | .Bind (.Quant _ _ _) body => expMentionsVar target body
-  | .Bind (.Lambda _) body => expMentionsVar target body
-  | .ArrayLiteral elems => elems.any (expMentionsVar target)
-  | .MatchBlock (scrut, _) body => expMentionsVar target scrut || expMentionsVar target body
-  | .Const _ => false
-
-private partial def stmMentionsVar (target : String) : Stm → Bool
-  | .Call _ _ args => args.any (expMentionsVar target)
-  | .Assert e | .AssertCompute e | .AssertLean e | .Assume e => expMentionsVar target e
-  | .AssertBitVector reqs enss =>
-    reqs.any (expMentionsVar target) || enss.any (expMentionsVar target)
-  | .AssertQuery _ body => stmMentionsVar target body
-  | .Assign lhs _ rhs _ =>
-    (match lvalueVarName? lhs with | some n => n == target | none => false) ||
-    expMentionsVar target rhs
-  | .DeadEnd s | .OpenInvariant s | .ClosureInner s => stmMentionsVar target s
-  | .Reveal .. => false
-  | .Return e? => e?.map (expMentionsVar target) |>.getD false
-  | .BreakOrContinue _ _ => false
-  | .If cond b1 b2 =>
-    expMentionsVar target cond ||
-      stmMentionsVar target b1 ||
-      (b2.map (stmMentionsVar target)).getD false
-  | .Loop _ _ cond body invs decrease =>
-    let condM := match cond with
-      | some (s, e) => stmMentionsVar target s || expMentionsVar target e
-      | none => false
-    condM || invs.any (fun inv => expMentionsVar target inv.body) ||
-      decrease.any (expMentionsVar target) || stmMentionsVar target body
-  | .Block stms => stms.any (stmMentionsVar target)
-
-mutual
-partial def inlineTempsInStm : Stm → Stm
-  | .AssertQuery mode body => .AssertQuery mode (inlineTempsInStm body)
-  | .DeadEnd stm => .DeadEnd (inlineTempsInStm stm)
-  | .If cond b1 b2 => .If cond b1 b2
-  | .Loop isFor label cond body invs decrease =>
-    let cond' := cond
-    let body' := match body with
-      | .Block stms => .Block (inlineTemps stms)
-      | _ => inlineTempsInStm body
-    .Loop isFor label cond' body' invs decrease
-  | .OpenInvariant stm => .OpenInvariant (inlineTempsInStm stm)
-  | .ClosureInner body => .ClosureInner (inlineTempsInStm body)
-  | .Block stms => .Block (inlineTemps stms)
-  | .Reveal fn fuel => .Reveal fn fuel
-  | s => s
-
-partial def inlineTemps : List Stm → List Stm
-  | [] => []
-  | stm :: rest =>
-    let rest' := inlineTemps rest
-    match tempAssignFromPrefix stm with
-    | some (lhs, rhs) =>
-      if rest'.any (stmMentionsVar lhs) then
-        rest'.map (substStm lhs rhs)
-      else
-        inlineTempsInStm stm :: rest'
-    | none => inlineTempsInStm stm :: rest'
-end
-
 /-! ## Resolve Helpers -/
 
 private def resolveVar (name : String) : BuildM BExpr := do
@@ -1238,344 +491,6 @@ private partial def arrayLiteralElemsFromViewArg? : Exp → Option (List Exp)
 
 def sameExpShape (e1 e2 : Exp) : Bool := e1 == e2
 
-def shouldDropAssignAsForLoopScaffolding (lhs : LValue) : Bool :=
-  match lvalueVarName? lhs with
-  | some name => name.startsWith "VERUS_ghost_" || name == "VERUS_loop_result"
-  | none => false
-
-def shouldDropForLoopScaffoldingLocal (name : String) : Bool :=
-  name.startsWith "VERUS_" || name.startsWith "decrease"
-
-def isForLoopScaffoldingVar (name : String) : Bool :=
-  name.startsWith "VERUS_" || name.startsWith "tmp" || name.startsWith "decrease"
-
-/-! ## For-Loop Recovery -/
-
-/-- Check whether an identifier looks like an `Iterator::next` call. -/
-private def isIteratorNextCall : Stm → Bool
-  | .Call fn _ _ => isIteratorNextName fn
-  | _ => false
-
-/-- Check whether an expression is `IsVariant(Option, Some, ...)`. -/
-private def isOptionIsSomeCheck : Exp → Bool
-  | .Unary (.IsVariant dt "Some") _ =>
-    let s := dt.toString.toLower
-    s.endsWith "option" || s.contains "option"
-  | _ => false
-
-/-- Check whether an expression is `Proj(Option, Some, 0, ...)` (i.e. unwrapping Some). -/
-private def isOptionSomeProj : Exp → Bool
-  | .Unary (.Proj dt "Some" "0" _ _) _ =>
-    let s := dt.toString.toLower
-    s.endsWith "option" || s.contains "option"
-  | _ => false
-
-/-- Flatten nested singleton blocks. -/
-private partial def flattenBody : Stm → List Stm
-  | .Block stms => stms.flatMap flattenBody
-  | s => [s]
-
-/-- Structure holding extracted for-loop information from the loop body. -/
-structure ForLoopBodyInfo where
-  loopVarName : String
-  loopVarTy : Typ
-  userBody : List Stm
-deriving Repr
-
-/--
-  Try to extract for-loop structure from the loop body.
-
-  The for-loop body after Verus desugaring follows this pattern (with some nesting):
-  1. Call Iterator::next on the exec iterator
-  2. If Option::is_Some(result):
-       - Assign loop_var := Option::Some_0(result)
-       - User body
-     Else:
-       - Break
-  3. Iterator update assignments
-
-  We try to find the If with the Option check, extract the loop variable assignment
-  and the user body from the then-branch.
--/
-private partial def matchForLoopBody? (body : Stm) : Option ForLoopBodyInfo := do
-  let stms := flattenBody body
-  -- Find the If statement with the Option::is_Some check
-  let (ifStm, postIfStms) ← findOptionIf stms
-  -- Extract from the if statement
-  let (cond, thenBranch, elseBranch) ← match ifStm with
-    | .If c b1 b2 => some (c, b1, b2)
-    | _ => none
-  -- Verify condition is Option::is_Some
-  guard (isOptionIsSomeCheck cond)
-  -- Verify else branch contains a break
-  guard (hasBreak elseBranch)
-  -- First try: look for the loop variable assignment inside the then-branch
-  let thenStms := flattenBody thenBranch
-  match extractLoopVarFromThen thenStms with
-  | some (loopVarName, loopVarTy, userBodyInThen) =>
-    let userBody := userBodyInThen ++ filterScaffoldingStms postIfStms
-    some { loopVarName, loopVarTy, userBody }
-  | none =>
-    -- Second try: the loop variable might be assigned AFTER the If statement
-    -- Pattern: If(..., Block[VERUS_loop_val := ..., VERUS_loop_next := ...], Block[Break])
-    --          i := VERUS_loop_next (or VERUS_loop_val)
-    --          <user body>
-    match findLoopVarAfterIf postIfStms with
-    | some (loopVarName, loopVarTy, userBody) =>
-      some { loopVarName, loopVarTy, userBody }
-    | none => none
-where
-  findOptionIf (stms : List Stm) : Option (Stm × List Stm) :=
-    let rec go (rest : List Stm) : Option (Stm × List Stm) :=
-      match rest with
-      | [] => none
-      | s :: tail =>
-        match s with
-        | .If cond _ _ =>
-          if isOptionIsSomeCheck cond then some (s, tail)
-          else go tail
-        | .Block inner =>
-          match go (flattenBody (.Block inner)) with
-          | some (ifS, innerRest) => some (ifS, innerRest ++ tail)
-          | none => go tail
-        | _ => go tail
-    go stms
-
-  hasBreak : Option Stm → Bool
-    | some (.BreakOrContinue _ true) => true
-    | some (.Block stms) => stms.any fun
-      | .BreakOrContinue _ true => true
-      | _ => false
-    | _ => false
-
-  extractLoopVarFromThen (stms : List Stm) : Option (String × Typ × List Stm) :=
-    match stms with
-    | [] => none
-    | s :: rest =>
-      match s with
-      | .Assign lhs ty rhs _ =>
-        match lvalueVarName? lhs with
-        | some name =>
-          if isOptionSomeProj rhs && !isForLoopScaffoldingVar name then
-            -- Direct assignment: loopVar := Option::Some_0(...)
-            some (name, ty, filterScaffoldingStms rest)
-          else
-            extractLoopVarFromThen rest
-        | none => extractLoopVarFromThen rest
-      | _ => extractLoopVarFromThen rest
-
-  findLoopVarAfterIf (stms : List Stm) : Option (String × Typ × List Stm) :=
-    match stms with
-    | [] => none
-    | s :: rest =>
-      match s with
-      | .Assign lhs ty _rhs _ =>
-        match lvalueVarName? lhs with
-        | some name =>
-          if !isForLoopScaffoldingVar name then
-            -- Found the loop variable assignment (e.g. i := VERUS_loop_next)
-            some (name, ty, filterScaffoldingStms rest)
-          else
-            findLoopVarAfterIf rest
-        | none => findLoopVarAfterIf rest
-      | _ => findLoopVarAfterIf rest
-
-  filterScaffoldingStms (stms : List Stm) : List Stm :=
-    stms.filter fun
-      | .Assign lhs _ _ _ =>
-        match lvalueVarName? lhs with
-        | some name => !isForLoopScaffoldingVar name
-        | none => true
-      | .Call fn _ _ =>
-        !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
-      | .Assume (.Const (.Bool false)) => false
-      | _ => true
-
-/--
-  Find the Range start/end from pre-loop context.
-
-  Before the for-loop, Verus generates:
-  - Assign(tmp_start, startExpr)
-  - Call(vec.len, ...) or similar → tmp_end
-  - Assign(VERUS_iter, StructCtor(Range, [("start", startExpr), ("end", endExpr)]))
-  - Call(into_iter, ...) → iterator
-  - Various iterator setup assignments
-
-  We look for the StructCtor(Range, ...) to extract start/end.
--/
-structure ForLoopRangeInfo where
-  startExp : Exp
-  endExp : Exp
-  iterVarName : Option String := none
-deriving Repr
-
-/-- Strip Box/Unbox wrappers from an expression. -/
-private partial def stripBoxUnbox : Exp → Exp
-  | .Unary (.Box _) e => stripBoxUnbox e
-  | .Unary (.Unbox _) e => stripBoxUnbox e
-  | e => e
-
-/--
-  Scan a list of statements preceding the for-loop to find the Range constructor
-  and extract the start/end expressions.
--/
-private partial def findRangeSetup? (preStms : List Stm) : Option ForLoopRangeInfo := do
-  -- Build substitution map from temp assignments
-  let subs := preStms.filterMap fun
-    | .Assign lhs _ rhs _ =>
-      match lvalueVarName? lhs with
-      | some name => some (name, rhs)
-      | none => none
-    | _ => none
-  -- Find the Range StructCtor assignment
-  let rangeInfo ← preStms.findSome? fun
-    | .Assign _lhs _ (.StructCtor dt fields) _ =>
-      if isRangeTypeName dt then
-        match fields with
-        | [("start", startE), ("end", endE)] =>
-          some (stripBoxUnbox (substExps subs startE), stripBoxUnbox (substExps subs endE))
-        | _ => none
-      else none
-    | _ => none
-  some { startExp := rangeInfo.1, endExp := rangeInfo.2 }
-
-/--
-  Check if an expression is a ghost iterator reference pattern:
-  `If(IsVariant(Option, Some, ghost_peek_next(iter)),
-      Proj(Option, Some, 0, ghost_peek_next(iter)),
-      arbitrary())`
-  This pattern represents "the current value of the for-loop iterator",
-  which in a recovered for-loop is just the loop variable itself.
--/
-private partial def isGhostIteratorPeekPattern : Exp → Bool
-  | .If cond thenE _elseE =>
-    isOptionIsSomeCheck cond && isOptionSomeProj thenE
-  | _ => false
-
-/--
-  Check if an invariant expression is a "ghost iterator" internal invariant
-  (exec_invariant, ghost_advance, ghost_ensures, etc.) that should be dropped.
--/
-private partial def isGhostIteratorInvariant : Exp → Bool
-  | .Unary (.Unbox _) e => isGhostIteratorInvariant e
-  | .Unary (.Box _) e => isGhostIteratorInvariant e
-  | .Call fn _ _ =>
-    let s := (CallFun.name fn).toString.toLower
-    s.contains "forloopghostiterator" || s.contains "ghost_invariant" ||
-    s.contains "exec_invariant" || s.contains "ghost_ensures" ||
-    s.contains "ghost_advance"
-  | .Unary _ e => isGhostIteratorInvariant e
-  | _ => false
-
-/--
-  Rewrite a for-loop invariant expression.
-
-  User-written invariants in a for-loop are wrapped as:
-  `Bind(Let("i", ty, <ghost_peek_expr>), <actual_invariant>)`
-
-  where `<ghost_peek_expr>` computes the current iterator value through the ghost
-  iterator machinery. In a recovered for-loop, the loop variable `i` is bound
-  directly, so we strip this outer let-binding.
-
-  Within the actual invariant body, references to the loop variable are already
-  just `Var("i")`, so no further rewriting is needed.
--/
-private partial def rewriteForLoopInvariant (loopVar : String) : Exp → Exp
-  | .Bind (.Let v _ty rhs) body =>
-    if v == loopVar then
-      let isGhostPeek := isGhostPeekRhs rhs
-      if isGhostPeek then
-        -- Strip the ghost peek Let binding but substitute the loop variable
-        -- into the body so references to `v` resolve to the for-loop's `i`.
-        substExp v (.Var loopVar) body
-      else .Bind (.Let v _ty (rewriteForLoopInvariant loopVar rhs)) (rewriteForLoopInvariant loopVar body)
-    else
-      -- Non-loop-var Let: check if the *rhs* is a ghost peek pattern
-      let isGhostPeek := isGhostPeekRhs rhs
-      if isGhostPeek then
-        substExp v (.Var loopVar) (rewriteForLoopInvariant loopVar body)
-      else
-        .Bind (.Let v _ty (rewriteForLoopInvariant loopVar rhs)) (rewriteForLoopInvariant loopVar body)
-  | .Unary (.Unbox _) e => rewriteForLoopInvariant loopVar e
-  | .Unary (.Box _) e => rewriteForLoopInvariant loopVar e
-  | e => e
-where
-  isGhostPeekRhs : Exp → Bool
-    | .Bind (.Let _ _ innerRhs) innerBody =>
-      hasGhostPeekCall innerRhs || isGhostIteratorPeekPattern innerBody || isGhostPeekRhs innerBody
-    | .If cond thenE _elseE =>
-      isOptionIsSomeCheck cond && isOptionSomeProj thenE
-    | .Unary (.Unbox _) e | .Unary (.Box _) e => isGhostPeekRhs e
-    | .Call fn _ _ =>
-      let s := (CallFun.name fn).toString.toLower
-      s.contains "ghost_peek" || s.contains "ghost_peek_next"
-    | _ => false
-
-  hasGhostPeekCall : Exp → Bool
-    | .Call fn _ _ =>
-      let s := (CallFun.name fn).toString.toLower
-      s.contains "ghost_peek" || s.contains "ghost_peek_next"
-    | .Unary _ e => hasGhostPeekCall e
-    | _ => false
-
-/--
-  Process for-loop invariants:
-  1. Drop system-generated ghost iterator invariants
-  2. Rewrite user invariants to strip the ghost peek let-binding
--/
-private def processForLoopInvariants (loopVar : String) (invs : List LoopInvariant)
-    : List LoopInvariant :=
-  invs.filterMap fun inv =>
-    if isGhostIteratorInvariant inv.body then none
-    else
-      let rewritten := rewriteForLoopInvariant loopVar inv.body
-      some { inv with body := rewritten }
-
-/--
-  Process for-loop decrease expressions, similarly stripping ghost iterator bindings.
--/
-private def processForLoopDecrease (loopVar : String) (decrease : List Exp) : List Exp :=
-  decrease.map (rewriteForLoopInvariant loopVar)
-
-/--
-  Collect all statements from a block and preceding blocks that form the for-loop preamble.
-  This includes Range construction, into_iter call, and iterator setup.
--/
-private partial def collectForLoopPreamble (stms : List Stm) :
-    (List Stm × Option (List Stm × Stm)) :=
-  -- Walk the statements looking for a Loop with isForLoop=true
-  -- Return (pre-loop statements, Some (remaining, loop))
-  let rec go (preAcc : List Stm) (rest : List Stm) :
-      (List Stm × Option (List Stm × Stm)) :=
-    match rest with
-    | [] => (preAcc.reverse, none)
-    | s :: tail =>
-      match s with
-      | .Loop true _ _ _ _ _ => (preAcc.reverse, some (tail, s))
-      | .Block inner =>
-        -- The loop might be nested inside blocks
-        match findLoopInBlock inner with
-        | some (innerPre, loopStm, innerPost) =>
-          ((preAcc.reverse ++ innerPre), some (innerPost ++ tail, loopStm))
-        | none => go (s :: preAcc) tail
-      | _ => go (s :: preAcc) tail
-  go [] stms
-where
-  findLoopInBlock (stms : List Stm) : Option (List Stm × Stm × List Stm) :=
-    let rec goInner (pre : List Stm) (rest : List Stm) : Option (List Stm × Stm × List Stm) :=
-      match rest with
-      | [] => none
-      | s :: tail =>
-        match s with
-        | .Loop true _ _ _ _ _ => some (pre.reverse, s, tail)
-        | .Block inner =>
-          match findLoopInBlock inner with
-          | some (innerPre, loopStm, innerPost) =>
-            some (pre.reverse ++ innerPre, loopStm, innerPost ++ tail)
-          | none => goInner (s :: pre) tail
-        | _ => goInner (s :: pre) tail
-    goInner [] stms
-
 def queryBodyStms : Stm → List Stm
   | .Block [s] => queryBodyStms s
   | .Block stms => stms
@@ -1633,12 +548,6 @@ def assertQueryModeLabel : AssertQueryMode → String
 
 abbrev SpecFnMap := Std.HashMap Ident SpecFn
 
-private def specFnIsGeneric (f : SpecFn) : Bool :=
-  let typTypeVarsOf : Typ → List String := fun _ => []  -- simplified; full version traverses
-  !(f.inputs.flatMap (fun (_, ty) => typTypeVarsOf ty) ++
-    typTypeVarsOf f.returnType).isEmpty
-
--- Simplified: just check for type params in signature
 private partial def typTypeVars : Typ → List String
   | .TypParam n => [sanitizeIdent n]
   | .Tuple t1 t2 => (typTypeVars t1 ++ typTypeVars t2).eraseDups
@@ -1696,84 +605,14 @@ partial def expandReveals (sfMap : SpecFnMap) : Stm → Stm
     .Loop isFor label cond' (expandReveals sfMap body) invs dec
   | s => s
 
-/-! ## Decrease/Return Artifact Stripping -/
-
-private def isDecreaseArtifact : Stm → Bool
-  | .Assign (.Var name) _ _ _ => name.startsWith "decrease"
-  | .Call fn _ _ => toString fn |>.startsWith "CheckDecrease"
-  | .Assert (.Call fn _ _) =>
-    toString (CallFun.name fn) |>.startsWith "CheckDecrease"
-  | .Assert (.Var name) => name.startsWith "CheckDecrease"
-  | _ => false
-
-private partial def stripDecreaseArtifacts : Stm → Stm
-  | .Block stms =>
-    .Block (stms.filter (!isDecreaseArtifact ·) |>.map stripDecreaseArtifacts)
-  | .If cond b1 b2 =>
-    .If cond (stripDecreaseArtifacts b1) (b2.map stripDecreaseArtifacts)
-  | .DeadEnd stm => .DeadEnd (stripDecreaseArtifacts stm)
-  | .Loop isFor label cond body invs dec =>
-    .Loop isFor label cond (stripDecreaseArtifacts body) invs dec
-  | stm => stm
-
-private partial def hasReturnStm : Stm → Bool
-  | .Return _ => true
-  | .Block stms => stms.any hasReturnStm
-  | .If _ b1 b2 => hasReturnStm b1 || (b2.map hasReturnStm |>.getD false)
-  | .DeadEnd stm => hasReturnStm stm
-  | _ => false
-
-private def isAssumeFalse : Stm → Bool
-  | .Assume (.Const (.Bool false)) => true
-  | _ => false
-
-private partial def blockHasReturn : List Stm → Bool
-  | [] => false
-  | (.Return _) :: _ => true
-  | (.Block stms) :: rest => blockHasReturn stms || blockHasReturn rest
-  | (.If _ b1 b2) :: rest =>
-    hasReturnStm b1 || (b2.map hasReturnStm |>.getD false) || blockHasReturn rest
-  | _ :: rest => blockHasReturn rest
-
-private partial def stripReturnAssumeFalse : List Stm → List Stm
-  | [] => []
-  | (.Return e) :: rest =>
-    .Return e :: (rest.filter (!isAssumeFalse ·) |> stripReturnAssumeFalse)
-  | (.Block stms) :: rest =>
-    let stripped := .Block (stripReturnAssumeFalse stms)
-    if blockHasReturn stms then
-      stripped :: (rest.filter (!isAssumeFalse ·) |> stripReturnAssumeFalse)
-    else
-      stripped :: stripReturnAssumeFalse rest
-  | (.If cond b1 b2) :: rest =>
-    let b1' := stripReturnDeep b1
-    let b2' := b2.map stripReturnDeep
-    let ifHasRet := hasReturnStm b1 || (b2.map hasReturnStm |>.getD false)
-    let stripped := .If cond b1' b2'
-    if ifHasRet then
-      stripped :: (rest.filter (!isAssumeFalse ·) |> stripReturnAssumeFalse)
-    else
-      stripped :: stripReturnAssumeFalse rest
-  | s :: rest => s :: stripReturnAssumeFalse rest
-where
-  stripReturnDeep : Stm → Stm
-    | .Block stms => .Block (stripReturnAssumeFalse stms)
-    | .If cond b1 b2 => .If cond (stripReturnDeep b1) (b2.map stripReturnDeep)
-    | .DeadEnd stm => .DeadEnd (stripReturnDeep stm)
-    | .Loop isFor label cond body invs dec =>
-      .Loop isFor label cond (stripReturnDeep body) invs dec
-    | s => s
-
-private def collectDecreasesExps : Stm → List Exp
-  | .Assign (.Var name) _ rhs _ =>
-    if name.startsWith "decrease" then [rhs] else []
-  | .Block stms => stms.flatMap collectDecreasesExps
-  | _ => []
-
-private def implicitLoopLabel (cond : Option (Stm × Exp)) (body : Stm) : String :=
-  let seed := s!"{repr cond}|{repr body}"
-  let h := seed.toList.foldl (fun acc c => (acc * 131 + c.toNat) % 1000000007) 0
-  sanitizeIdent s!"loop_{h}"
+/-- Allocate a fresh synthetic loop label of the form `loop_N`, where `N`
+    comes from `BuildCtx.loopLabelCounter`. Used when a `.Loop` has no
+    source-level label but its body contains unlabeled `break`/`continue`
+    that need a target — deriving the label from AST structure would
+    risk collisions between structurally identical loops. -/
+private def implicitLoopLabel : BuildM String := do
+  let n ← freshLoopLabelId
+  pure (sanitizeIdent s!"loop_{n}")
 
 private partial def hasUnlabeledLoopControl : Stm → Bool
   | .BreakOrContinue none _ => true
@@ -1870,6 +709,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       expToBoole env bound (enumFieldExpectedType? env dt variant field) e)
     return Bld.appN ctor args
   | .TupleCtor size data => do
+    if size == 2 then requireSupport .tuple
     let ctorIdx ← resolveFreeVar s!"Tuple_ctor_{size}"
     let ctor := Bld.fvar ctorIdx
     let args ← data.mapM (expToBoole env bound none)
@@ -2053,7 +893,13 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       let testerIdx ← resolveFreeVar (enumTesterNameOf dt variant)
       return Bld.app (Bld.fvar testerIdx) x
     | .Proj' size field => do
-      let projIdx ← resolveFreeVar s!"Tuple_{size}_{field}"
+      let projName ←
+        if size == 2 then do
+          requireSupport .tuple
+          pure s!"Tuple.._{field}"
+        else
+          pure s!"Tuple_{size}_{field}"
+      let projIdx ← resolveFreeVar projName
       return Bld.app (Bld.fvar projIdx) x
     | _ =>
       match applyUnaryOp op x with
@@ -2232,7 +1078,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       expToBoole env bound expected? body'
     | .Quant q vars _trigs => do
       let body' ← withScope do
-        addBoundVars (vars.map Prod.fst).toArray (reverse? := false)
+        addBoundVars (vars.map Prod.fst).toArray
         expToBoole env (vars.reverse ++ bound) (some .Bool) body
       let binds ← vars.toArray.mapM (fun (v, ty) => do
         let ty' ← typToBooleType ty
@@ -2242,9 +1088,10 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | .Exists => return existsExpr binds body'
     | .Lambda vars => do
       let body' ← withScope do
-        addBoundVars (vars.map Prod.fst).toArray (reverse? := false)
+        addBoundVars (vars.map Prod.fst).toArray
         expToBoole env (vars.reverse ++ bound) none body
-      -- Lambda is represented as a quantifier for now (like CoreToBoole)
+      -- Lambda is represented as a quantifier for now; Boole does not yet get
+      -- a source-faithful lambda node here.
       let binds ← vars.toArray.mapM (fun (v, ty) => do
         let ty' ← typToBooleType ty
         pure (sanitizeVarName v, ty'))
@@ -2389,11 +1236,14 @@ private partial def lowerProjectedAssignRhsToRoot
     lowerProjectedAssignRhsToRoot env projLayouts base updatedContainer
   | .Proj' base size field, rhs => do
     let container ← lvalueReadExprToBoole env base
+    if size == 2 then requireSupport .tuple
     let ctorIdx ← resolveFreeVar s!"Tuple_ctor_{size}"
     let args ← (List.range size).mapM (fun i => do
       if i == field then pure rhs
       else do
-        let projIdx ← resolveFreeVar s!"Tuple_{size}_{i}"
+        let projName :=
+          if size == 2 then s!"Tuple.._{i}" else s!"Tuple_{size}_{i}"
+        let projIdx ← resolveFreeVar projName
         pure (Bld.app (Bld.fvar projIdx) container))
     let updatedContainer := Bld.appN (Bld.fvar ctorIdx) args
     lowerProjectedAssignRhsToRoot env projLayouts base updatedContainer
@@ -2412,7 +1262,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       return []
     let argsFiltered := normalizeCallArgsForCallee env fn args
     let callee := identToBoole fn
-    let argsCore ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
+    let argsBoole ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
       let paramTy? := lookupFnParamTypeFull env callee idx
       expToBooleFlat env paramTy? arg)
     -- Compute mutable outputs
@@ -2425,7 +1275,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         match vecVarFromExp arg with
         | some v => pure (some (sanitizeVarName v))
         | none => pure none)
-    return [callStmt (mutOuts.toArray) callee (argsCore.toArray)]
+    return [callStmt (mutOuts.toArray) callee (argsBoole.toArray)]
   | .Assert exp | .AssertLean exp => do
     match exp with
     | .Unary (.HasType _) _ => return []
@@ -2459,7 +1309,8 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         let rhs' ← expToBooleFlat env (some lhsTy) rhs
         match lvalueVarName? lhs with
         | some lhsName =>
-          return [setStmt (sanitizeVarName lhsName) rhs']
+          let lhsTy' ← typToBooleType lhsTy
+          return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
         | none =>
           let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
           return [setStmt (sanitizeVarName rootName) updatedRoot]
@@ -2467,12 +1318,14 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
             || isVecIndexSpecName fnName || isVecIndexExecName fnName then
         let rhs' ← expToBooleFlat env (some lhsTy) rhs
         match lvalueVarName? lhs with
-        | some lhsName => return [setStmt (sanitizeVarName lhsName) rhs']
+        | some lhsName =>
+          let lhsTy' ← typToBooleType lhsTy
+          return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
         | none =>
           let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
           return [setStmt (sanitizeVarName rootName) updatedRoot]
       else
-        let argsCore ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
+        let argsBoole ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
           let paramTy? := lookupFnParamTypeFull env callee idx
           expToBooleFlat env paramTy? arg)
         let infos := (mutArgMap.get? callee).getD []
@@ -2486,13 +1339,13 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         match lvalueVarName? lhs with
         | some lhsName =>
           let lhsNames := #[sanitizeVarName lhsName] ++ mutOuts.toArray
-          return [callStmt lhsNames callee argsCore.toArray]
+          return [callStmt lhsNames callee argsBoole.toArray]
         | none =>
           -- Projected l-value: use temporary
           let tmpName := sanitizeVarName s!"tmp_proj_call_{callee}"
           let ty' ← typToBooleType lhsTy
           let lhsNames := #[tmpName] ++ mutOuts.toArray
-          let callS := callStmt lhsNames callee argsCore.toArray
+          let callS := callStmt lhsNames callee argsBoole.toArray
           let tmpExpr ← resolveVar tmpName
           let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs tmpExpr
           return [varStmt tmpName ty', callS, setStmt (sanitizeVarName rootName) updatedRoot]
@@ -2500,7 +1353,8 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       let rhs' ← expToBooleFlat env (some lhsTy) rhs
       match lvalueVarName? lhs with
       | some lhsName =>
-        return [setStmt (sanitizeVarName lhsName) rhs']
+        let lhsTy' ← typToBooleType lhsTy
+        return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
       | none =>
         let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
         return [setStmt (sanitizeVarName rootName) updatedRoot]
@@ -2514,7 +1368,8 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         return [returnStmt procName]
       | _ =>
         let rhs ← expToBooleFlat env (some retTy) e
-        return [setStmt (sanitizeVarName retName) rhs, returnStmt procName]
+        let retTy' ← typToBooleType retTy
+        return [setStmtTyped retTy' (sanitizeVarName retName) rhs, returnStmt procName]
     | _, _ => return [returnStmt procName]
   | .BreakOrContinue label isBreak =>
     match label with
@@ -2534,15 +1389,15 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       match extractLoopGuardFromBody body with
       | some (g, b') => (some g, b')
       | none => (none, body)
-    let loopLabel? :=
+    let loopLabel? ← do
       match label with
-      | some l => some (sanitizeIdent l)
+      | some l => pure (some (sanitizeIdent l))
       | none =>
         let condNeeds := match cond with | some (s, _) => hasUnlabeledLoopControl s | none => false
         if condNeeds || hasUnlabeledLoopControl body' then
-          some (implicitLoopLabel cond body)
+          pure (some (← implicitLoopLabel))
         else
-          none
+          pure none
     let condTempSubsts : List (String × Exp) :=
       match cond with
       | some (Stm.Block stms, _) => (splitAssignPrefix stms).fst
@@ -2578,94 +1433,41 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     return []
 
 /--
-  Try to recover a for-loop from a list of statements containing a `Stm.Loop true`.
-  Scans the statement list for:
-  1. Pre-loop assignments that include a Range construction (start/end)
-  2. A `Loop` with `isForLoop = true` whose body matches the iterator pattern
-  If successful, emits a `forToStmt` and returns `some (emitted, remaining)`.
-  Otherwise returns `none`.
+  Emit a recovered source-style `for` loop.  The VLIR shape matching and
+  scaffolding filtering lives in `Boole.ForLoop`; this function only lowers the
+  recovered loop plan to BooleDDM.
 -/
 partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap) (retVar? : Option (String × Typ))
     (procName : String)
     (stms : List Stm) : BuildM (Option (List BStmt × List Stm)) := do
-  -- Find the first for-loop in the statement list
-  match findForLoop [] stms with
+  match recoverForLoop? stms with
   | none => pure none
-  | some (preStms, loopStm, postStms) =>
-    match loopStm with
-    | .Loop true _label _cond body invs decrease =>
-      match matchForLoopBody? body with
-      | none => pure none
-      | some info =>
-        -- Find Range start/end from pre-loop context
-        let allPreStms := flattenAllBlocks preStms
-        match findRangeSetup? allPreStms with
-        | none => pure none
-        | some rangeInfo =>
-          -- Successfully matched! Emit the for-loop.
-          let processedInvs := processForLoopInvariants info.loopVarName invs
-          let processedDecrease := processForLoopDecrease info.loopVarName decrease
-
-          let loopVarTy ← typToBooleType info.loopVarTy
-          let loopVarSan := sanitizeVarName info.loopVarName
-
-          let startExpr ← expToBooleFlat env (some info.loopVarTy) rangeInfo.startExp
-          let endE ← expToBooleFlat env (some info.loopVarTy) rangeInfo.endExp
-          let limitExpr ← match bitWidthOfTyp info.loopVarTy with
-            | some w => pure (bvSub w endE (bitvecConstNat w 1))
-            | none => pure (intSub endE (intConst 1))
-
-          -- Push the loop variable into scope for invariants, decreases, and body
-          let (invExprs, measureExpr?, bodyStms) ← withScope do
-            pushBoundVar loopVarSan
-            let invExprs ← processedInvs.toArray.mapM (fun inv =>
-              expToBooleFlat env (some .Bool) inv.body)
-            let measureExpr? ← match processedDecrease with
-              | [] => pure none
-              | e :: _ => do
-                let ce0 ← expToBooleFlat env none e
-                let srcKind? := inferNumKind env [] e
-                let ce ← coerceNumeric srcKind? (some .int) ce0
-                pure (some ce)
-            let userBodyStm := Stm.Block info.userBody
-            let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? procName userBodyStm
-            pure (invExprs, measureExpr?, bodyStms)
-
-          let loopStmt := forToStmt loopVarSan loopVarTy startExpr limitExpr
-            measureExpr? invExprs bodyStms.toArray
-
-          -- Emit any non-scaffolding pre-loop statements, then the for-loop
-          let preFiltered := allPreStms.filter fun
-            | .Assign lhs _ _ _ =>
-              match lvalueVarName? lhs with
-              | some name => !isForLoopScaffoldingVar name && !name.startsWith "decrease"
-              | none => true
-            | .Call fn _ _ =>
-              !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
-            | _ => true
-          let preBoole ← preFiltered.mapM (stmToBoole env projLayouts mutArgMap retVar? procName)
-          pure (some (preBoole.flatten ++ [loopStmt], postStms))
-    | _ => pure none
-where
-  findForLoop (pre : List Stm) (rest : List Stm) :
-      Option (List Stm × Stm × List Stm) :=
-    match rest with
-    | [] => none
-    | s :: tail =>
-      match s with
-      | .Loop true _ _ _ _ _ => some (pre.reverse, s, tail)
-      | .Block inner =>
-        -- Check if the loop is nested inside blocks
-        match findForLoop [] (flattenAllBlocks [.Block inner]) with
-        | some (innerPre, loopStm, innerPost) =>
-          some (pre.reverse ++ innerPre, loopStm, innerPost ++ tail)
-        | none => findForLoop (s :: pre) tail
-      | _ => findForLoop (s :: pre) tail
-  flattenAllBlocks (stms : List Stm) : List Stm :=
-    stms.flatMap fun
-      | .Block inner => flattenAllBlocks inner
-      | s => [s]
+  | some loop => do
+    let loopVarTy ← typToBooleType loop.loopVarTy
+    let loopVarSan := sanitizeVarName loop.loopVarName
+    let startExpr ← expToBooleFlat env (some loop.loopVarTy) loop.startExp
+    let endE ← expToBooleFlat env (some loop.loopVarTy) loop.endExp
+    let limitExpr ← match bitWidthOfTyp loop.loopVarTy with
+      | some w => pure (bvSub w endE (bitvecConstNat w 1))
+      | none => pure (intSub endE (intConst 1))
+    let (invExprs, measureExpr?, bodyStms) ← withScope do
+      pushBoundVar loopVarSan
+      let invExprs ← loop.invariants.toArray.mapM (fun inv =>
+        expToBooleFlat env (some .Bool) inv.body)
+      let measureExpr? ← match loop.decrease with
+        | [] => pure none
+        | e :: _ => do
+          let ce0 ← expToBooleFlat env none e
+          let srcKind? := inferNumKind env [] e
+          let ce ← coerceNumeric srcKind? (some .int) ce0
+          pure (some ce)
+      let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? procName (Stm.Block loop.userBody)
+      pure (invExprs, measureExpr?, bodyStms)
+    let loopStmt := forToStmt loopVarSan loopVarTy startExpr limitExpr
+      measureExpr? invExprs bodyStms.toArray
+    let preBoole ← loop.preStms.mapM (stmToBoole env projLayouts mutArgMap retVar? procName)
+    pure (some (preBoole.flatten ++ [loopStmt], loop.postStms))
 
 partial def stmListToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap)
@@ -2674,7 +1476,7 @@ partial def stmListToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     List Stm → BuildM (List BStmt)
   | stms => do
     let normalized :=
-      (flattenSeqBlocks (recoverComputeProofs (inlineTemps stms))).map stripSingletonBlocks
+      (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureBooleBuiltinCallName stms))).map stripSingletonBlocks
     -- Try for-loop recovery before normal processing
     let hasForLoop := normalized.any fun
       | .Loop true _ _ _ _ _ => true
@@ -2956,7 +1758,7 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
   let outputTy ← typToBooleType f.returnType
   let envLocal := extendEnv env f.inputs
   let (body?, specElts) ← withScope do
-    addBoundVars inputNames (reverse? := false)
+    addBoundVars inputNames
     let body? ← if emitBody then
       match f.body with
       | some b => pure (some (← expToBooleFlat envLocal (some f.returnType) b))
@@ -3000,8 +1802,8 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let outputsAnn := ann outputDecls?
   let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
   let (specElts, body) ← withScope do
-    addBoundVars inputNamesSan (reverse? := false)
-    addBoundVars outputNamesSan (reverse? := false)
+    addBoundVars inputNamesSan
+    addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires f.ensures []
     let localStmts ← localsToVarStmts localsAll
     let retVar? := if hasRet then some (f.retName, f.returnType) else none
@@ -3043,8 +1845,8 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let isDeclOnly := match f.body with | .Block [] => true | _ => false
   let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
   let (specElts, body) ← withScope do
-    addBoundVars inputNamesSan (reverse? := false)
-    addBoundVars outputNamesSan (reverse? := false)
+    addBoundVars inputNamesSan
+    addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires rewrittenEnsures []
     if isDeclOnly then
       let body := BooleDDM.Block.block default (ann #[])
@@ -3052,9 +1854,10 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
     else
       let localStmts ← localsToVarStmts localsAll
       -- Init mutable-out variables from inputs
-      let mutOutInits ← mutOutDecls.mapM (fun (inName, outName, _payloadTy) => do
+      let mutOutInits ← mutOutDecls.mapM (fun (inName, outName, payloadTy) => do
         let inExpr ← resolveVar inName
-        pure (setStmt (sanitizeVarName outName) inExpr))
+        let outTy ← typToBooleType payloadTy
+        pure (setStmtTyped outTy (sanitizeVarName outName) inExpr))
       let retVar? := if hasRet then some (f.retName, f.returnType) else none
       let bodyStmts ← stmToBoole envLocal projLayouts mutArgMap retVar? fnName rewrittenBody
       let allStmts := localStmts ++ mutOutInits ++ bodyStmts
@@ -3167,8 +1970,8 @@ def funcCheckSstToBoole (env : VarEnv) (f : FuncCheckSst) : BuildM BCmd := do
   let outputsAnn := ann outputDecls?
   let envLocal := extendEnv env f.decls
   let (specElts, body) ← withScope do
-    addBoundVars inputNamesSan (reverse? := false)
-    addBoundVars outputNamesSan (reverse? := false)
+    addBoundVars inputNamesSan
+    addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.reqs f.postCondition []
     let body := BooleDDM.Block.block default (ann #[])
     pure (specElts, body)
@@ -3216,7 +2019,7 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         let outputTy ← typToBooleType f.returnType
         let envLocal := extendEnv env f.inputs
         let (body, specElts) ← withScope do
-          addBoundVars inputNames (reverse? := false)
+          addBoundVars inputNames
           let body ← match f.body with
             | some b => expToBooleFlat envLocal (some f.returnType) b
             | none => pure (boolConst true)
@@ -3251,15 +2054,42 @@ private def mkAbstractTypeDecl (name : String) (params : List String) : BuildM B
       ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
   pure (.command_typedecl default (ann name) args)
 
-private def mkAutoStubFnDecl (name : String) (arity : Nat) : BuildM BCmd := do
-  addFreeVars #[name]
-  let nameAnn := ann name
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
-  let bindings := (List.range arity).toArray.map (fun i =>
-    BooleDDM.Binding.mkBinding default (ann s!"x{i}") (BooleDDM.TypeP.expr intTy))
-  let inputBindings := BooleDDM.Bindings.mkBindings default (ann bindings)
-  let outputTy := intTy
-  pure (.command_fndecl default nameAnn typeArgs inputBindings outputTy)
+/-- Emit the polymorphic 2-ary tuple datatype:
+    `datatype Tuple (T0 : Type, T1 : Type) { Tuple_ctor_2(_0 : T0, _1 : T1) };`.
+    Using a datatype (rather than a type decl + uninterpreted function stubs,
+    as the old Core pipeline did) gives the verifier native ctor/accessor
+    reasoning so obligations like `Tuple.._0(Tuple_ctor_2(x, y)) == x` are
+    discharged without extra axioms. VLIR represents every tuple as a
+    nested pair (`Typ.Tuple ty₁ ty₂`), so a single 2-ary datatype covers
+    the surface; `Unit` (0-ary) is handled separately by the existing
+    `Unit` support.
+
+    Field binding names use the `_0` / `_1` numeric-accessor convention from
+    `Names.fieldAccessorNameOf`, so the destructors become `Tuple.._0` and
+    `Tuple.._1` — matching how struct/enum field accesses are already
+    emitted. -/
+private def mkTupleDatatypeDecl : BuildM BCmd := do
+  addFreeVars #["Tuple", "Tuple_ctor_2", "Tuple.._0", "Tuple.._1"]
+  let typeParamBindings : Array (BooleDDM.Binding SourceRange) := #[
+    BooleDDM.Binding.mkBinding default (ann "T0") (BooleDDM.TypeP.type default),
+    BooleDDM.Binding.mkBinding default (ann "T1") (BooleDDM.TypeP.type default)]
+  let typeArgs : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+    ann (some (BooleDDM.Bindings.mkBindings default (ann typeParamBindings)))
+  -- Reference the datatype's own type parameters by the same fvar-resolution
+  -- path struct emission uses; the Boole parser binds T0/T1 within the
+  -- datatype declaration's scope.
+  let t0Idx ← resolveFreeVar "T0"
+  let t1Idx ← resolveFreeVar "T1"
+  let field0 :=
+    BooleDDM.Binding.mkBinding default (ann "_0") (BooleDDM.TypeP.expr (fvarTy t0Idx))
+  let field1 :=
+    BooleDDM.Binding.mkBinding default (ann "_1") (BooleDDM.TypeP.expr (fvarTy t1Idx))
+  let ctorArgs : Strata.Ann (Option (Strata.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)) SourceRange :=
+    ann (some (ann #[field0, field1]))
+  let ctor := BooleDDM.Constructor.constructor_mk default (ann "Tuple_ctor_2") ctorArgs
+  let constrList := BooleDDM.ConstructorList.constructorListAtom default ctor
+  let dtDecl := BooleDDM.DatatypeDecl.datatype_decl default (ann "Tuple") typeArgs constrList
+  pure (.command_datatypes default (ann #[dtDecl]))
 
 /-! ## Prelude and Entry Point -/
 
@@ -3317,14 +2147,6 @@ private def declsHaveForLoop (decls : List Decl) : Bool :=
     | .proofFn f => f.body.map stmHasForLoop |>.getD false
     | _ => false
 
-/-- Main entry point: translate a list of VLIR declarations into BooleDDM commands. -/
-private def isSupportCastName (name : String) : Bool :=
-  isBvToIntCastName name || isBvToNatCastName name || isIntToBvCastName name ||
-  isBvWidenCastName name || name == "nat_to_int" || name == "int_to_nat"
-
-private def isSupportTypeName (name : String) : Bool :=
-  name == "nat"
-
 def declsToBooleProgram (decls : List Decl) :
     BuildM (Array BCmd) := do
   let noParamFns := collectNoParamFnNamesFromDecls decls
@@ -3345,36 +2167,39 @@ def declsToBooleProgram (decls : List Decl) :
   for d in filteredDecls do
     let cmds ← declToBoole env projLayouts mutArgMap sfMap decls d
     userCmds := userCmds ++ cmds.toArray
-  -- Collect free variable names referenced by translation
+  -- Support declarations are emitted from explicit requirements recorded
+  -- during lowering, not from incidental free-variable references.
   let ctx ← get
-  let referencedNames := ctx.allFreeVars
+  let supportNeeds := ctx.supportNeeds
   -- Only emit support declarations for names actually referenced
   let mut supportCmds : Array BCmd := #[]
-  if referencedNames.any (· == "nat") then
+  if supportNeeds.any (· == .tuple) then
+    supportCmds := supportCmds.push (← mkTupleDatatypeDecl)
+  if supportNeeds.any (· == .nat) then
     supportCmds := supportCmds.push (← mkAbstractTypeDecl "nat" [])
-  if referencedNames.any (· == "nat_to_int") then
+  if supportNeeds.any (· == .natToInt) then
     supportCmds := supportCmds.push (← mkCastFnDecl "nat_to_int" .Nat .Int)
-  if referencedNames.any (· == "int_to_nat") then
+  if supportNeeds.any (· == .intToNat) then
     supportCmds := supportCmds.push (← mkCastFnDecl "int_to_nat" .Int .Nat)
   for w in supportedBvWidths do
     let castNames := [
-      (bvToIntCastName w false, (.UInt w), Typ.Int),
-      (bvToIntCastName w true, (.SInt w), Typ.Int),
-      (bvToNatCastName w false, (.UInt w), Typ.Nat),
-      (bvToNatCastName w true, (.SInt w), Typ.Nat),
-      (intToBvCastName w false, Typ.Int, (.UInt w)),
-      (intToBvCastName w true, Typ.Int, (.SInt w))]
-    for (name, inTy, outTy) in castNames do
-      if referencedNames.any (· == name) then
+      ((.bvToInt w false : SupportDecl), bvToIntCastName w false, (.UInt w), Typ.Int),
+      ((.bvToInt w true : SupportDecl), bvToIntCastName w true, (.SInt w), Typ.Int),
+      ((.bvToNat w false : SupportDecl), bvToNatCastName w false, (.UInt w), Typ.Nat),
+      ((.bvToNat w true : SupportDecl), bvToNatCastName w true, (.SInt w), Typ.Nat),
+      ((.intToBv w false : SupportDecl), intToBvCastName w false, Typ.Int, (.UInt w)),
+      ((.intToBv w true : SupportDecl), intToBvCastName w true, Typ.Int, (.SInt w))]
+    for (need, name, inTy, outTy) in castNames do
+      if supportNeeds.any (· == need) then
         supportCmds := supportCmds.push (← mkCastFnDecl name inTy outTy)
   for fromW in supportedBvWidths do
     for toW in supportedBvWidths do
       if fromW < toW then
         let uName := bvWidenCastName fromW toW false
         let sName := bvWidenCastName fromW toW true
-        if referencedNames.any (· == uName) then
+        if supportNeeds.any (· == (.bvWiden fromW toW false : SupportDecl)) then
           supportCmds := supportCmds.push (← mkCastFnDecl uName (.UInt fromW) (.UInt toW))
-        if referencedNames.any (· == sName) then
+        if supportNeeds.any (· == (.bvWiden fromW toW true : SupportDecl)) then
           supportCmds := supportCmds.push (← mkCastFnDecl sName (.SInt fromW) (.SInt toW))
   return supportCmds ++ userCmds
 
