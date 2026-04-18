@@ -145,7 +145,7 @@ partial def Bind.pp (b : Bind) : String :=
 
 partial def Exp.pp (e : Exp) : String :=
   match e with
-  | .Const c => Const.pp c
+  | .Const c _ => Const.pp c
   | .Var ident => ident
   | .Call fn _ exps =>
     let fn := CallFun.name fn

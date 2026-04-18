@@ -129,7 +129,7 @@ where
         | none => true
       | .Call fn _ _ =>
         !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
-      | .Assume (.Const (.Bool false)) => false
+      | .Assume (.Const (.Bool false) _) => false
       | _ => true
 
 structure ForLoopRangeInfo where

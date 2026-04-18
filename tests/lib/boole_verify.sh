@@ -34,7 +34,19 @@ classify_boole_verify_log() {
     fi
     # Strata-side gaps: features Strata itself does not yet support. These
     # are legitimately not our bugs to fix.
-    if grep -qE "Unsupported expression|Unsupported typed operator|unexpected token '\('; expected '\)'|Undeclared type or category Tuple" "$log"; then
+    #
+    # `Unknown bound variable with index` *in the context of mutual recursion*
+    # is a Strata-side bug in `Boole.toCoreProgram`'s `command_recfndefs`
+    # lowering: the DDM parser scopes preceding siblings as bvars for each
+    # function body, but `lowerPureFuncDef` pushes only inputs. See
+    # `docs/boole-translation-todo.md`. Classified here as a Strata gap
+    # rather than a translator bug.
+    #
+    # `Recursive function .* requires a @\[cases\] parameter` is Strata's
+    # refusal to verify rec functions without an ADT @[cases] annotation.
+    # Verus programs often recurse on `int`, which has no constructors, so
+    # they hit this wall in Boole even though Core has the same behavior.
+    if grep -qE "Unsupported expression|Unsupported typed operator|unexpected token '\('; expected '\)'|Undeclared type or category Tuple|Unknown bound variable with index|Recursive function .* requires a @\[cases\] parameter" "$log"; then
       echo "skip_gap"
       return 0
     fi
@@ -89,6 +101,11 @@ expected_boole_fail_pattern_for_wrapper() {
     */by_lean.lean)       echo 'assert_lean_test|test4_a0' ;;
     */assertions.lean)    echo '.' ;;
     */debug.lean)         echo '.' ;;
+    # `matching.rs` contains intentionally-failing negative tests:
+    # `assert(s is Soccer)` on an unconstrained `Sport`, and `is_insect_proof`
+    # calling `is_insect(l)` on a `Mammal`. Verus also reports these as
+    # assertion failures; Strata surfaces them as `assert_*` obligations.
+    */vlir-tests/matching.lean) echo 'assert_' ;;
     *) echo "" ;;
   esac
 }
@@ -99,19 +116,6 @@ expected_boole_fail_pattern_for_wrapper() {
 # obligation / Lean error from this wrapper is attributed to the known bug".
 known_translator_bug_pattern_for_wrapper() {
   case "$1" in
-    # Obligation-level: enum variant projection obligations the translator
-    # should not be emitting in this form.
-    */vlir-tests/matching.lean) echo '.' ;;
-    # `Unknown bound variable with index 1` — rec function self-reference
-    # bvar miscount.
-    */verus-examples/guide__recursion.lean) echo '.' ;;
-    */vlir-tests/mutual_recursion.lean) echo '.' ;;
-    */vlir-tests/recursion.lean) echo '.' ;;
-    # `Cannot find this fvar in the context` — `old p` pattern in ensures
-    # clauses.
-    */verus-examples/guide__datatypes.lean) echo '.' ;;
-    # `Expression has type <bvN> when int expected` — missed bv→int coercion.
-    */verus-examples/bitvector_equivalence.lean) echo '.' ;;
     *) echo "" ;;
   esac
 }

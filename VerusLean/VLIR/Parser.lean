@@ -906,7 +906,11 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
   -- Expect that exactly one of the enumerated options will be true
   match ← j["Const", "Var", "VarLoc", "VarAt", "StaticVar", "Loc", "Call", "CallLambda", "ExecFnByName", "Ctor", "Unary", "UnaryOpr", "Binary", "BinaryOpr", "If", "Bind", "WithTriggers", "ArrayLiteral", "MatchBlock"] with
   | ("Const", obj) =>
-    return .Const <| ← Const.fromJson obj
+    -- VLIR wrapper typ is set in monad state by `fromJsonSpanned`; capture it
+    -- so integer literals can stay at their source-declared width.
+    let ty ← getTyp
+    let c ← Const.fromJson obj
+    return .Const c ty
 
   | ("Var", obj) =>
     let ident ← Var.fromJson obj
@@ -1221,7 +1225,7 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     | .func f => some f.decls.length
     | _ => none
   let isSyntheticNoParamArg : Exp → Bool
-    | .Const (.Int i) => i == 0
+    | .Const (.Int i) _ => i == 0
     | _ => false
   let coerceIntConstArgByTyp (argJson : Json) (e : Exp) : VParser Exp := do
     -- Verus can serialize literal call arguments as mathematical ints even when
@@ -1229,7 +1233,7 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     -- `Clip` using the argument's `typ` metadata.
     -- TODO: move literal-normalization to a shared post-parse pass.
     match e with
-    | .Const (.Int _) =>
+    | .Const (.Int _) _ =>
       match Lean.Json.getObjValByPath argJson ["typ"] with
       | .ok typJson =>
         let ty ← Typ.fromJson typJson

@@ -113,7 +113,7 @@ private def refsOfTyp : Typ → List String
   | .AirNamed _ => []
 
 private partial def refsOfExp : Exp → List String
-  | .Const _ | .Var _ => []
+  | .Const _ _ | .Var _ => []
   | .Call fn _ args =>
     let fname := CallFun.name fn
     let fnameStr := identToBoole fname

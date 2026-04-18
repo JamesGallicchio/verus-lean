@@ -38,6 +38,36 @@ private def castExprToWiderBvB (fromW toW : Nat) (signed : Bool) (e : BExpr) : B
   if fromW == toW then pure e
   else applyCast (.bvWiden fromW toW signed) e
 
+/-- Extract an explicit bitvector width from a `BType` annotation. -/
+private def bvTypeWidth? : BType → Option Nat
+  | .bv1 _ => some 1
+  | .bv8 _ => some 8
+  | .bv16 _ => some 16
+  | .bv32 _ => some 32
+  | .bv64 _ => some 64
+  | _ => none
+
+/-- Width of a `BExpr` that carries a bv type syntactically (typed bv ops +
+    bv literals). Defense-in-depth: lets `coerceBvBv` / `coerceNumeric`
+    short-circuit if the caller's `srcInfo?` hint ever drifts from the
+    translated BExpr's actual width. Returns `none` on `.app` / `.fvar` /
+    `.bvar` — caller falls back to the hint. -/
+private def bexprBvWidth? : BExpr → Option Nat
+  | .bv1Lit ..  => some 1
+  | .bv8Lit ..  => some 8
+  | .bv16Lit .. => some 16
+  | .bv32Lit .. => some 32
+  | .bv64Lit .. => some 64
+  | .add_expr _ ty _ _ | .sub_expr _ ty _ _ | .mul_expr _ ty _ _
+  | .div_expr _ ty _ _ | .mod_expr _ ty _ _
+  | .bvsdiv _ ty _ _ | .bvsmod _ ty _ _
+  | .neg_expr _ ty _
+  | .bvand _ ty _ _ | .bvor _ ty _ _ | .bvxor _ ty _ _
+  | .bvnot _ ty _
+  | .bvshl _ ty _ _ | .bvushr _ ty _ _ =>
+    bvTypeWidth? ty
+  | _ => none
+
 /-- Insert a single numeric coercion. Returns the expression unchanged when
     no coercion is needed. -/
 def coerceNumeric (src? target? : Option NumKind) (e : BExpr) :
@@ -55,24 +85,28 @@ def coerceNumeric (src? target? : Option NumKind) (e : BExpr) :
       let eInt ← applyCast .natToInt e
       applyCast (.intToBv w s) eInt
     | .bv sw ss, .bv tw ts =>
-      if ss == ts && canPromoteBvWidths sw tw then
-        castExprToWiderBvB sw tw ss e
+      let effSw := bexprBvWidth? e |>.getD sw
+      if effSw == tw then pure e
+      else if ss == ts && canPromoteBvWidths effSw tw then
+        castExprToWiderBvB effSw tw ss e
       else do
-        let eInt ← applyCast (.bvToInt sw ss) e
+        let eInt ← applyCast (.bvToInt effSw ss) e
         applyCast (.intToBv tw ts) eInt
     | .int, .nat => pure e
     | .int, .int | .nat, .nat => pure e
 
-/-- Coerce between bitvector widths when both source and target are known. -/
+/-- Coerce between bitvector widths when both source and target are known.
+    Prefers `bexprBvWidth? e` over `srcInfo?` when available. -/
 def coerceBvBv (srcInfo? targetInfo? : Option (Nat × Bool)) (e : BExpr) :
     BuildM BExpr := do
   match srcInfo?, targetInfo? with
   | some (sw, ss), some (tw, ts) =>
-    if sw == tw && ss == ts then pure e
-    else if ss == ts && canPromoteBvWidths sw tw then
-      castExprToWiderBvB sw tw ss e
+    let effSw := bexprBvWidth? e |>.getD sw
+    if effSw == tw then pure e
+    else if ss == ts && canPromoteBvWidths effSw tw then
+      castExprToWiderBvB effSw tw ss e
     else do
-      let eInt ← applyCast (.bvToInt sw ss) e
+      let eInt ← applyCast (.bvToInt effSw ss) e
       applyCast (.intToBv tw ts) eInt
   | _, _ => pure e
 

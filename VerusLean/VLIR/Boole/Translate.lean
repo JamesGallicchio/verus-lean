@@ -131,7 +131,7 @@ private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : Li
   if hasNoParamFnMarker env fnameStr then
     argsNoFuel.filter (fun e =>
       match e with
-      | .Unary (.Box .Int) (.Const (.Int 0)) => false
+      | .Unary (.Box .Int) (.Const (.Int 0) _) => false
       | _ => true)
   else
     argsNoFuel
@@ -226,7 +226,7 @@ private def lookupFnParamTypeFull (env : VarEnv) (fname : String) (idx : Nat) : 
 /-! ## Bit-width Inference -/
 
 private def constIntExprVal? : Exp → Option Int
-  | .Const (.Int i) => some i
+  | .Const (.Int i) _ => some i
   | .Binary (.Arith .Add _) lhs rhs => do
     let l ← constIntExprVal? lhs; let r ← constIntExprVal? rhs; some (l + r)
   | .Binary (.Arith .Sub _) lhs rhs => do
@@ -535,8 +535,8 @@ def isQueryStmt : Stm → Bool
   | _ => false
 
 def isTrivialTrueAssert : Stm → Bool
-  | .Assert (.Const (.Bool true)) => true
-  | .AssertLean (.Const (.Bool true)) => true
+  | .Assert (.Const (.Bool true) _) => true
+  | .AssertLean (.Const (.Bool true) _) => true
   | _ => false
 
 def isAssertAssumeEcho (a : Stm) (assumed : Exp) : Bool :=
@@ -675,6 +675,7 @@ private partial def comparisonPrelude
     let r ← coerceNumeric rhsNum? (some .int) r0
     return (argTy?, l, r)
   else
+    -- Same narrow-then-widen gating as `.Binary` (see that site).
     let lExpected? := if lhsInfo?.isSome then none else argTy?
     let rExpected? := if rhsInfo?.isSome then none else argTy?
     let l0 ← expToBoole env bound lExpected? lhs
@@ -694,7 +695,18 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     let srcKind? := actualTy?.bind numKindOfTyp?
     let tgtKind? := expected?.bind numKindOfTyp?
     coerceNumeric srcKind? tgtKind? e
-  | .Const c => return constToBoole expected? c
+  | .Const c ty =>
+    -- Caller-provided `expected?` wins (it knows the surrounding context,
+    -- e.g. a shift-amount that must match the LHS width even when the
+    -- literal's source typ is narrower). Fall back to the Const's own
+    -- VLIR typ when it pins down a bv width — this preserves
+    -- source-declared widths (e.g. `1u32`) in contexts where `expected?`
+    -- couldn't propagate, such as inside a `.Binary` whose own type
+    -- inference was inconclusive (mixed-sign operands).
+    let effectiveTy? :=
+      expected? <|>
+        (if (bitWidthOfTyp ty).isSome then some ty else none)
+    return constToBoole effectiveTy? c
   | .StructCtor dt fields => do
     let ctorIdx ← resolveFreeVar (structCtorNameOf dt)
     let ctor := Bld.fvar ctorIdx
@@ -778,6 +790,9 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         if hasMixedSignedBitArgs then none else some e
       | none, none => none
     let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
+    -- Preserve narrow-then-widen for Verus's bit-vector proof mode: only
+    -- push `argTy?` when the operand has no natural bv width of its own
+    -- (e.g. a literal). See `bitvector_basic::test10` for the failure mode.
     let lExpected? := if lhsInfo?.isSome then none else argTy?
     let rExpected? := if rhsInfo?.isSome then none else argTy?
     let l0 ← expToBoole env bound lExpected? lhs
@@ -886,9 +901,19 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let x' ← coerceBvBv srcInfo? targetInfo? x
         return bvNot w x'
       | none => throw "missing bitvector width for op Not"
-    | .Old => do
-      let ty ← typToBooleTypeOrUnknown expected?
-      return Bld.oldTyped ty x
+    | .Old =>
+      -- Strata's `old` refers to a pre-state snapshot registered via
+      -- `modifies` clauses — we don't emit those, and doing so correctly
+      -- would need a wider redesign. Fortunately stripping `.Old` at
+      -- emission is semantics-preserving for our pipeline:
+      --   • Owned params are immutable in Boole, so `old(p) == p`.
+      --   • `&mut` params are modeled via an explicit `_out` rename on the
+      --     ensures (see `execFnToBoole`); `substExp` deliberately does not
+      --     recurse into `.Unary .Old` bodies (see `Normalize.substExp`),
+      --     so the name inside `.Old` keeps pointing at the original input
+      --     — i.e. the pre-state value.
+      -- In both cases the correct Boole expression is the inner one.
+      return x
     | .Trigger => return x
     | .Box _ => return x
     | .Unbox _ => return x
@@ -1507,7 +1532,7 @@ partial def stmListToBooleAux (env : VarEnv) (projLayouts : List ProjLayout)
     (retVar? : Option (String × Typ))
     (procName : String) :
     List Stm → BuildM (List BStmt)
-  | (.BreakOrContinue none true) :: (.Assume (.Const (.Bool false))) :: rest => do
+  | (.BreakOrContinue none true) :: (.Assume (.Const (.Bool false) _)) :: rest => do
     let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? procName rest
     return [assumeStmt "" (boolConst false)] ++ s2
   | a :: (.Assume e) :: next :: rest =>
@@ -1620,6 +1645,56 @@ private def collectProcedureLocals
       !(inputNames.any (fun x => x == decl.name) || retNames.any (fun x => x == decl.name))) ++
       implicitSetLocals)
   localsAll.filter (localShouldEmit hasForLoop)
+
+/-- Apply the same `inlineTemps` pass the statement-list translator runs
+    (see `stmListToBoole`), so body analyses that happen *before* translation
+    (local-liveness, set-var collection) see the post-inlined shape rather
+    than the raw VLIR shape that still has one-shot `tmp := rhs` prefixes. -/
+private def normalizeForLocalFilter (body : Stm) : Stm :=
+  match body with
+  | .Block stms => .Block (inlineTemps isPureBooleBuiltinCallName stms)
+  | s => inlineTempsInStm isPureBooleBuiltinCallName s
+
+/-- Collect names of tmp vars that will be hoisted out by
+    `extractLoopGuardFromBody` during Loop translation. Such tmps disappear
+    from the emitted Boole body (their assignments are elided and their
+    references are substituted into the hoisted guard expression), so their
+    `var tmp : T;` declarations would otherwise be orphaned. Mirrors the
+    predicate in `stmToBoole`'s `.Loop` handler. -/
+private partial def collectHoistedGuardTmps : Stm → List String
+  | .Loop _ _ _ body _ _ =>
+    let hereTmps := match body with
+      | .Block stms =>
+        -- Mirror `extractLoopGuardFromBody`: flatten nested blocks and
+        -- strip singletons before scanning the prefix. Without this, a
+        -- body shaped `Block [Block [tmp_assign ...]]` (common in VLIR)
+        -- wouldn't expose its tmp prefix.
+        let linear := (flattenSeqBlocks stms).map stripSingletonBlocks
+        (splitGuardTempPrefix linear).fst.map Prod.fst
+      | _ => []
+    hereTmps ++
+      (match body with
+       | .Block stms => stms.flatMap collectHoistedGuardTmps
+       | b => collectHoistedGuardTmps b)
+  | .Block stms => stms.flatMap collectHoistedGuardTmps
+  | .If _ b1 b2 =>
+    collectHoistedGuardTmps b1 ++ (b2.map collectHoistedGuardTmps).getD []
+  | .AssertQuery _ body | .DeadEnd body | .OpenInvariant body | .ClosureInner body =>
+    collectHoistedGuardTmps body
+  | _ => []
+
+/-- Drop procedure locals that are unreferenced by the (post-inline) body:
+    Verus declares VLIR locals unconditionally, but our `inlineTemps` pass
+    (and `extractLoopGuardFromBody` for Loop prefixes) can eliminate every
+    use of a tmp, leaving the `var tmp : T;` declaration as dead output
+    clutter. -/
+private def filterLocalsByUse
+    (body : Stm) (locals : List LocalDeclInfo) : List LocalDeclInfo :=
+  -- Exclude tmps the Loop-guard extractor will hoist out: mentioning them
+  -- in the VLIR body doesn't mean they'll appear in the emitted Boole.
+  let hoisted := collectHoistedGuardTmps body
+  locals.filter (fun decl =>
+    !(hoisted.contains decl.name) && stmMentionsVar decl.name body)
 
 /-! ### Building BooleDDM Commands -/
 
@@ -1760,6 +1835,67 @@ private partial def collectMutArgMapFromDecls (decls : List Decl) : MutArgMap :=
 
 /-! ### SpecFn → BCmd -/
 
+/-- Peel `Box`/`Unbox`/`Decorated` wrappers to find an underlying `.Var` name,
+    if any. Used to decide whether a `.Proj` is being applied directly to a
+    named parameter (and thus needs a caller-supplied variant precondition). -/
+private partial def unwrapToVar : Exp → Option String
+  | .Var x => some x
+  | .Unary (.Box _) e | .Unary (.Unbox _) e => unwrapToVar e
+  | _ => none
+
+/-- Collect `(paramName, dt, variant)` triples for every `.Proj` appearing on
+    the *root* path of the body — i.e. not under any control-flow node
+    (`.If`/`.Bind`/`.MatchBlock`/etc.) which would already constrain the
+    variant via a surrounding guard.
+
+    Used by spec-fn translation to synthesise `requires <dt>..is<variant>(x)`
+    preconditions for Verus's inline accessor sugar (`self->Variant.field`),
+    which Verus encodes as `.Unary (.Proj dt variant field _ check:None)`
+    without recording the partiality on the function. Without this, Strata
+    correctly flags the implicit variant precondition of the datatype
+    destructor as an unprovable obligation inside every such function body. -/
+private partial def rootExposedProjs : Exp → List (String × Ident × String)
+  | .Unary (.Proj dt variant _ _ _) arg =>
+    let here := match unwrapToVar arg with
+      | some name => [(name, dt, variant)]
+      | none => []
+    here ++ rootExposedProjs arg
+  | .Unary _ arg => rootExposedProjs arg
+  | .Binary _ a b => rootExposedProjs a ++ rootExposedProjs b
+  | _ => []
+
+private def dedupVariantReqs (xs : List (String × Ident × String)) :
+    List (String × Ident × String) :=
+  xs.foldl (fun acc t => if acc.contains t then acc else acc ++ [t]) []
+
+/-- Build `requires <dt>..is<variant>(<param>)` SpecElts from `rootExposedProjs`
+    output. Assumes the function's input names have already been `addBoundVars`-ed
+    in the current scope so the tester argument resolves to a bvar.
+
+    Skips Projs on struct-typed parameters (single-variant datatypes): Strata
+    generates no tester for those, and the precondition would be trivially
+    true anyway. We detect this by looking up the tester name in the current
+    free-variable registry — only multi-variant enum translation
+    (`enumToBoole`) registers tester names. -/
+private def synthVariantRequires
+    (reqs : List (String × Ident × String)) :
+    BuildM (Array (BooleDDM.SpecElt SourceRange)) := do
+  let mut elts : Array (BooleDDM.SpecElt SourceRange) := #[]
+  for (paramName, dt, variant) in reqs do
+    let testerName := enumTesterNameOf dt variant
+    let ctx ← get
+    match ctx.freeVarIndex? testerName with
+    | none =>
+      -- Tester not registered: the datatype is a struct (one variant) or
+      -- this Proj targets a name Strata doesn't recognise. Either way the
+      -- precondition is trivial; skip.
+      continue
+    | some testerIdx =>
+      let paramExpr ← resolveVar paramName
+      let cond := Bld.app (Bld.fvar testerIdx) paramExpr
+      elts := elts.push (.requires_spec default noLabel (ann none) cond)
+  pure elts
+
 def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd := do
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
@@ -1775,7 +1911,15 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
       | some b => pure (some (← expToBooleFlat envLocal (some f.returnType) b))
       | none => pure none
     else pure none
-    let elts : Array (BooleDDM.SpecElt SourceRange) := #[]
+    -- Synthesise variant-precondition `requires` for Verus's inline accessor
+    -- pattern (`impl&%N::arrow_*` style spec fns whose body is a bare
+    -- `.Proj`). See `rootExposedProjs` for the detection rule.
+    let inputNameSet := inputNames.toList
+    let variantReqs := match f.body with
+      | some b =>
+        dedupVariantReqs <| (rootExposedProjs b).filter (fun (n, _, _) => inputNameSet.contains n)
+      | none => []
+    let elts ← synthVariantRequires variantReqs
     pure (body?, elts)
   match body? with
   | some body =>
@@ -1802,11 +1946,15 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let bodyStm? := f.body.map (fun b =>
     let b := expandReveals sfMap b
     let b := stripDecreaseArtifacts b
+    let b := normalizeForLocalFilter b
     match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s)
   let setVars := match bodyStm? with | some body => collectSetVars body | none => []
   let bodyHasForLoop := match bodyStm? with | some body => stmHasForLoop body | none => false
   let inputNames := f.inputs.map Prod.fst
   let localsAll := collectProcedureLocals f.locals inputNames retNames setVars (hasForLoop := bodyHasForLoop)
+  let localsAll := match bodyStm? with
+    | some body => filterLocalsByUse body localsAll
+    | none => localsAll
   let outputs := retDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
@@ -1839,6 +1987,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let mutRenames := mutOutDecls.map (fun (n, outName, _) => (n, outName))
   let rewrittenBody :=
     let b := stripDecreaseArtifacts (expandReveals sfMap (applyNameSubstsStm mutRenames f.body))
+    let b := normalizeForLocalFilter b
     match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s
   let rewrittenEnsures := f.ensures.map (applyNameSubstsExp mutRenames)
   let hasRet := match f.returnType with | .Unit | .Empty => false | _ => true
@@ -1849,6 +1998,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let setVars := collectSetVars rewrittenBody
   let bodyHasForLoop := stmHasForLoop rewrittenBody
   let localsAll := collectProcedureLocals f.locals inputNames retNames setVars (hasForLoop := bodyHasForLoop)
+  let localsAll := filterLocalsByUse rewrittenBody localsAll
   let outputs := retDecls ++ mutOutputDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
@@ -2034,7 +2184,14 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           let body ← match f.body with
             | some b => expToBooleFlat envLocal (some f.returnType) b
             | none => pure (boolConst true)
-          let elts : Array (BooleDDM.SpecElt SourceRange) := #[]
+          -- Same variant-precondition synthesis as the non-mutual path.
+          let inputNameSet := inputNames.toList
+          let variantReqs := match f.body with
+            | some b =>
+              dedupVariantReqs <|
+                (rootExposedProjs b).filter (fun (n, _, _) => inputNameSet.contains n)
+            | none => []
+          let elts ← synthVariantRequires variantReqs
           pure (body, elts)
         pure (BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy (ann specElts) body)
       pure [BooleDDM.Command.command_recfndefs default (ann recDecls)]
@@ -2100,8 +2257,130 @@ private def declsHaveForLoop (decls : List Decl) : Bool :=
     | .proofFn f => f.body.map stmHasForLoop |>.getD false
     | _ => false
 
+/-! ### Dead-accessor pruning
+
+Verus synthesises one `->`-accessor spec fn per field per variant (a.k.a.
+`impl&%N::arrow_*`), eagerly for every enum in scope. Most of these go
+unused in any given test, but we translate them all — producing long
+stretches of never-called `Impl__N_arrow_*` decls that bloat the
+emitted Boole source and slow Strata's verification pass.
+
+The pruning pass below keeps an impl-accessor only if it's transitively
+referenced from a non-impl decl. Modelled after the boogie branch's
+`pruneUnreferencedSyntheticHelpers` but operating on VLIR `Decl`s
+rather than Core ones. -/
+
+/-- Identify the name prefix Verus uses for auto-generated impl-block
+    accessor spec fns. Matches after `identToBoole` sanitisation, which
+    preserves `Impl__N_` / `impl__N_` segments. -/
+private def isSyntheticImplName (s : String) : Bool :=
+  s.startsWith "Impl__" || s.startsWith "impl__"
+
+private def declIsSyntheticImpl : Decl → Bool
+  | .specFn f => isSyntheticImplName (identToBoole f.name)
+  | _ => false
+
+private def declName? : Decl → Option String
+  | .specFn f => some (identToBoole f.name)
+  | .proofFn f => some (identToBoole f.name)
+  | .execFn f => some (identToBoole f.name)
+  | .func f => some (identToBoole f.name)
+  | .struct _ | .enum _ | .assertion _ | .mutualBlock _ => none
+
+private partial def expCallRefs : Exp → List String
+  | .Call fn _ args =>
+    let here := identToBoole (CallFun.name fn)
+    let rest := args.flatMap expCallRefs
+    here :: rest
+  | .CallLambda body args =>
+    expCallRefs body ++ args.flatMap expCallRefs
+  | .StructCtor _ fields => fields.flatMap (fun (_, e) => expCallRefs e)
+  | .EnumCtor _ _ fields => fields.flatMap (fun (_, e) => expCallRefs e)
+  | .TupleCtor _ data => data.flatMap expCallRefs
+  | .Unary _ e => expCallRefs e
+  | .Binary _ a b => expCallRefs a ++ expCallRefs b
+  | .If c t f => expCallRefs c ++ expCallRefs t ++ expCallRefs f
+  | .Bind bind body =>
+    let bindRefs := match bind with
+      | .Let _ _ rhs => expCallRefs rhs
+      | .Quant _ _ trigs => trigs.flatMap (fun g => g.flatMap expCallRefs)
+      | .Lambda _ => []
+    bindRefs ++ expCallRefs body
+  | .ArrayLiteral elems => elems.flatMap expCallRefs
+  | .MatchBlock (scrut, _) body => expCallRefs scrut ++ expCallRefs body
+  | .Const _ _ | .Var _ => []
+
+private partial def stmCallRefs : Stm → List String
+  | .Call fn _ args => identToBoole fn :: args.flatMap expCallRefs
+  | .Assert e | .AssertCompute e | .AssertLean e | .Assume e => expCallRefs e
+  | .AssertBitVector reqs enss =>
+    reqs.flatMap expCallRefs ++ enss.flatMap expCallRefs
+  | .AssertQuery _ body => stmCallRefs body
+  | .Assign _ _ e _ => expCallRefs e
+  | .DeadEnd s | .OpenInvariant s | .ClosureInner s => stmCallRefs s
+  | .Return e? => (e?.map expCallRefs).getD []
+  | .BreakOrContinue _ _ | .Reveal .. => []
+  | .If cond b1 b2 =>
+    expCallRefs cond ++ stmCallRefs b1 ++ (b2.map stmCallRefs).getD []
+  | .Loop _ _ cond body invs decrease =>
+    let condRefs := match cond with
+      | some (s, e) => stmCallRefs s ++ expCallRefs e
+      | none => []
+    condRefs ++ stmCallRefs body ++ invs.flatMap (fun inv => expCallRefs inv.body) ++
+      decrease.flatMap expCallRefs
+  | .Block stms => stms.flatMap stmCallRefs
+
+private partial def declRefs : Decl → List String
+  | .assertion _ => []
+  | .specFn f => (f.body.map expCallRefs).getD []
+  | .proofFn f =>
+    f.requires.flatMap expCallRefs ++ f.ensures.flatMap expCallRefs ++
+      (f.body.map stmCallRefs).getD []
+  | .execFn f =>
+    f.requires.flatMap expCallRefs ++ f.ensures.flatMap expCallRefs ++
+      stmCallRefs f.body
+  | .func f =>
+    f.reqs.flatMap expCallRefs ++ f.postCondition.flatMap expCallRefs
+  | .struct _ | .enum _ => []
+  | .mutualBlock ds => ds.flatMap declRefs
+
+/-- Fixed-point closure: starting from `seed` impl-names, repeatedly add
+    impl-names referenced by kept impl decls until the frontier stabilises. -/
+private partial def closeImplRefs (implDecls : List Decl)
+    (seed : List String) : List String :=
+  let rec loop (fuel : Nat) (keep : List String) : List String :=
+    match fuel with
+    | 0 => keep
+    | fuel + 1 =>
+      let kept := implDecls.filter (fun d =>
+        match declName? d with
+        | some n => keep.contains n
+        | none => false)
+      let next := (keep ++ (kept.flatMap declRefs).filter isSyntheticImplName).eraseDups
+      if next.length == keep.length then keep else loop fuel next
+  loop (implDecls.length + 1) seed.eraseDups
+
+/-- Drop synthetic impl-block accessor spec fns that no user-level decl
+    transitively references. Non-synthetic decls (struct/enum/proofFn/
+    execFn/user spec fns/mutualBlocks) are retained unchanged. -/
+private def pruneUnreferencedImpls (decls : List Decl) : List Decl :=
+  let (helpers, others) := decls.partition declIsSyntheticImpl
+  let seed := (others.flatMap declRefs).filter isSyntheticImplName
+  let kept := closeImplRefs helpers seed
+  decls.filter (fun d =>
+    if declIsSyntheticImpl d then
+      match declName? d with
+      | some n => kept.contains n
+      | none => true
+    else true)
+
 def declsToBooleProgram (decls : List Decl) :
     BuildM (Array BCmd) := do
+  -- Drop Verus-synthesised impl-block accessor spec fns that aren't
+  -- transitively referenced by any user-level decl. Eager emission of every
+  -- `Impl__N_arrow_*` bloats the output and slows verification; most tests
+  -- use only a handful.
+  let decls := pruneUnreferencedImpls decls
   let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
   let mutArgMap := collectMutArgMapFromDecls decls

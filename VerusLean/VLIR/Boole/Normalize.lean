@@ -23,7 +23,7 @@ def normalizeCallArgs (args : List Exp) : List Exp :=
 private partial def expVarRefs : Exp → List String :=
   let merge (xs : List (List String)) : List String := (xs.foldl (· ++ ·) []).eraseDups
   fun
-  | .Const _ => []
+  | .Const _ _ => []
   | .Var x => [x]
   | .Call _ _ args => merge (args.map expVarRefs)
   | .CallLambda body args => (expVarRefs body ++ merge (args.map expVarRefs)).eraseDups
@@ -56,7 +56,7 @@ private def triggerVarRefs (trigs : List (List Exp)) : List String :=
 
 mutual
 partial def substExp (name : String) (rhs : Exp) : Exp → Exp
-  | .Const c => .Const c
+  | .Const c ty => .Const c ty
   | .Var x => if x == name then rhs else .Var x
   | .Call fn typs exps => .Call fn typs (exps.map (substExp name rhs))
   | .CallLambda body args =>
@@ -341,7 +341,7 @@ end
 -- membership test avoids the O(n) collect-then-`List.contains` cost on
 -- large expression bodies (see `stmMentionsVar` below, which calls this
 -- once per statement).
-private partial def expMentionsVar (target : String) : Exp → Bool
+partial def expMentionsVar (target : String) : Exp → Bool
   | .Var x => x == target
   | .Call _ _ args => args.any (expMentionsVar target)
   | .CallLambda body args =>
@@ -357,9 +357,9 @@ private partial def expMentionsVar (target : String) : Exp → Bool
   | .Bind (.Lambda _) body => expMentionsVar target body
   | .ArrayLiteral elems => elems.any (expMentionsVar target)
   | .MatchBlock (scrut, _) body => expMentionsVar target scrut || expMentionsVar target body
-  | .Const _ => false
+  | .Const _ _ => false
 
-private partial def stmMentionsVar (target : String) : Stm → Bool
+partial def stmMentionsVar (target : String) : Stm → Bool
   | .Call _ _ args => args.any (expMentionsVar target)
   | .Assert e | .AssertCompute e | .AssertLean e | .Assume e => expMentionsVar target e
   | .AssertBitVector reqs enss =>
@@ -388,7 +388,9 @@ mutual
 partial def inlineTempsInStm (isPureCallName : Ident → Bool) : Stm → Stm
   | .AssertQuery mode body => .AssertQuery mode (inlineTempsInStm isPureCallName body)
   | .DeadEnd stm => .DeadEnd (inlineTempsInStm isPureCallName stm)
-  | .If cond b1 b2 => .If cond b1 b2
+  | .If cond b1 b2 =>
+    .If cond (inlineTempsInStm isPureCallName b1)
+      (b2.map (inlineTempsInStm isPureCallName))
   | .Loop isFor label cond body invs decrease =>
     let cond' := cond
     let body' := match body with
@@ -440,7 +442,7 @@ private partial def hasReturnStm : Stm → Bool
   | _ => false
 
 private def isAssumeFalse : Stm → Bool
-  | .Assume (.Const (.Bool false)) => true
+  | .Assume (.Const (.Bool false) _) => true
   | _ => false
 
 /-- True if any statement in the list (recursing into nested `Block` / `If`

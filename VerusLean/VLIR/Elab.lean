@@ -419,7 +419,7 @@ partial def collectMatchArmsFromIfChain (exp : Exp) : CoreM (Array (Term × Term
 
 partial def Exp.toTerm (e : Exp) : CoreM Term := do
   match e with
-  | .Const c => c.toTerm
+  | .Const c _ => c.toTerm
   | .Var i => i.toIdent
   | .Call fn _ exps =>
     let fnName := CallFun.name fn

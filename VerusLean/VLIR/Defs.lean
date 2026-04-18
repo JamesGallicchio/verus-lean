@@ -334,8 +334,12 @@ deriving Repr, Inhabited, Hashable, BEq
   Expressions have return values.
 -/
 inductive Exp where
-  /-- Constant value literals. -/
-  | Const (c : Const)
+  /-- Constant value literals. The `ty` field carries the VLIR wrapper's
+      declared type so integer literals retain their source-declared width
+      (e.g. `1u32` stays bv32) without depending on caller-supplied
+      `expected?` propagation. For `.Bool`/`.Char`/`.StrSlice` the typ is
+      redundant (fixed by the variant) and may be ignored. -/
+  | Const (c : Const) (ty : Typ)
   /-- Local variables, as a right-hand side of an expression. -/
   | Var (x : String)
   /-- Call to spec function -/
@@ -674,7 +678,7 @@ def Typ.height : Typ → _root_.Nat
   | _ => 1
 
 def Exp.height : Exp → Nat
-  | .Const _
+  | .Const _ _
   | .Var _ => 1
   | .Unary _ e => 1 + e.height
   | .Call _ _ es => 1 + es.attach.foldl (init := 0) (λ acc ⟨e, _⟩ => max acc e.height)
