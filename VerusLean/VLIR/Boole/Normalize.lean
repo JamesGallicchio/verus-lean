@@ -416,6 +416,56 @@ partial def inlineTemps (isPureCallName : Ident → Bool) : List Stm → List St
     | none => inlineTempsInStm isPureCallName stm :: rest'
 end
 
+mutual
+  /-- Recursive helper: applies `normalizeStms` to nested statement lists
+      (Block contents, Loop bodies, If branches), and at each `.Loop` site
+      tries to populate `Loop.cond` from a body-prefix guard via
+      `extractLoopGuardFromBody`. -/
+  partial def normalizeStm (isPureCallName : Ident → Bool) : Stm → Stm
+    | .Block stms => .Block (normalizeStms isPureCallName stms)
+    | .If cond b1 b2 =>
+      .If cond (normalizeStm isPureCallName b1)
+        (b2.map (normalizeStm isPureCallName))
+    | .Loop isFor label cond body invs dec =>
+      let cond' := cond.map (fun (s, e) => (normalizeStm isPureCallName s, e))
+      let body' := normalizeStm isPureCallName body
+      match cond', extractLoopGuardFromBody body' with
+      | none, some (g, b'') =>
+        -- Hoist body-prefix guard into Loop.cond. The guard `g` already
+        -- has any tmp prefix substituted in by `extractLoopGuardFromBody`,
+        -- so the cond's prefix-Stm slot stays empty.
+        .Loop isFor label (some (.Block [], g)) (normalizeStm isPureCallName b'') invs dec
+      | _, _ => .Loop isFor label cond' body' invs dec
+    | .AssertQuery m b => .AssertQuery m (normalizeStm isPureCallName b)
+    | .DeadEnd b => .DeadEnd (normalizeStm isPureCallName b)
+    | .OpenInvariant b => .OpenInvariant (normalizeStm isPureCallName b)
+    | .ClosureInner b => .ClosureInner (normalizeStm isPureCallName b)
+    | s => s
+
+  /-- Apply the four list-level normalization passes (inline temps, recover
+      compute-proof shells, flatten nested top-level Blocks, strip singleton
+      Blocks) to a statement list, then descend into each statement. -/
+  partial def normalizeStms (isPureCallName : Ident → Bool)
+      (stms : List Stm) : List Stm :=
+    let normalized :=
+      (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureCallName stms))).map
+        stripSingletonBlocks
+    normalized.map (normalizeStm isPureCallName)
+end
+
+/-- Single VLIR-level normalization pre-pass run once per body before
+    `stmToBoole`. After this pass:
+      * `stmListToBoole` does not need to renormalize its statement list, and
+      * `stmToBoole`'s `.Loop` handler can read `Loop.cond` directly instead
+        of recovering it from a body prefix.
+    Centralizing the passes here is what lets the local-variable filter be
+    a plain `stmMentionsVar` check — the post-pass body already reflects
+    every tmp the translator will end up dropping. -/
+def normalizeBody (isPureCallName : Ident → Bool) (body : Stm) : Stm :=
+  match body with
+  | .Block stms => .Block (normalizeStms isPureCallName stms)
+  | s => normalizeStm isPureCallName s
+
 private def isDecreaseArtifact : Stm → Bool
   | .Assign (.Var name) _ _ _ => name.startsWith "decrease"
   | .Call fn _ _ => toString fn |>.startsWith "CheckDecrease"

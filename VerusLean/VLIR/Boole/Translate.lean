@@ -1420,17 +1420,16 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       | none => pure []
     return [iteStmt c thenStms.toArray elseStms.toArray]
   | .Loop _isForLoop label cond body invs decrease => do
-    -- For-loop recovery is handled in stmListToBooleAux; if we get here, emit while loop
-    let (guardFromBody?, body') :=
-      match extractLoopGuardFromBody body with
-      | some (g, b') => (some g, b')
-      | none => (none, body)
+    -- For-loop recovery is handled in stmListToBooleAux; if we get here, emit while loop.
+    -- `Loop.cond` has already been populated upstream by `normalizeBody`'s
+    -- `extractLoopGuardFromBody` pass (when the source omitted a cond and
+    -- the body opened with a guard prefix), so we just consume it here.
     let loopLabel? ← do
       match label with
       | some l => pure (some (sanitizeIdent l))
       | none =>
         let condNeeds := match cond with | some (s, _) => hasUnlabeledLoopControl s | none => false
-        if condNeeds || hasUnlabeledLoopControl body' then
+        if condNeeds || hasUnlabeledLoopControl body then
           pure (some (← implicitLoopLabel))
         else
           pure none
@@ -1442,10 +1441,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     let condExpr ←
       match cond with
       | some (_, e) => expToBooleFlat env (some .Bool) (substExps condTempSubsts e)
-      | none =>
-        match guardFromBody? with
-        | some g => expToBooleFlat env (some .Bool) g
-        | none => pure (boolConst true : BExpr)
+      | none => pure (boolConst true : BExpr)
     let invExprs ← invs.toArray.mapM (fun inv => expToBooleFlat env (some .Bool) inv.body)
     let measureExpr? ← match decrease with
       | [] => pure none
@@ -1454,7 +1450,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         let srcKind? := inferNumKind env [] e
         let ce ← coerceNumeric srcKind? (some .int) ce0
         pure (some ce)
-    let bodyBound := match loopLabel? with | some l => bindUnlabeledLoopControlTo l body' | none => body'
+    let bodyBound := match loopLabel? with | some l => bindUnlabeledLoopControlTo l body | none => body
     let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? procName bodyBound
     let loopStmt := whileStmt condExpr measureExpr? invExprs bodyStms.toArray
     let stmt := match loopLabel? with | some l => blockStmt l #[loopStmt] | none => loopStmt
@@ -1511,21 +1507,21 @@ partial def stmListToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     (procName : String) :
     List Stm → BuildM (List BStmt)
   | stms => do
-    let normalized :=
-      (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureBooleBuiltinCallName stms))).map stripSingletonBlocks
-    -- Try for-loop recovery before normal processing
-    let hasForLoop := normalized.any fun
+    -- The body has already been put through `normalizeBody` once at the
+    -- entry of `proofFnToBoole` / `execFnToBoole`, so no further inlining,
+    -- block-flattening, or compute-proof recovery is needed here.
+    let hasForLoop := stms.any fun
       | .Loop true _ _ _ _ _ => true
       | _ => false
     if hasForLoop then
-      match ← tryForLoopRecovery env projLayouts mutArgMap retVar? procName normalized with
+      match ← tryForLoopRecovery env projLayouts mutArgMap retVar? procName stms with
       | some (forStms, postStms) =>
         let rest ← stmListToBooleAux env projLayouts mutArgMap retVar? procName postStms
         return forStms ++ rest
       | none =>
-        stmListToBooleAux env projLayouts mutArgMap retVar? procName normalized
+        stmListToBooleAux env projLayouts mutArgMap retVar? procName stms
     else
-      stmListToBooleAux env projLayouts mutArgMap retVar? procName normalized
+      stmListToBooleAux env projLayouts mutArgMap retVar? procName stms
 
 partial def stmListToBooleAux (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap)
@@ -1646,55 +1642,13 @@ private def collectProcedureLocals
       implicitSetLocals)
   localsAll.filter (localShouldEmit hasForLoop)
 
-/-- Apply the same `inlineTemps` pass the statement-list translator runs
-    (see `stmListToBoole`), so body analyses that happen *before* translation
-    (local-liveness, set-var collection) see the post-inlined shape rather
-    than the raw VLIR shape that still has one-shot `tmp := rhs` prefixes. -/
-private def normalizeForLocalFilter (body : Stm) : Stm :=
-  match body with
-  | .Block stms => .Block (inlineTemps isPureBooleBuiltinCallName stms)
-  | s => inlineTempsInStm isPureBooleBuiltinCallName s
-
-/-- Collect names of tmp vars that will be hoisted out by
-    `extractLoopGuardFromBody` during Loop translation. Such tmps disappear
-    from the emitted Boole body (their assignments are elided and their
-    references are substituted into the hoisted guard expression), so their
-    `var tmp : T;` declarations would otherwise be orphaned. Mirrors the
-    predicate in `stmToBoole`'s `.Loop` handler. -/
-private partial def collectHoistedGuardTmps : Stm → List String
-  | .Loop _ _ _ body _ _ =>
-    let hereTmps := match body with
-      | .Block stms =>
-        -- Mirror `extractLoopGuardFromBody`: flatten nested blocks and
-        -- strip singletons before scanning the prefix. Without this, a
-        -- body shaped `Block [Block [tmp_assign ...]]` (common in VLIR)
-        -- wouldn't expose its tmp prefix.
-        let linear := (flattenSeqBlocks stms).map stripSingletonBlocks
-        (splitGuardTempPrefix linear).fst.map Prod.fst
-      | _ => []
-    hereTmps ++
-      (match body with
-       | .Block stms => stms.flatMap collectHoistedGuardTmps
-       | b => collectHoistedGuardTmps b)
-  | .Block stms => stms.flatMap collectHoistedGuardTmps
-  | .If _ b1 b2 =>
-    collectHoistedGuardTmps b1 ++ (b2.map collectHoistedGuardTmps).getD []
-  | .AssertQuery _ body | .DeadEnd body | .OpenInvariant body | .ClosureInner body =>
-    collectHoistedGuardTmps body
-  | _ => []
-
-/-- Drop procedure locals that are unreferenced by the (post-inline) body:
-    Verus declares VLIR locals unconditionally, but our `inlineTemps` pass
-    (and `extractLoopGuardFromBody` for Loop prefixes) can eliminate every
-    use of a tmp, leaving the `var tmp : T;` declaration as dead output
-    clutter. -/
+/-- Drop procedure locals unreferenced by the body. Run after
+    `normalizeBody`, so any tmp the translator will eliminate (inlined
+    one-shot temps, body-prefix guards hoisted into a Loop's cond) is
+    already absent from the body and naturally fails this filter. -/
 private def filterLocalsByUse
     (body : Stm) (locals : List LocalDeclInfo) : List LocalDeclInfo :=
-  -- Exclude tmps the Loop-guard extractor will hoist out: mentioning them
-  -- in the VLIR body doesn't mean they'll appear in the emitted Boole.
-  let hoisted := collectHoistedGuardTmps body
-  locals.filter (fun decl =>
-    !(hoisted.contains decl.name) && stmMentionsVar decl.name body)
+  locals.filter (fun decl => stmMentionsVar decl.name body)
 
 /-! ### Building BooleDDM Commands -/
 
@@ -1946,7 +1900,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let bodyStm? := f.body.map (fun b =>
     let b := expandReveals sfMap b
     let b := stripDecreaseArtifacts b
-    let b := normalizeForLocalFilter b
+    let b := normalizeBody isPureBooleBuiltinCallName b
     match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s)
   let setVars := match bodyStm? with | some body => collectSetVars body | none => []
   let bodyHasForLoop := match bodyStm? with | some body => stmHasForLoop body | none => false
@@ -1987,7 +1941,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let mutRenames := mutOutDecls.map (fun (n, outName, _) => (n, outName))
   let rewrittenBody :=
     let b := stripDecreaseArtifacts (expandReveals sfMap (applyNameSubstsStm mutRenames f.body))
-    let b := normalizeForLocalFilter b
+    let b := normalizeBody isPureBooleBuiltinCallName b
     match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s
   let rewrittenEnsures := f.ensures.map (applyNameSubstsExp mutRenames)
   let hasRet := match f.returnType with | .Unit | .Empty => false | _ => true
