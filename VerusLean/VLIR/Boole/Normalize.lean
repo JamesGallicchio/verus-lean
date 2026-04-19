@@ -135,6 +135,18 @@ end
 def substExps (subs : List (String × Exp)) (e : Exp) : Exp :=
   subs.foldl (fun acc (n, rhs) => substExp n rhs acc) e
 
+/-- Rename the base variable inside an LValue. Walks `.Proj` / `.Proj'`
+    spines down to the leaf `.Var src` and rewrites it to `.Var dst`.
+    Used by `substStm` only when the substitution `rhs` is itself a
+    `.Var dst` (i.e. variable rename) — substituting a non-Var Exp into
+    an LValue position is ill-typed, and inline-temps callers never need
+    that path because tmps don't appear as assignment targets. -/
+partial def renameLValueVar (src dst : String) : LValue → LValue
+  | .Var n => if n == src then .Var dst else .Var n
+  | .Proj base dt v field gv ck =>
+    .Proj (renameLValueVar src dst base) dt v field gv ck
+  | .Proj' base size field => .Proj' (renameLValueVar src dst base) size field
+
 partial def substStm (name : String) (rhs : Exp) : Stm → Stm
   | .Call fn typs args => .Call fn typs (args.map (substExp name rhs))
   | .Assert e => .Assert (substExp name rhs e)
@@ -145,7 +157,12 @@ partial def substStm (name : String) (rhs : Exp) : Stm → Stm
   | .AssertLean e => .AssertLean (substExp name rhs e)
   | .Assume e => .Assume (substExp name rhs e)
   | .Assign lhs lhsTy e lhsIsInit =>
-    .Assign lhs lhsTy (substExp name rhs e) lhsIsInit
+    -- Rename only when `rhs` is a `.Var`: otherwise an LValue position
+    -- has no sensible substitution. See `renameLValueVar` doc comment.
+    let lhs' := match rhs with
+      | .Var dst => renameLValueVar name dst lhs
+      | _ => lhs
+    .Assign lhs' lhsTy (substExp name rhs e) lhsIsInit
   | .DeadEnd stm => .DeadEnd (substStm name rhs stm)
   | .Return e => .Return (e.map (substExp name rhs))
   | .BreakOrContinue label isBreak => .BreakOrContinue label isBreak

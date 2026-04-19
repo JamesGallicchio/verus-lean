@@ -16,11 +16,20 @@ import VerusLean.VLIR.Boole.Builder
 import VerusLean.VLIR.Boole.Cast
 import VerusLean.VLIR.Boole.Coercions
 import VerusLean.VLIR.Boole.Emit
+import VerusLean.VLIR.Boole.EnvBuild
 import VerusLean.VLIR.Boole.ForLoop
+import VerusLean.VLIR.Boole.Inference
+import VerusLean.VLIR.Boole.Locals
 import VerusLean.VLIR.Boole.Names
 import VerusLean.VLIR.Boole.Normalize
+import VerusLean.VLIR.Boole.Ops
+import VerusLean.VLIR.Boole.Projection
+import VerusLean.VLIR.Boole.Pruning
+import VerusLean.VLIR.Boole.Query
+import VerusLean.VLIR.Boole.Reveal
 import VerusLean.VLIR.Boole.Signatures
 import VerusLean.VLIR.Boole.SupportEmit
+import VerusLean.VLIR.Boole.VariantReqs
 
 namespace VerusLean.Boole
 
@@ -31,11 +40,20 @@ open Strata.BooleDDM
 open VerusLean.Boole.Cast
 open VerusLean.Boole.Coercions
 open VerusLean.Boole.Emit
+open VerusLean.Boole.EnvBuild
 open VerusLean.Boole.ForLoop
+open VerusLean.Boole.Inference
+open VerusLean.Boole.Locals
 open VerusLean.Boole.Names
 open VerusLean.Boole.Normalize
+open VerusLean.Boole.Ops
+open VerusLean.Boole.Projection
+open VerusLean.Boole.Pruning
+open VerusLean.Boole.Query
+open VerusLean.Boole.Reveal
 open VerusLean.Boole.Signatures
 open VerusLean.Boole.SupportEmit
+open VerusLean.Boole.VariantReqs
 
 -- `Boole.Bld` re-exports Builder symbols under a short prefix so Translate
 -- can refer to them as `Bld.fvar`, `Bld.app`, etc. without `open`-ing
@@ -56,17 +74,6 @@ private def isPureBooleBuiltinCallName (fn : Ident) : Bool :=
   isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
     || isVecIndexSpecName fn || isVecIndexExecName fn
 
-/-! ## Type Aliases -/
-
-abbrev VarEnv := Std.HashMap String Typ
-abbrev BoundEnv := List (String × Typ)
-
-structure MutArgInfo where
-  idx : Nat
-  ty : Typ
-
-abbrev MutArgMap := Std.HashMap String (List MutArgInfo)
-
 /-! ## Environment Helpers -/
 
 def envFromDecls (decls : List (String × Typ)) : VarEnv :=
@@ -82,48 +89,8 @@ def boundIndex? (bound : BoundEnv) (name : String) : Option Nat :=
     | (n, _) :: tail => if n == name then some i else go (i + 1) tail
   go 0 bound
 
-def boundType? (bound : BoundEnv) (name : String) : Option Typ :=
-  (bound.find? (fun (n, _) => n == name)).map Prod.snd
-
-private def noParamMarkerKey (fname : String) : String :=
-  s!"__verus_noparam_fn__{fname}"
-
-private def addNoParamFnMarkers (env : VarEnv) (noParamFns : List String) : VarEnv :=
-  noParamFns.foldl (init := env) (fun acc fname => acc.insert (noParamMarkerKey fname) .Bool)
-
-private def hasNoParamFnMarker (env : VarEnv) (fname : String) : Bool :=
-  env.contains (noParamMarkerKey fname)
-
-private def fnRetKey (fname : String) : String :=
-  s!"__verus_fnret__{fname}"
-
-private def fnParamKey (fname : String) (idx : Nat) : String :=
-  s!"__verus_fnparam__{fname}__{idx}"
-
-private def lookupFnRetType (env : VarEnv) (fname : String) : Option Typ :=
-  env.get? (fnRetKey fname)
-
-private def lookupFnParamType (env : VarEnv) (fname : String) (idx : Nat) : Option Typ :=
-  env.get? (fnParamKey fname idx)
-
 private def preludeIdent (name : String) : Ident :=
   .str .anonymous name
-
-def mutRefPayload? : Typ → Option Typ
-  | .Decorated .MutRef ty => some ty
-  | .Decorated _ ty => mutRefPayload? ty
-  | _ => none
-
-def mutArgInfos (inputs : List (String × Typ)) : List MutArgInfo :=
-  let rec go (i : Nat) (rest : List (String × Typ)) : List MutArgInfo :=
-    match rest with
-    | [] => []
-    | (_, ty) :: tail =>
-      let here := match mutRefPayload? ty with
-        | some payload => [{ idx := i, ty := payload }]
-        | none => []
-      here ++ go (i + 1) tail
-  go 0 inputs
 
 private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : List Exp) : List Exp :=
   let fnameStr := identToBoole fname
@@ -204,162 +171,6 @@ private def typToBooleTypeOrUnknown : Option Typ → BuildM BType
   | some ty => typToBooleType ty
   | none => pure unknownTy
 
-def isSeqTyp : Typ → Bool
-  | .Struct name _ => datatypeNameOf name == "Seq"
-  | .Decorated _ ty => isSeqTyp ty
-  | _ => false
-
-def vecElemTyp? : Typ → Option Typ
-  | .Struct name params =>
-    if isVecTypeName name then params.head? else none
-  | .Decorated _ ty => vecElemTyp? ty
-  | _ => none
-
-/-! ## Full lookups combining env + known functions -/
-
-private def lookupFnRetTypeFull (env : VarEnv) (fname : String) : Option Typ :=
-  lookupFnRetType env fname <|> lookupKnownFnRetType fname
-
-private def lookupFnParamTypeFull (env : VarEnv) (fname : String) (idx : Nat) : Option Typ :=
-  lookupFnParamType env fname idx <|> lookupKnownFnParamType fname idx
-
-/-! ## Bit-width Inference -/
-
-private def constIntExprVal? : Exp → Option Int
-  | .Const (.Int i) _ => some i
-  | .Binary (.Arith .Add _) lhs rhs => do
-    let l ← constIntExprVal? lhs; let r ← constIntExprVal? rhs; some (l + r)
-  | .Binary (.Arith .Sub _) lhs rhs => do
-    let l ← constIntExprVal? lhs; let r ← constIntExprVal? rhs; some (l - r)
-  | .Binary (.Arith .Mul _) lhs rhs => do
-    let l ← constIntExprVal? lhs; let r ← constIntExprVal? rhs; some (l * r)
-  | _ => none
-
-private def intFitsBitWidth (w : Nat) (signed : Bool) (i : Int) : Bool :=
-  if signed then
-    let lo : Int := -((2 : Int) ^ (w - 1))
-    let hi : Int := (2 : Int) ^ (w - 1)
-    lo <= i && i < hi
-  else
-    let hi : Int := (2 : Int) ^ w
-    0 <= i && i < hi
-
-private partial def exprFitsBitWidth (w : Nat) (signed : Bool) : Exp → Bool
-  | e =>
-    match constIntExprVal? e with
-    | some i => intFitsBitWidth w signed i
-    | none =>
-      match e with
-      | .If _ t f => exprFitsBitWidth w signed t && exprFitsBitWidth w signed f
-      | _ => false
-
-private def choosePromotedWidthForExpr?
-    (fromW : Nat) (signed : Bool) (e : Exp) : Option Nat :=
-  if !isSupportedBvWidth fromW then none
-  else (supportedBvWidths.filter (fromW <= ·)).find? (exprFitsBitWidth · signed e)
-
-def chooseBitArgTyForCmp
-    (lhs rhs : Exp) (lhsInfo? rhsInfo? : Option (Nat × Bool)) : Option Typ :=
-  match lhsInfo?, rhsInfo? with
-  | some i1, some i2 =>
-    (chooseBitPromotionInfo? i1 i2).map (fun (w, signed) => bitTypOfInfo w signed)
-  | some (w, s), none =>
-    (choosePromotedWidthForExpr? w s rhs).map (fun w' => bitTypOfInfo w' s)
-  | none, some (w, s) =>
-    (choosePromotedWidthForExpr? w s lhs).map (fun w' => bitTypOfInfo w' s)
-  | none, none => none
-
-partial def vecVarFromExp : Exp → Option String
-  | .Var x => some x
-  | .Unary op e =>
-    match op with
-    | .Box _ | .Unbox _ | .Clip _ _ | .Old | .Trigger | .HasType _ => vecVarFromExp e
-    | _ => none
-  | .Call fn _ [arg] =>
-    if isViewName (CallFun.name fn) then vecVarFromExp arg else none
-  | _ => none
-
-def unwrapViewCall : Exp → Exp
-  | .Call fn _ [inner] =>
-    if isViewName (CallFun.name fn) then inner else .Call fn [] [inner]
-  | e => e
-
-/-- Infer bitwidth/signedness for an expression. -/
-def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bool) :=
-  match e with
-  | .Var x =>
-    (boundType? bound x <|> env.get? x) |>.bind bitInfoOfTyp
-  | .Call fn _ args =>
-    let name := CallFun.name fn
-    if isVecLenSpecName name || isVecLenExecName name then
-      some (usizeBitWidth, false)
-    else if isVecIndexSpecName name || isVecIndexExecName name then
-      match args with
-      | vArg :: _ =>
-        match vecVarFromExp vArg with
-        | some base => env.get? base |>.bind vecElemTyp? |>.bind bitInfoOfTyp
-        | none => none
-      | _ => none
-    else
-      let fnStr := identToBoole name
-      (lookupFnRetTypeFull env fnStr).bind bitInfoOfTyp
-  | .Unary (.BitNot (some w)) e =>
-    inferBitInfo env bound e <|>
-      (if isSupportedBvWidth w then some (w, false) else none)
-  | .Unary (.Unbox t) e => bitInfoOfTyp t <|> inferBitInfo env bound e
-  | .Unary (.Box t) e => bitInfoOfTyp t <|> inferBitInfo env bound e
-  | .Unary (.Clip (.U w) _) _ =>
-    let w := w.toNat
-    if isSupportedBvWidth w then some (w, false) else none
-  | .Unary (.Clip (.I w) _) _ =>
-    let w := w.toNat
-    if isSupportedBvWidth w then some (w, true) else none
-  | .Binary (.Bitwise (.Shl w _) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
-  | .Binary (.Bitwise (.Shr w) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
-  | .Unary _ e => inferBitInfo env bound e
-  | .Binary _ e1 e2 => inferBitInfo env bound e1 <|> inferBitInfo env bound e2
-  | .If _ t f => inferBitInfo env bound t <|> inferBitInfo env bound f
-  | _ => none
-
-private partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Option Typ
-  | .Var x => boundType? bound x <|> env.get? x
-  | .Call fn _ args =>
-    let name := CallFun.name fn
-    if isVecLenSpecName name || isVecLenExecName name then
-      some (.UInt usizeBitWidth)
-    else if isVecIndexSpecName name || isVecIndexExecName name then
-      match args with
-      | vArg :: _ =>
-        match vecVarFromExp (unwrapViewCall vArg) with
-        | some base => env.get? base |>.bind vecElemTyp?
-        | none => none
-      | _ => none
-    else
-      lookupFnRetTypeFull env (identToBoole name)
-  | .Unary (.Box t) _ => some t
-  | .Unary (.Unbox t) _ => some t
-  | .Unary (.Proj dt variant field _ _) _ =>
-    let projField := projFieldNameOf dt variant field
-    lookupFnRetTypeFull env (datatypeDestructorNameOf dt projField)
-  | .Unary (.Clip range _) _ =>
-    match range with
-    | .Int => some .Int  | .Nat => some .Nat
-    | .U w => some (.UInt w.toNat)  | .I w => some (.SInt w.toNat)
-    | .USize => some (.UInt usizeBitWidth)  | .ISize => some (.SInt usizeBitWidth)
-    | .Char => some .Char
-  | .If _ t f => inferComparableTyp? env bound t <|> inferComparableTyp? env bound f
-  | .Bind (.Let _ _ _) body => inferComparableTyp? env bound body
-  | _ => none
-
-def inferNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=
-  match inferBitInfo env bound e with
-  | some (w, s) => some (.bv w s)
-  | none =>
-    match inferComparableTyp? env bound e with
-    | some .Int => some .int
-    | some .Nat => some .nat
-    | _ => none
-
 /-! ## Resolve Helpers -/
 
 private def resolveVar (name : String) : BuildM BExpr := do
@@ -370,7 +181,7 @@ private def resolveVar (name : String) : BuildM BExpr := do
     let idx ← resolveFreeVar sanName
     pure (Bld.fvar idx)
 
-/-! ## Expression Translation -/
+/-! ## Constant + Type-Args Helpers -/
 
 def constToBoole (expected? : Option Typ) : Const → BExpr
   | .Bool b => boolConst b
@@ -381,197 +192,7 @@ def constToBoole (expected? : Option Typ) : Const → BExpr
   | .StrSlice s => .strLit default (ann s)
   | .Char c => intConst c.toNat
 
-/-- Apply a binary bitvector operation. -/
-private def applyBvBinOp (w : Nat) (opName : String) (a b : BExpr) : Option BExpr :=
-  match opName with
-  | "Add" => some (bvAdd w a b)
-  | "Sub" => some (bvSub w a b)
-  | "Mul" => some (bvMul w a b)
-  | "UDiv" => some (bvUDiv w a b)
-  | "UMod" => some (bvUMod w a b)
-  | "SDiv" => some (bvSDiv w a b)
-  | "SMod" => some (bvSMod w a b)
-  | _ => none
-
-/-- Apply a bitvector bitwise operation. -/
-private def applyBvBitOp (w : Nat) (opName : String) (a b : BExpr) : Option BExpr :=
-  match opName with
-  | "And" => some (bvAnd w a b)
-  | "Or" => some (bvOr w a b)
-  | "Xor" => some (bvXor w a b)
-  | "Shl" => some (bvShl w a b)
-  | "UShr" => some (bvUShr w a b)
-  | _ => none
-
-/-- Apply a bitvector comparison operation. -/
-private def applyBvCmpOp (w : Nat) (opName : String) (a b : BExpr) : Option BExpr :=
-  match opName with
-  | "ULt" => some (bvUlt w a b)
-  | "ULe" => some (bvUle w a b)
-  | "UGt" => some (bvUgt w a b)
-  | "UGe" => some (bvUge w a b)
-  | "SLt" => some (bvSlt w a b)
-  | "SLe" => some (bvSle w a b)
-  | "SGt" => some (bvSgt w a b)
-  | "SGe" => some (bvSge w a b)
-  | _ => none
-
-private def applyBinaryOp (op : BinaryOp) (a b : BExpr) : Option BExpr :=
-  match op with
-  | .And => some (boolAnd a b)
-  | .Or => some (boolOr a b)
-  | .Implies => some (boolImplies a b)
-  | .Arith .Add _ => some (intAdd a b)
-  | .Arith .Sub _ => some (intSub a b)
-  | .Arith .Mul _ => some (intMul a b)
-  | .Arith .EuclideanDiv _ => some (intDiv a b)
-  | .Arith .EuclideanMod _ => some (intMod a b)
-  | .Inequality .Le => some (intLe a b)
-  | .Inequality .Lt => some (intLt a b)
-  | .Inequality .Ge => some (intGe a b)
-  | .Inequality .Gt => some (intGt a b)
-  | _ => none
-
-private def applyUnaryOp (op : UnaryOp) (a : BExpr) : Option BExpr :=
-  match op with
-  | .Not => some (boolNot a)
-  | _ => none
-
-private def seqElemTyp? : Typ → Option Typ
-  | .Struct name params =>
-    match params with
-    | elem :: _ => if datatypeNameOf name == "Seq" then some elem else none
-    | [] => none
-  | .Decorated _ ty => seqElemTyp? ty
-  | _ => none
-
-private def setElemTyp? : Typ → Option Typ
-  | .Struct name params =>
-    match params with
-    | elem :: _ => if datatypeNameOf name == "Set" then some elem else none
-    | [] => none
-  | .Decorated _ ty => setElemTyp? ty
-  | _ => none
-
-private def firstStructParamFromExpected? : Option Typ → Option Typ
-  | some (.Struct _ params) => params.head?
-  | some (.Decorated _ ty) => firstStructParamFromExpected? (some ty)
-  | _ => none
-
-private def rangeIndexTypFromExpected? : Option Typ → Option Typ
-  | some (.Struct n params) =>
-    if isRangeTypeName n then params.head? else none
-  | some (.Decorated _ ty) => rangeIndexTypFromExpected? (some ty)
-  | _ => none
-
-private def isRangeCtorFields (fields : List (String × Exp)) : Bool :=
-  match fields with
-  | [("start", _), ("end", _)] => true
-  | _ => false
-
-private def structFieldExpectedType? (env : VarEnv) (dt : Ident) (field : String) : Option Typ :=
-  let projField := projFieldNameOf dt (datatypeNameOf dt) field
-  lookupFnRetTypeFull env (datatypeDestructorNameOf dt projField)
-
-private def enumFieldExpectedType? (env : VarEnv) (dt : Ident) (variant : String)
-    (field : String) : Option Typ :=
-  let projField := projFieldNameOf dt variant field
-  lookupFnRetTypeFull env (datatypeDestructorNameOf dt projField)
-
-private def mkSeqLiteralExp (elems : List Exp) : Exp :=
-  let seqEmpty : Exp := .Call (.Fun (preludeIdent "Seq_empty")) [] []
-  elems.foldl (init := seqEmpty) (fun acc elem =>
-    .Call (.Fun (preludeIdent "Seq_push")) [] [acc, elem])
-
-private partial def arrayLiteralElemsFromViewArg? : Exp → Option (List Exp)
-  | .ArrayLiteral elems => some elems
-  | .Unary op e =>
-    match op with
-    | .Box _ | .Unbox _ | .Clip _ _ | .Old | .Trigger | .HasType _ =>
-      arrayLiteralElemsFromViewArg? e
-    | _ => none
-  | .MatchBlock _ body => arrayLiteralElemsFromViewArg? body
-  | _ => none
-
-/-! ## Statement Helpers -/
-
-def sameExpShape (e1 e2 : Exp) : Bool := e1 == e2
-
-def queryBodyStms : Stm → List Stm
-  | .Block [s] => queryBodyStms s
-  | .Block stms => stms
-  | s => [s]
-
-def takeLeadingAssumes : List Stm → List Exp × List Stm
-  | (.Assume e) :: rest =>
-    let (reqs, tail) := takeLeadingAssumes rest
-    (e :: reqs, tail)
-  | stms => ([], stms)
-
-def takeLeadingEnsuresRev : List Stm → List Exp × List Stm
-  | (.Assert e) :: rest | (.AssertLean e) :: rest =>
-    let (ens, tail) := takeLeadingEnsuresRev rest
-    (e :: ens, tail)
-  | stms => ([], stms)
-
-def queryReqEnsFromBody (body : Stm) : Option (List Exp × List Exp) :=
-  let stms := (queryBodyStms body).map stripSingletonBlocks
-  let (reqs, rest) := takeLeadingAssumes stms
-  let (ensRev, _) := takeLeadingEnsuresRev rest.reverse
-  let ens := ensRev.reverse
-  if ens.isEmpty then none else some (reqs, ens)
-
-def isQueryScaffoldingAssume (assumed : Exp) : Stm → Bool
-  | .AssertBitVector _ ensures => ensures.any (fun e => sameExpShape e assumed)
-  | .AssertQuery _ body =>
-    match queryReqEnsFromBody body with
-    | some (_, ensures) => ensures.any (fun e => sameExpShape e assumed)
-    | none => false
-  | _ => false
-
-def isQueryStmt : Stm → Bool
-  | .AssertBitVector _ _ => true
-  | .AssertQuery _ _ => true
-  | _ => false
-
-def isTrivialTrueAssert : Stm → Bool
-  | .Assert (.Const (.Bool true) _) => true
-  | .AssertLean (.Const (.Bool true) _) => true
-  | _ => false
-
-def isAssertAssumeEcho (a : Stm) (assumed : Exp) : Bool :=
-  match a with
-  | .Assert e => sameExpShape e assumed
-  | .AssertLean e => sameExpShape e assumed
-  | _ => false
-
-def assertQueryModeLabel : AssertQueryMode → String
-  | .NonLinear => "nonlinear_query"
-  | .BitVector => "bitvector_query"
-  | .Other _ => "assert_query"
-
-/-! ## Reveal Support -/
-
-abbrev SpecFnMap := Std.HashMap Ident SpecFn
-
-private partial def typTypeVars : Typ → List String
-  | .TypParam n => [sanitizeIdent n]
-  | .Tuple t1 t2 => (typTypeVars t1 ++ typTypeVars t2).eraseDups
-  | .Array t => typTypeVars t
-  | .SpecFn ps ret => ((ps.flatMap typTypeVars) ++ typTypeVars ret).eraseDups
-  | .Decorated _ t => typTypeVars t
-  | .Struct _ ps => (ps.flatMap typTypeVars).eraseDups
-  | .Enum _ ps => (ps.flatMap typTypeVars).eraseDups
-  | _ => []
-
-private def specFnIsGenericFull (f : SpecFn) : Bool :=
-  let inputTVars := f.inputs.flatMap (fun (_, ty) => typTypeVars ty)
-  let retTVars := typTypeVars f.returnType
-  !(inputTVars ++ retTVars).isEmpty
-
-private def fnTypeParams (inputs : List (String × Typ)) (ret : Typ) : List String :=
-  ((inputs.flatMap (fun (_, ty) => typTypeVars ty)) ++ typTypeVars ret).eraseDups
-
+/-- BooleDDM-emit shim for `Reveal.fnTypeParams` (uses local `ann`). -/
 private def mkTypeArgsAnn (params : List String) :
     Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
   if params.isEmpty then
@@ -581,35 +202,7 @@ private def mkTypeArgsAnn (params : List String) :
       BooleDDM.TypeVar.type_var default (ann p)
     ann (some (BooleDDM.TypeArgs.type_args default (ann vars)))
 
-private def mkRevealAssume (f : SpecFn) : Option Stm :=
-  if specFnIsGenericFull f then none
-  else match f.body with
-  | none => none
-  | some body =>
-    let callArgs := f.inputs.map (fun (x, _) => Exp.Var x)
-    let call := Exp.Call (.Fun f.name) [] callArgs
-    let eq := Exp.Binary (.Eq .Spec) call body
-    let equation :=
-      if f.inputs.isEmpty then eq
-      else Exp.Bind (.Quant .Forall f.inputs []) eq
-    some (.Assume equation)
-
-partial def expandReveals (sfMap : SpecFnMap) : Stm → Stm
-  | .Reveal fn _fuel =>
-    match sfMap.get? fn with
-    | some f => (mkRevealAssume f).getD (.Block [])
-    | none => .Block []
-  | .Block stms => .Block (stms.map (expandReveals sfMap))
-  | .If cond b1 b2 =>
-    .If cond (expandReveals sfMap b1) (b2.map (expandReveals sfMap))
-  | .DeadEnd stm => .DeadEnd (expandReveals sfMap stm)
-  | .OpenInvariant stm => .OpenInvariant (expandReveals sfMap stm)
-  | .ClosureInner body => .ClosureInner (expandReveals sfMap body)
-  | .AssertQuery mode body => .AssertQuery mode (expandReveals sfMap body)
-  | .Loop isFor label cond body invs dec =>
-    let cond' := cond.map (fun (s, e) => (expandReveals sfMap s, e))
-    .Loop isFor label cond' (expandReveals sfMap body) invs dec
-  | s => s
+/-! ## Loop Control Helpers -/
 
 /-- Allocate a fresh synthetic loop label of the form `loop_N`, where `N`
     comes from `BuildCtx.loopLabelCounter`. Used when a `.Loop` has no
@@ -1186,63 +779,7 @@ private def mkQueryObligation (env : VarEnv) (label : String) (requires ensures 
       boolImplies reqConj ensConj
   return [assertStmt label obligation]
 
-/-! ## Projected Assignment Support -/
-
-private structure ProjLayout where
-  dt : Ident
-  variant : String
-  ctorName : String
-  fields : List String
-  isEnum : Bool
-
-private def projLayoutsFromDecl : Decl → List ProjLayout
-  | .struct s =>
-    [{ dt := s.name
-       variant := datatypeNameOf s.name
-       ctorName := structCtorNameOf s.name
-       fields := s.fields.map Prod.fst
-       isEnum := false }]
-  | .enum e =>
-    e.fields.map (fun field =>
-      match field with
-      | .labeled variant data =>
-        { dt := e.name, variant := variant
-          ctorName := enumCtorNameOf e.name variant
-          fields := data.map (fun (fname, _) => projFieldNameOf e.name variant fname)
-          isEnum := true }
-      | .tuple variant ts =>
-        { dt := e.name, variant := variant
-          ctorName := enumCtorNameOf e.name variant
-          fields := (List.range ts.length).map (fun i => projFieldNameOf e.name variant (toString i))
-          isEnum := true })
-  | .mutualBlock ds => ds.flatMap projLayoutsFromDecl
-  | _ => []
-
-private def buildProjLayouts (decls : List Decl) : List ProjLayout :=
-  decls.flatMap projLayoutsFromDecl
-
-private def findProjLayout? (layouts : List ProjLayout) (dt : Ident) (variant : String) :
-    Option ProjLayout :=
-  let dtName := datatypeNameOf dt
-  let variantName := sanitizeIdent variant
-  layouts.find? (fun l =>
-    datatypeNameOf l.dt == dtName &&
-      if l.isEnum then sanitizeIdent l.variant == variantName else true)
-
-private def resolveProjFieldName? (layout : ProjLayout) (dt : Ident) (variant field : String) :
-    Option String :=
-  let candidates :=
-    ([field, sanitizeIdent field,
-      projFieldNameOf dt variant field,
-      projFieldNameOf dt (datatypeNameOf dt) field]).eraseDups
-  candidates.find? (fun c => layout.fields.contains c)
-
-private def lvalueToExp : LValue → Exp
-  | .Var name => .Var name
-  | .Proj base dt variant field getVariant check =>
-    .Unary (.Proj dt variant field getVariant check) (lvalueToExp base)
-  | .Proj' base size field =>
-    .Unary (.Proj' size field) (lvalueToExp base)
+/-! ## Projected Assignment — BuildM-bound consumers of `Projection.lean` -/
 
 private def lvalueReadExprToBoole (env : VarEnv) (lv : LValue) : BuildM BExpr :=
   expToBooleFlat env none (lvalueToExp lv)
@@ -1580,76 +1117,6 @@ def typeArgsFromTyps (tys : List Typ) : List String :=
 def typeArgsFromDecls (decls : List (String × Typ)) : List String :=
   typeArgsFromTyps (decls.map Prod.snd)
 
-private def localDecl (name : String) (ty : Typ) (origin : LocalDeclOrigin) : LocalDeclInfo :=
-  { name := name, ty := ty, origin := origin }
-
-private def localBindings (locals : List LocalDeclInfo) : List (String × Typ) :=
-  locals.map LocalDeclInfo.toPair
-
-def dedupLocals (locals : List LocalDeclInfo) : List LocalDeclInfo :=
-  let rec go (seen : Std.HashSet String) (acc : List LocalDeclInfo) : List LocalDeclInfo → List LocalDeclInfo
-    | [] => acc.reverse
-    | decl :: rest =>
-      if seen.contains decl.name then go seen acc rest
-      else go (seen.insert decl.name) (decl :: acc) rest
-  go ∅ [] locals
-
-partial def collectSetVars : Stm → List LocalDeclInfo
-  | .Assign lhs lhsTy _rhs lhsIsInit =>
-    if lhsIsInit then []
-    else match lvalueVarName? lhs with
-      | some name => [localDecl name lhsTy .implicitSet]
-      | none => []
-  | .AssertQuery _ body => collectSetVars body
-  | .DeadEnd stm => collectSetVars stm
-  | .If _cond b1 b2 =>
-    collectSetVars b1 ++ (b2.map collectSetVars).getD []
-  | .Loop _isForLoop _label cond body _invs _decrease =>
-    let condVars := match cond with | some (s, _) => collectSetVars s | none => []
-    condVars ++ collectSetVars body
-  | .OpenInvariant stm => collectSetVars stm
-  | .ClosureInner body => collectSetVars body
-  | .Block stms => stms.flatMap collectSetVars
-  | _ => []
-
-private def localShouldEmit (hasForLoop : Bool) (decl : LocalDeclInfo) : Bool :=
-  !decl.isSourceDecreases &&
-    !shouldDropForLoopScaffoldingLocal decl.name &&
-    !(hasForLoop && isForLoopScaffoldingVar decl.name) &&
-    !isUnitLikeTyp decl.ty
-
-private partial def stmHasForLoop : Stm → Bool
-  | .Loop true _ _ _ _ _ => true
-  | .Block stms => stms.any stmHasForLoop
-  | .If _ b1 b2 => stmHasForLoop b1 || (b2.map stmHasForLoop).getD false
-  | .DeadEnd stm => stmHasForLoop stm
-  | _ => false
-
-private def collectProcedureLocals
-    (sourceLocals : List LocalDeclInfo)
-    (inputNames retNames : List String)
-    (setVars : List LocalDeclInfo)
-    (hasForLoop : Bool := false) : List LocalDeclInfo :=
-  let declaredInInputsRetOrLocals := fun (n : String) =>
-    inputNames.any (fun x => x == n) ||
-    retNames.any (fun x => x == n) ||
-    sourceLocals.any (fun decl => decl.name == n)
-  let implicitSetLocals := dedupLocals <| setVars.filter (fun decl =>
-    !declaredInInputsRetOrLocals decl.name)
-  let localsAll := dedupLocals <|
-    (sourceLocals.filter (fun decl =>
-      !(inputNames.any (fun x => x == decl.name) || retNames.any (fun x => x == decl.name))) ++
-      implicitSetLocals)
-  localsAll.filter (localShouldEmit hasForLoop)
-
-/-- Drop procedure locals unreferenced by the body. Run after
-    `normalizeBody`, so any tmp the translator will eliminate (inlined
-    one-shot temps, body-prefix guards hoisted into a Loop's cond) is
-    already absent from the body and naturally fails this filter. -/
-private def filterLocalsByUse
-    (body : Stm) (locals : List LocalDeclInfo) : List LocalDeclInfo :=
-  locals.filter (fun decl => stmMentionsVar decl.name body)
-
 /-! ### Building BooleDDM Commands -/
 
 private def mkMonoInputs (inputs : List (String × Typ)) :
@@ -1704,123 +1171,7 @@ private def localsToVarStmts (locals : List LocalDeclInfo) : BuildM (List BStmt)
     pushBoundVar sanName
     pure (varStmt sanName ty'))
 
-/-! ### Spec Function Translation -/
-
-private partial def collectSpecFns : List Decl → SpecFnMap
-  | [] => ∅
-  | d :: rest =>
-    let here :=
-      match d with
-      | Decl.specFn f => [(f.name, f)]
-      | Decl.mutualBlock ds =>
-        ds.filterMap (fun d => match d with | Decl.specFn f => some (f.name, f) | _ => none)
-      | _ => []
-    let m := collectSpecFns rest
-    here.foldl (init := m) (fun acc (k, v) => acc.insert k v)
-
-private def addFnRetTypes (env : VarEnv) (sfMap : SpecFnMap) : VarEnv :=
-  sfMap.fold (init := env) (fun acc name sf =>
-    let fnStr := identToBoole name
-    let acc := acc.insert (fnRetKey fnStr) sf.returnType
-    sf.inputs.zipIdx.foldl (init := acc) (fun acc ((_, ty), idx) =>
-      acc.insert (fnParamKey fnStr idx) ty))
-
-private partial def addAllFnParamTypes (env : VarEnv) (decls : List Decl) : VarEnv :=
-  decls.foldl (init := env) (fun acc d =>
-    match d with
-    | .proofFn f =>
-      let fnStr := identToBoole f.name
-      f.inputs.zipIdx.foldl (init := acc) (fun acc ((_, ty), idx) =>
-        acc.insert (fnParamKey fnStr idx) ty)
-    | .execFn f =>
-      let fnStr := identToBoole f.name
-      f.inputs.zipIdx.foldl (init := acc) (fun acc ((_, ty), idx) =>
-        acc.insert (fnParamKey fnStr idx) ty)
-    | .mutualBlock ds => addAllFnParamTypes acc ds
-    | _ => acc)
-
-private partial def addDatatypeAccessorRetTypes (env : VarEnv) (decls : List Decl) : VarEnv :=
-  decls.foldl (init := env) (fun acc d =>
-    match d with
-    | .struct s =>
-      s.fields.foldl (init := acc) (fun acc (field, ty) =>
-        let projField := projFieldNameOf s.name (datatypeNameOf s.name) field
-        acc.insert (fnRetKey (datatypeDestructorNameOf s.name projField)) ty)
-    | .enum e =>
-      e.fields.foldl (init := acc) (fun acc field =>
-        match field with
-        | .labeled variant fields =>
-          fields.foldl (init := acc) (fun acc (field, ty) =>
-            let projField := projFieldNameOf e.name variant field
-            acc.insert (fnRetKey (datatypeDestructorNameOf e.name projField)) ty)
-        | .tuple variant tys =>
-          tys.zipIdx.foldl (init := acc) (fun acc (ty, idx) =>
-            let projField := projFieldNameOf e.name variant (toString idx)
-            acc.insert (fnRetKey (datatypeDestructorNameOf e.name projField)) ty))
-    | .mutualBlock ds => addDatatypeAccessorRetTypes acc ds
-    | _ => acc)
-
-private partial def collectNoParamFnNamesFromDecls : List Decl → List String
-  | [] => []
-  | d :: rest =>
-    let here :=
-      match d with
-      | .specFn f => if f.inputs.isEmpty then [identToBoole f.name] else []
-      | .proofFn f => if f.inputs.isEmpty then [identToBoole f.name] else []
-      | .execFn f => if f.inputs.isEmpty then [identToBoole f.name] else []
-      | .func f => if f.decls.isEmpty then [identToBoole f.name] else []
-      | .mutualBlock ds => collectNoParamFnNamesFromDecls ds
-      | _ => []
-    (here ++ collectNoParamFnNamesFromDecls rest).eraseDups
-
-private partial def collectMutArgMapFromDecls (decls : List Decl) : MutArgMap :=
-  let rec go (acc : MutArgMap) : List Decl → MutArgMap
-    | [] => acc
-    | d :: rest =>
-      let acc' :=
-        match d with
-        | .execFn f =>
-          let infos := mutArgInfos f.inputs
-          if infos.isEmpty then acc else acc.insert (identToBoole f.name) infos
-        | .mutualBlock ds => go acc ds
-        | _ => acc
-      go acc' rest
-  go (∅ : MutArgMap) decls
-
 /-! ### SpecFn → BCmd -/
-
-/-- Peel `Box`/`Unbox`/`Decorated` wrappers to find an underlying `.Var` name,
-    if any. Used to decide whether a `.Proj` is being applied directly to a
-    named parameter (and thus needs a caller-supplied variant precondition). -/
-private partial def unwrapToVar : Exp → Option String
-  | .Var x => some x
-  | .Unary (.Box _) e | .Unary (.Unbox _) e => unwrapToVar e
-  | _ => none
-
-/-- Collect `(paramName, dt, variant)` triples for every `.Proj` appearing on
-    the *root* path of the body — i.e. not under any control-flow node
-    (`.If`/`.Bind`/`.MatchBlock`/etc.) which would already constrain the
-    variant via a surrounding guard.
-
-    Used by spec-fn translation to synthesise `requires <dt>..is<variant>(x)`
-    preconditions for Verus's inline accessor sugar (`self->Variant.field`),
-    which Verus encodes as `.Unary (.Proj dt variant field _ check:None)`
-    without recording the partiality on the function. Without this, Strata
-    correctly flags the implicit variant precondition of the datatype
-    destructor as an unprovable obligation inside every such function body. -/
-private partial def rootExposedProjs : Exp → List (String × Ident × String)
-  | .Unary (.Proj dt variant _ _ _) arg =>
-    let here := match unwrapToVar arg with
-      | some name => [(name, dt, variant)]
-      | none => []
-    here ++ rootExposedProjs arg
-  | .Unary _ arg => rootExposedProjs arg
-  | .Binary _ a b => rootExposedProjs a ++ rootExposedProjs b
-  | _ => []
-
-private def dedupVariantReqs (xs : List (String × Ident × String)) :
-    List (String × Ident × String) :=
-  xs.foldl (fun acc t => if acc.contains t then acc else acc ++ [t]) []
 
 /-- Build `requires <dt>..is<variant>(<param>)` SpecElts from `rootExposedProjs`
     output. Assumes the function's input names have already been `addBoundVars`-ed
@@ -2210,123 +1561,6 @@ private def declsHaveForLoop (decls : List Decl) : Bool :=
     | .execFn f => stmHasForLoop f.body
     | .proofFn f => f.body.map stmHasForLoop |>.getD false
     | _ => false
-
-/-! ### Dead-accessor pruning
-
-Verus synthesises one `->`-accessor spec fn per field per variant (a.k.a.
-`impl&%N::arrow_*`), eagerly for every enum in scope. Most of these go
-unused in any given test, but we translate them all — producing long
-stretches of never-called `Impl__N_arrow_*` decls that bloat the
-emitted Boole source and slow Strata's verification pass.
-
-The pruning pass below keeps an impl-accessor only if it's transitively
-referenced from a non-impl decl. Modelled after the boogie branch's
-`pruneUnreferencedSyntheticHelpers` but operating on VLIR `Decl`s
-rather than Core ones. -/
-
-/-- Identify the name prefix Verus uses for auto-generated impl-block
-    accessor spec fns. Matches after `identToBoole` sanitisation, which
-    preserves `Impl__N_` / `impl__N_` segments. -/
-private def isSyntheticImplName (s : String) : Bool :=
-  s.startsWith "Impl__" || s.startsWith "impl__"
-
-private def declIsSyntheticImpl : Decl → Bool
-  | .specFn f => isSyntheticImplName (identToBoole f.name)
-  | _ => false
-
-private def declName? : Decl → Option String
-  | .specFn f => some (identToBoole f.name)
-  | .proofFn f => some (identToBoole f.name)
-  | .execFn f => some (identToBoole f.name)
-  | .func f => some (identToBoole f.name)
-  | .struct _ | .enum _ | .assertion _ | .mutualBlock _ => none
-
-private partial def expCallRefs : Exp → List String
-  | .Call fn _ args =>
-    let here := identToBoole (CallFun.name fn)
-    let rest := args.flatMap expCallRefs
-    here :: rest
-  | .CallLambda body args =>
-    expCallRefs body ++ args.flatMap expCallRefs
-  | .StructCtor _ fields => fields.flatMap (fun (_, e) => expCallRefs e)
-  | .EnumCtor _ _ fields => fields.flatMap (fun (_, e) => expCallRefs e)
-  | .TupleCtor _ data => data.flatMap expCallRefs
-  | .Unary _ e => expCallRefs e
-  | .Binary _ a b => expCallRefs a ++ expCallRefs b
-  | .If c t f => expCallRefs c ++ expCallRefs t ++ expCallRefs f
-  | .Bind bind body =>
-    let bindRefs := match bind with
-      | .Let _ _ rhs => expCallRefs rhs
-      | .Quant _ _ trigs => trigs.flatMap (fun g => g.flatMap expCallRefs)
-      | .Lambda _ => []
-    bindRefs ++ expCallRefs body
-  | .ArrayLiteral elems => elems.flatMap expCallRefs
-  | .MatchBlock (scrut, _) body => expCallRefs scrut ++ expCallRefs body
-  | .Const _ _ | .Var _ => []
-
-private partial def stmCallRefs : Stm → List String
-  | .Call fn _ args => identToBoole fn :: args.flatMap expCallRefs
-  | .Assert e | .AssertCompute e | .AssertLean e | .Assume e => expCallRefs e
-  | .AssertBitVector reqs enss =>
-    reqs.flatMap expCallRefs ++ enss.flatMap expCallRefs
-  | .AssertQuery _ body => stmCallRefs body
-  | .Assign _ _ e _ => expCallRefs e
-  | .DeadEnd s | .OpenInvariant s | .ClosureInner s => stmCallRefs s
-  | .Return e? => (e?.map expCallRefs).getD []
-  | .BreakOrContinue _ _ | .Reveal .. => []
-  | .If cond b1 b2 =>
-    expCallRefs cond ++ stmCallRefs b1 ++ (b2.map stmCallRefs).getD []
-  | .Loop _ _ cond body invs decrease =>
-    let condRefs := match cond with
-      | some (s, e) => stmCallRefs s ++ expCallRefs e
-      | none => []
-    condRefs ++ stmCallRefs body ++ invs.flatMap (fun inv => expCallRefs inv.body) ++
-      decrease.flatMap expCallRefs
-  | .Block stms => stms.flatMap stmCallRefs
-
-private partial def declRefs : Decl → List String
-  | .assertion _ => []
-  | .specFn f => (f.body.map expCallRefs).getD []
-  | .proofFn f =>
-    f.requires.flatMap expCallRefs ++ f.ensures.flatMap expCallRefs ++
-      (f.body.map stmCallRefs).getD []
-  | .execFn f =>
-    f.requires.flatMap expCallRefs ++ f.ensures.flatMap expCallRefs ++
-      stmCallRefs f.body
-  | .func f =>
-    f.reqs.flatMap expCallRefs ++ f.postCondition.flatMap expCallRefs
-  | .struct _ | .enum _ => []
-  | .mutualBlock ds => ds.flatMap declRefs
-
-/-- Fixed-point closure: starting from `seed` impl-names, repeatedly add
-    impl-names referenced by kept impl decls until the frontier stabilises. -/
-private partial def closeImplRefs (implDecls : List Decl)
-    (seed : List String) : List String :=
-  let rec loop (fuel : Nat) (keep : List String) : List String :=
-    match fuel with
-    | 0 => keep
-    | fuel + 1 =>
-      let kept := implDecls.filter (fun d =>
-        match declName? d with
-        | some n => keep.contains n
-        | none => false)
-      let next := (keep ++ (kept.flatMap declRefs).filter isSyntheticImplName).eraseDups
-      if next.length == keep.length then keep else loop fuel next
-  loop (implDecls.length + 1) seed.eraseDups
-
-/-- Drop synthetic impl-block accessor spec fns that no user-level decl
-    transitively references. Non-synthetic decls (struct/enum/proofFn/
-    execFn/user spec fns/mutualBlocks) are retained unchanged. -/
-private def pruneUnreferencedImpls (decls : List Decl) : List Decl :=
-  let (helpers, others) := decls.partition declIsSyntheticImpl
-  let seed := (others.flatMap declRefs).filter isSyntheticImplName
-  let kept := closeImplRefs helpers seed
-  decls.filter (fun d =>
-    if declIsSyntheticImpl d then
-      match declName? d with
-      | some n => kept.contains n
-      | none => true
-    else true)
 
 def declsToBooleProgram (decls : List Decl) :
     BuildM (Array BCmd) := do
