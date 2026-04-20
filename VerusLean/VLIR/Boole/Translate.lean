@@ -957,7 +957,9 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       | none => pure []
     return [iteStmt c thenStms.toArray elseStms.toArray]
   | .Loop _isForLoop label cond body invs decrease => do
-    -- For-loop recovery is handled in stmListToBooleAux; if we get here, emit while loop.
+    -- Source-style for-loop recovery is attempted by `stmListToBoole`
+    -- before this fallback. If we get here, lower the VLIR loop as a
+    -- while loop.
     -- `Loop.cond` has already been populated upstream by `normalizeBody`'s
     -- `extractLoopGuardFromBody` pass (when the source omitted a cond and
     -- the body opened with a guard prefix), so we just consume it here.
@@ -1053,7 +1055,10 @@ partial def stmListToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     if hasForLoop then
       match ← tryForLoopRecovery env projLayouts mutArgMap retVar? procName stms with
       | some (forStms, postStms) =>
-        let rest ← stmListToBooleAux env projLayouts mutArgMap retVar? procName postStms
+        -- Recurse into stmListToBoole (not stmListToBooleAux) so a
+        -- second for-loop later in `postStms` also gets recovery
+        -- applied. Going through Aux skipped that check.
+        let rest ← stmListToBoole env projLayouts mutArgMap retVar? procName postStms
         return forStms ++ rest
       | none =>
         stmListToBooleAux env projLayouts mutArgMap retVar? procName stms
@@ -1152,11 +1157,15 @@ private def mkMonoOutputs (outputs : List (String × Typ)) :
 
 private def mkSpecElts (env : VarEnv) (pre post : List Exp) (modifies : List String) :
     BuildM (Array (BooleDDM.SpecElt SourceRange)) := do
+  -- Drop trivial `true` spec clauses/conjuncts without otherwise
+  -- reshaping non-trivial `&&` expressions.
+  let pre' := pre.flatMap dropTrueConjuncts
+  let post' := post.flatMap dropTrueConjuncts
   let mut elts : Array (BooleDDM.SpecElt SourceRange) := #[]
-  for e in pre do
+  for e in pre' do
     let e' ← expToBooleFlat env (some .Bool) e
     elts := elts.push (.requires_spec default noLabel (ann none) e')
-  for e in post do
+  for e in post' do
     let e' ← expToBooleFlat env (some .Bool) e
     elts := elts.push (.ensures_spec default noLabel (ann none) e')
   if !modifies.isEmpty then

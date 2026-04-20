@@ -518,6 +518,37 @@ private def isAssumeFalse : Stm → Bool
 private def blockHasReturn (stms : List Stm) : Bool :=
   stms.any hasReturnStm
 
+/-- Drop `true` conjuncts from a requires/ensures expression. Returns:
+      * `[]` if `e` is `true` (or an `&&`-chain whose every leg is `true`),
+      * `[e']` where `e'` is `e` with `true` legs removed, when there
+        actually is a `true` to drop, or
+      * `[e]` unchanged when no `true` leg appears.
+
+    The third case preserves existing output shape: we deliberately do
+    *not* split `P && Q` into two clauses just because we visited the
+    chain to look for `true`. Only `.Binary .And` is peeled; `.Or` /
+    `.Implies` / `.If` short-circuits carry distinct logical weight and
+    aren't touched.
+
+    Use case: `requires true` (and the `true && P` shapes Verus
+    sometimes leaves behind after partial evaluation) clutter emitted
+    Boole; this drops them while leaving non-trivial compound
+    expressions intact. -/
+partial def dropTrueConjuncts (e : Exp) : List Exp :=
+  let rec flatten : Exp → List Exp
+    | .Binary .And a b => flatten a ++ flatten b
+    | x => [x]
+  let parts := flatten e
+  let isTrue : Exp → Bool
+    | .Const (.Bool true) _ => true
+    | _ => false
+  let kept := parts.filter (fun part => !isTrue part)
+  if kept.length == parts.length then [e]                    -- nothing to drop; preserve shape
+  else match kept with
+    | [] => []                                                -- all `true`
+    | [x] => [x]
+    | x :: rest => [rest.foldl (fun acc y => .Binary .And acc y) x]
+
 partial def stripReturnAssumeFalse : List Stm → List Stm
   | [] => []
   | (.Return e) :: rest =>
