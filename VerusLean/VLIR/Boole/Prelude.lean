@@ -24,7 +24,7 @@ def seqTriggerNames : List String :=
   ["Set", "Set_finite",
    "Seq_len", "Seq_lib_insert", "Seq_new", "Seq_lib_map",
    "Seq_lib_map_values", "Seq_lib_filter", "Seq_lib_sort_by",
-   "Seq_lib_to_set"]
+   "Seq_lib_zip_with", "Seq_lib_to_set"]
 
 /-- Names whose references require `prelude/Vec.boole.st`. -/
 def vecTriggerNames : List String :=
@@ -69,6 +69,7 @@ def seqKnownSignatures : List (String × (List Typ × Typ)) :=
   , ("Seq_lib_map_values",([seqTyp a, .SpecFn [a] b], seqTyp b))
   , ("Seq_lib_filter",    ([seqT, .SpecFn [t] .Bool], seqT))
   , ("Seq_lib_sort_by",   ([seqT, .SpecFn [t, t] .Bool], seqT))
+  , ("Seq_lib_zip_with",  ([seqTyp a, seqTyp b], seqTyp (.Tuple a b)))
   , ("Seq_lib_to_set",    ([seqT], setT))
   , ("Set_finite",        ([setT], .Bool))
   ]
@@ -102,7 +103,10 @@ private def refsOfTyp : Typ → List String
   | .Struct name params =>
     let paramRefs := params.flatMap refsOfTyp
     let selfRefs :=
-      if isVecTypeName name then ["Vec"]
+      -- `vec2seq` branch: Vec is translated as Sequence, so any
+      -- Vec-typed reference needs the Sequence prelude (not the Vec
+      -- prelude, which would drag in view-axioms we're trying to skip).
+      if isVecTypeName name then ["Sequence"]
       else if datatypeNameOf name == "Set" then ["Set"]
       else []
     (selfRefs ++ paramRefs).eraseDups
@@ -118,16 +122,21 @@ private partial def refsOfExp : Exp → List String
     let fname := CallFun.name fn
     let fnameStr := identToBoole fname
     let ownRefs :=
-      if isVecLenSpecName fname || isVecLenExecName fname then ["Vec_len"]
-      else if isVecIndexSpecName fname || isVecIndexExecName fname then ["Vec_index"]
-      else if isViewName fname then ["Vec_view"]
+      -- `vec2seq` branch: Vec operations collapse to Sequence.* ops,
+      -- so their refs trigger the Sequence prelude (not the Vec prelude).
+      if isVecLenSpecName fname || isVecLenExecName fname then ["Sequence"]
+      else if isVecIndexSpecName fname || isVecIndexExecName fname then ["Sequence"]
+      else if isViewName fname then ["Sequence"]
       else if seqDirectBuiltinNames.contains fnameStr then ["Sequence"]
       else if seqTriggerNames.contains fnameStr then [fnameStr]
       else []
     (ownRefs ++ args.flatMap refsOfExp).eraseDups
   | .CallLambda body args => (refsOfExp body ++ args.flatMap refsOfExp).eraseDups
   | .StructCtor dt fields =>
-    let ownRefs := if isVecTypeName dt then ["Vec"] else []
+    -- `vec2seq` branch: Vec ctor (rare in practice — Verus usually goes
+    -- through `Vec::new()` calls, not struct-literal ctors) still needs
+    -- Sequence prelude since Vec is translated as Sequence.
+    let ownRefs := if isVecTypeName dt then ["Sequence"] else []
     (ownRefs ++ fields.flatMap (fun (_, e) => refsOfExp e)).eraseDups
   | .EnumCtor dt _ fields =>
     let ownRefs := if datatypeNameOf dt == "Set" then ["Set"] else []
@@ -158,9 +167,11 @@ private partial def refsOfStm : Stm → List String
     let fname := fn
     let fnameStr := identToBoole fname
     let ownRefs :=
-      if isVecLenSpecName fname || isVecLenExecName fname then ["Vec_len"]
-      else if isVecIndexSpecName fname || isVecIndexExecName fname then ["Vec_index"]
-      else if isViewName fname then ["Vec_view"]
+      -- `vec2seq` branch: Vec operations collapse to Sequence.* ops,
+      -- so their refs trigger the Sequence prelude (not the Vec prelude).
+      if isVecLenSpecName fname || isVecLenExecName fname then ["Sequence"]
+      else if isVecIndexSpecName fname || isVecIndexExecName fname then ["Sequence"]
+      else if isViewName fname then ["Sequence"]
       else if seqDirectBuiltinNames.contains fnameStr then ["Sequence"]
       else if seqTriggerNames.contains fnameStr then [fnameStr]
       else []

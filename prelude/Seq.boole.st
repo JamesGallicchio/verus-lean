@@ -32,6 +32,11 @@ function Seq_lib_map<T, U>(s: Sequence T, f: int -> T -> U): Sequence U;
 function Seq_lib_map_values<T, U>(s: Sequence T, f: T -> U): Sequence U;
 function Seq_lib_filter<T>(s: Sequence T, p: T -> bool): Sequence T;
 function Seq_lib_sort_by<T>(s: Sequence T, less: T -> T -> bool): Sequence T;
+// `Seq_lib_zip_with` is emitted as a SupportDecl in `SupportEmit.lean`
+// rather than declared here — its return type `Sequence (Tuple A B)`
+// references the `Tuple` datatype, which is itself emitted as a
+// SupportDecl (via `requireSupport .tuple`). Declaring it here would
+// fail to parse at prelude-load time, when `Tuple` is not yet in scope.
 
 // Set operations — no Strata built-in.
 function Seq_lib_to_set<T>(s: Sequence T): Set T;

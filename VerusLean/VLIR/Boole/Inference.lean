@@ -188,6 +188,12 @@ partial def arrayLiteralElemsFromViewArg? : Exp → Option (List Exp)
     | .Box _ | .Unbox _ | .Clip _ _ | .Old | .Trigger | .HasType _ =>
       arrayLiteralElemsFromViewArg? e
     | _ => none
+  | .Call fn _ [arg] =>
+    if isViewName (CallFun.name fn) || isBoxNewName (CallFun.name fn) ||
+        isArrayAsSliceName (CallFun.name fn) || isSliceIntoVecName (CallFun.name fn) then
+      arrayLiteralElemsFromViewArg? arg
+    else
+      none
   | .MatchBlock _ body => arrayLiteralElemsFromViewArg? body
   | _ => none
 

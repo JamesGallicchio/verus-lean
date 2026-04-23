@@ -30,6 +30,12 @@ inductive SupportDecl where
       giving the verifier native constructor/accessor reasoning rather
       than uninterpreted stubs. -/
   | tuple
+  /-- Abstract declaration for `Seq_lib_zip_with<A, B>(s: Sequence A, t:
+      Sequence B): Sequence (Tuple A B)`. Emitted as a support decl
+      (rather than in the Seq prelude text) because its return type
+      references `Tuple`, which itself is only available after the
+      `.tuple` support decl is emitted. -/
+  | seqZipWith
   deriving DecidableEq, Repr
 
 structure BuildCtx where

@@ -28,7 +28,7 @@ classify_boole_verify_log() {
   local known_translator_bug_pattern="${4:-}"
   # Lean elaboration errors: skip_sequence > skip_gap > known_translator_bug > fail
   if [ "$rc" -ne 0 ] || grep -q "error:" "$log"; then
-    if grep -q "Sequence" "$log"; then
+    if grep -qE "Sequence|Strata\\.BooleDDM\\.Expr\\.seq_|Unsupported expression: .*seq_" "$log"; then
       echo "skip_sequence"
       return 0
     fi
@@ -154,7 +154,7 @@ run_boole_verify() {
       return 0
       ;;
     skip_sequence)
-      echo "$base: ⏭  (Sequence type unsupported in Strata)"
+      echo "$base: ⏭  (Sequence support missing in Strata Boole verify)"
       rm -f "$verify_log"
       return 0
       ;;

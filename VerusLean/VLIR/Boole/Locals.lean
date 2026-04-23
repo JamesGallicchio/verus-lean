@@ -66,10 +66,9 @@ partial def collectSetVars : Stm → List LocalDeclInfo
 
 /-! ## Filtering -/
 
-def localShouldEmit (hasForLoop : Bool) (decl : LocalDeclInfo) : Bool :=
+def localShouldEmit (_hasForLoop : Bool) (decl : LocalDeclInfo) : Bool :=
   !decl.isSourceDecreases &&
     !shouldDropForLoopScaffoldingLocal decl.name &&
-    !(hasForLoop && isForLoopScaffoldingVar decl.name) &&
     !isUnitLikeTyp decl.ty
 
 partial def stmHasForLoop : Stm → Bool
@@ -78,6 +77,42 @@ partial def stmHasForLoop : Stm → Bool
   | .If _ b1 b2 => stmHasForLoop b1 || (b2.map stmHasForLoop).getD false
   | .DeadEnd stm => stmHasForLoop stm
   | _ => false
+
+mutual
+  private partial def recoveredLoopLocalUseBody : RecoveredForLoop → Stm
+    | loop =>
+      let pre := loop.preStms.map stripForLoopScaffoldingFromBody
+      let body := stripForLoopScaffoldingFromBody (.Block loop.userBody)
+      let post :=
+        loop.postStms.filterMap fun
+          | .Assign lhs ty rhs lhsIsInit =>
+            if shouldDropAssignAsForLoopScaffolding lhs then
+              none
+            else
+              some (stripForLoopScaffoldingFromBody (.Assign lhs ty rhs lhsIsInit))
+          | stm => some (stripForLoopScaffoldingFromBody stm)
+      .Block (pre ++ [.Loop true none none body loop.invariants []] ++ post)
+
+  /-- Replace iterator-scaffolding `for` encodings with the recovered
+      source-style loop shape before local-use filtering. This keeps temps
+      such as `tmp3` that survive into the recovered preamble, while dropping
+      scaffolding-only locals (`tmp7`, ghost iterator options, etc.) that are
+      no longer mentioned in the emitted Boole body. -/
+  partial def stripForLoopScaffoldingFromBody : Stm → Stm
+    | .Block stms =>
+      match recoverForLoop? stms with
+      | some loop => recoveredLoopLocalUseBody loop
+      | none => .Block (stms.map stripForLoopScaffoldingFromBody)
+    | .If cond b1 b2 =>
+      .If cond (stripForLoopScaffoldingFromBody b1)
+        (b2.map stripForLoopScaffoldingFromBody)
+    | .Loop isFor label cond body invs decrease =>
+      .Loop isFor label cond (stripForLoopScaffoldingFromBody body) invs decrease
+    | .DeadEnd stm => .DeadEnd (stripForLoopScaffoldingFromBody stm)
+    | .OpenInvariant stm => .OpenInvariant (stripForLoopScaffoldingFromBody stm)
+    | .ClosureInner body => .ClosureInner (stripForLoopScaffoldingFromBody body)
+    | stm => stm
+end
 
 /-- Combine source-declared locals with implicit set-var locals,
     deduplicate, drop anything already covered by inputs/return slots,

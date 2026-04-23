@@ -252,7 +252,7 @@ for target in "${targets[@]}"; do
       ;;
     skip_sequence)
       verify_skipped_seq=$((verify_skipped_seq + 1))
-      echo "  verify: SKIP (Sequence)"
+      echo "  verify: SKIP (Sequence support missing in Strata Boole verify)"
       ;;
     skip_gap)
       verify_skipped_gap=$((verify_skipped_gap + 1))

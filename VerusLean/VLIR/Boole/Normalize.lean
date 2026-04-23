@@ -464,8 +464,9 @@ mutual
       Blocks) to a statement list, then descend into each statement. -/
   partial def normalizeStms (isPureCallName : Ident → Bool)
       (stms : List Stm) : List Stm :=
+    let flattened := flattenSeqBlocks stms
     let normalized :=
-      (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureCallName stms))).map
+      (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureCallName flattened))).map
         stripSingletonBlocks
     normalized.map (normalizeStm isPureCallName)
 end

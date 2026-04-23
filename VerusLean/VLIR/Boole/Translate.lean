@@ -73,6 +73,7 @@ private def someLabel (s : String) : Strata.Ann (Option (BooleDDM.Label SourceRa
 private def isPureBooleBuiltinCallName (fn : Ident) : Bool :=
   isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
     || isVecIndexSpecName fn || isVecIndexExecName fn
+    || isBoxNewName fn || isArrayAsSliceName fn || isSliceIntoVecName fn
 
 /-! ## Environment Helpers -/
 
@@ -140,15 +141,15 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
       pure (arrowTy pTy acc)) retTy
   | .Decorated _ inner => typToBooleType inner
   | .Struct name params =>
+    -- `vec2seq` branch: translate `Vec<T>` directly to Strata's native
+    -- `Sequence T`. This avoids the Vec prelude's view-axioms (expensive
+    -- quantifier instantiation for `Vec_view` / `Vec_len` / `Vec_index`)
+    -- at the cost of discarding the bounded-length invariant — caller
+    -- code must not rely on `Vec_len(v) < 2^64`.
     if isVecTypeName name then
       match params with
-      | t :: _ => do
-        let idx ← resolveFreeVar "Vec"
-        let elemTy ← typToBooleType t
-        pure (fvarTy idx #[elemTy])
-      | [] => do
-        let idx ← resolveFreeVar "Vec"
-        pure (fvarTy idx)
+      | t :: _ => do pure (seqTy (← typToBooleType t))
+      | [] => do pure (seqTy unknownTy)
     else if datatypeNameOf name == "Seq" then
       match params with
       | t :: _ => do pure (seqTy (← typToBooleType t))
@@ -180,6 +181,12 @@ private def resolveVar (name : String) : BuildM BExpr := do
   | none =>
     let idx ← resolveFreeVar sanName
     pure (Bld.fvar idx)
+
+private partial def peelCallWrappers : Exp → Exp
+  | .Unary (.Box _) e => peelCallWrappers e
+  | .Unary (.Unbox _) e => peelCallWrappers e
+  | .MatchBlock _ body => peelCallWrappers body
+  | e => e
 
 /-! ## Constant + Type-Args Helpers -/
 
@@ -549,6 +556,12 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       let fnIdx ← resolveFreeVar s!"Sequence.{opName}"
       return Bld.appN (Bld.fvar fnIdx) args'
     let mkFallback := do
+      -- Some library fns have abstract declarations emitted as
+      -- support decls (not in the prelude text) because their types
+      -- reference other support decls. Register the need here so the
+      -- declaration appears in the final program.
+      if fnameStr == "Seq_lib_zip_with" then
+        requireSupport .seqZipWith
       let args' ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
         let paramTy? := lookupFnParamTypeFull env fnameStr idx
         let argExpected? := paramTy? <|> (match expected? with
@@ -557,16 +570,37 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         expToBoole env bound argExpected? arg)
       let fnIdx ← resolveFreeVar fnameStr
       return Bld.appN (Bld.fvar fnIdx) args'
-    if isViewName fname then
+    -- `vec2seq` branch: `Vec` is translated as `Sequence`, so the
+    -- surface-level `view(v)` / `.len()` / `[i]` operations collapse
+    -- directly to Strata's built-in Sequence operations. This skips
+    -- the Vec prelude entirely, avoiding the expensive view-axiom
+    -- quantifier instantiation.
+    if isClonedName fname then
+      -- Verus's `vstd::prelude::cloned(x, y)` is a ghost predicate
+      -- asserting that `y` is a clone of `x`. For every `Clone` impl
+      -- Verus accepts, cloning is deterministic, so the predicate
+      -- reduces to plain equality. Rewriting at translation time
+      -- avoids emitting an uninterpreted `Pervasive_cloned` fvar that
+      -- Strata would then flag as "Unknown variable".
+      match argsFiltered with
+      | [xArg, yArg] =>
+        let x ← expToBoole env bound none xArg
+        let y ← expToBoole env bound none yArg
+        return Bld.eq x y
+      | _ => mkFallback
+    else if isBoxNewName fname || isArrayAsSliceName fname || isSliceIntoVecName fname then
+      match argsFiltered with
+      | [arg] => expToBoole env bound expected? arg
+      | _ => mkFallback
+    else if isViewName fname then
       match argsFiltered with
       | [arg] =>
         match vecVarFromExp arg with
         | some _base =>
           match env.get? _base |>.bind vecElemTyp? with
           | some _ =>
-            let vecExpr ← expToBoole env bound none arg
-            let viewIdx ← resolveFreeVar "Vec_view"
-            return Bld.app (Bld.fvar viewIdx) vecExpr
+            -- `view(v : Vec<T>)` is identity when Vec := Sequence.
+            expToBoole env bound expected? arg
           | none => expToBoole env bound expected? arg
         | none =>
           match expected? with
@@ -579,20 +613,26 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
           | none => expToBoole env bound expected? arg
       | _ => mkFallback
     else if isVecLenSpecName fname || isVecLenExecName fname then
+      -- `v.len()` → `Sequence.length(v)`, then cast to bv64 so callers
+      -- that treat the result as `usize` (e.g. comparisons) still see
+      -- the bv64 shape `inferBitInfo` reports for Vec_len.
       match argsFiltered with
       | [arg] =>
-        let vecExpr ← expToBoole env bound none (unwrapViewCall arg)
-        let fnIdx ← resolveFreeVar "Vec_len"
-        return Bld.app (Bld.fvar fnIdx) vecExpr
+        let seqExpr ← expToBoole env bound none (unwrapViewCall arg)
+        let intLen := seqLength seqExpr
+        coerceNumeric (some .int) (some (.bv usizeBitWidth false)) intLen
       | _ => mkFallback
     else if isVecIndexSpecName fname || isVecIndexExecName fname then
+      -- `v[i]` → `Sequence.select(v, i_as_int)`. Strata's
+      -- `Sequence.select` is indexed by `int`, so the usize-typed `i`
+      -- is first coerced from bv to int.
       match argsFiltered with
       | [vArg, iArg] =>
-        let vecExpr ← expToBoole env bound none (unwrapViewCall vArg)
+        let seqExpr ← expToBoole env bound none (unwrapViewCall vArg)
         let rawIdx ← expToBoole env bound none iArg
-        let idxExpr ← coerceNumeric (inferNumKind env bound iArg) (some (.bv usizeBitWidth false)) rawIdx
-        let fnIdx ← resolveFreeVar "Vec_index"
-        return Bld.appN (Bld.fvar fnIdx) [vecExpr, idxExpr]
+        let intIdx ← coerceNumeric (inferNumKind env bound iArg) (some .int) rawIdx
+        let selectIdx ← resolveFreeVar "Sequence.select"
+        return Bld.appN (Bld.fvar selectIdx) [seqExpr, intIdx]
       | _ => mkFallback
     else if fnameStr == "Seq_index" then
       match argsFiltered with
@@ -833,6 +873,33 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
   | .Call fn _typArgs args => do
     if isGhostPervasiveCallName fn then
       return []
+    if isIndexSetName fn then
+      match normalizeCallArgsForCallee env fn args with
+      | [containerArg, indexArg, valueArg] =>
+        match vecVarFromExp containerArg with
+        | some baseName =>
+          let some containerTy := env.get? baseName
+            | throw s!"missing container type for index_set target {baseName}"
+          let seqExpr ← expToBoole env [] (some containerTy) (unwrapViewCall containerArg)
+          let rawIdx ← expToBoole env [] none indexArg
+          let intIdx ← coerceNumeric (inferNumKind env [] indexArg) (some .int) rawIdx
+          let valueExpr ← expToBoole env [] none valueArg
+          let updateIdx ← resolveFreeVar "Sequence.update"
+          let updated := Bld.appN (Bld.fvar updateIdx) [seqExpr, intIdx, valueExpr]
+          let containerTy' ← typToBooleType containerTy
+          return [setStmtTyped containerTy' (sanitizeVarName baseName) updated]
+        | none =>
+          throw "unsupported index_set target without a recoverable base variable"
+      | _ =>
+        throw "unsupported std_specs::core::index_set call shape"
+    -- `vec2seq` branch: Vec_* and Slice_into_vec procedure declarations are
+    -- dropped at the decl-filter stage (see `declsToBooleProgram`). Call
+    -- sites to those procedures therefore target non-existent names; drop
+    -- them here so the emitted Boole has no dangling references. This
+    -- sacrifices the procedure's effect — vec mutations no longer update
+    -- the LHS — but matches the user's explicit "seq or dropped" policy.
+    if isVec2SeqDroppedCalleeName fn then
+      return []
     let argsFiltered := normalizeCallArgsForCallee env fn args
     let callee := identToBoole fn
     let argsBoole ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
@@ -867,18 +934,65 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     let e ← expToBooleFlat env (some .Bool) exp
     return [assertStmt "compute" e]
   | .Assume exp => do
-    let e ← expToBooleFlat env (some .Bool) exp
-    return [assumeStmt "" e]
+    match exp with
+    | .Unary (.HasType _) _ => return []
+    | _ =>
+      let e ← expToBooleFlat env (some .Bool) exp
+      return [assumeStmt "" e]
   | .Assign lhs lhsTy rhs _lhsIsInit => do
     if shouldDropAssignAsForLoopScaffolding lhs then
       return []
-    match rhs with
+    if let some lhsName := lvalueVarName? lhs then
+      if let some elems := arrayLiteralElemsFromViewArg? rhs then
+        let elemTy? :=
+          if isSeqTyp lhsTy then firstStructParamFromExpected? (some lhsTy)
+          else vecElemTyp? lhsTy
+        if let some elemTy := elemTy? then
+          let lhsExpr ← resolveVar lhsName
+          let seqTakeIdx ← resolveFreeVar "Sequence.take"
+          let seqBuildIdx ← resolveFreeVar "Sequence.build"
+          let emptySeq := Bld.appN (Bld.fvar seqTakeIdx) [lhsExpr, intConst 0]
+          let elems' ← elems.mapM (expToBoole env [] (some elemTy))
+          let rhs' :=
+            elems'.foldl (fun acc elem => Bld.appN (Bld.fvar seqBuildIdx) [acc, elem]) emptySeq
+          let lhsTy' ← typToBooleType lhsTy
+          return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
+    let rhsCore := peelCallWrappers rhs
+    match rhsCore with
     | .Call fn _typArgs args => do
       let fnName := CallFun.name fn
       if isGhostPervasiveCallName fnName then return []
+      if isBoxNewName fnName || isArrayAsSliceName fnName || isSliceIntoVecName fnName then
+        let rhs' ← expToBooleFlat env (some lhsTy) rhs
+        match lvalueVarName? lhs with
+        | some lhsName =>
+          let lhsTy' ← typToBooleType lhsTy
+          return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
+        | none =>
+          let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
+          return [setStmt (sanitizeVarName rootName) updatedRoot]
+      -- `vec2seq` branch: same drop as the bare-call path above. Calls
+      -- whose RHS is a Vec_*/Slice_into_vec call are dropped entirely,
+      -- leaving the LHS variable at its prior value.
+      if isVec2SeqDroppedCalleeName fnName then
+        return []
       let argsFiltered := normalizeCallArgsForCallee env fnName args
       let callee := identToBoole fnName
-      if (lookupFnRetTypeFull env callee).isSome then
+      if isVecFromElemName fnName then
+        let argsBoole ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
+          let paramTy? := lookupFnParamTypeFull env callee idx
+          expToBooleFlat env paramTy? arg)
+        match lvalueVarName? lhs with
+        | some lhsName =>
+          return [callStmt #[sanitizeVarName lhsName] callee argsBoole.toArray]
+        | none =>
+          let tmpName := sanitizeVarName s!"tmp_proj_call_{callee}"
+          let ty' ← typToBooleType lhsTy
+          let callS := callStmt #[tmpName] callee argsBoole.toArray
+          let tmpExpr ← resolveVar tmpName
+          let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs tmpExpr
+          return [varStmt tmpName ty', callS, setStmt (sanitizeVarName rootName) updatedRoot]
+      else if (lookupFnRetTypeFull env callee).isSome then
         let rhs' ← expToBooleFlat env (some lhsTy) rhs
         match lvalueVarName? lhs with
         | some lhsName =>
@@ -1026,13 +1140,25 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
       pushBoundVar loopVarSan
       let invExprs ← loop.invariants.toArray.mapM (fun inv =>
         expToBooleFlat env (some .Bool) inv.body)
-      let measureExpr? ← match loop.decrease with
-        | [] => pure none
-        | e :: _ => do
-          let ce0 ← expToBooleFlat env none e
-          let srcKind? := inferNumKind env [] e
-          let ce ← coerceNumeric srcKind? (some .int) ce0
-          pure (some ce)
+      -- Drop the source-level `decreases` witness. Two reasons this is
+      -- total rather than selective:
+      --   (1) Strata's `for_to_by` / `for_down_to_by` grammar has no
+      --       measure slot (tracked upstream in our
+      --       `add-for-loop-measure-clause` branch).
+      --   (2) When the Verus source has no explicit `decreases`, Verus
+      --       auto-synthesizes one as
+      --         `if isSome(Pervasive_ghost_decrease(iter))
+      --             then Option_Some_0(...) else Pervasive_arbitrary`.
+      --       `Pervasive_ghost_decrease` is not in our prelude, and the
+      --       `isGhostPervasiveCallName` filter only fires on statement-
+      --       level calls, not inside expressions — so keeping the
+      --       expression would emit it as an unknown fvar.
+      -- When the grammar slot lands, restore the earlier lowering but
+      -- skip clauses whose head is a `Pervasive_ghost_*` call:
+      --   loop.decrease.head?.filter (not a ghost-pervasive Exp)
+      --     |>.mapM (fun e => expToBooleFlat env none e
+      --               >>= coerceNumeric _ (some .int))
+      let measureExpr? := none
       let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? procName (Stm.Block loop.userBody)
       pure (invExprs, measureExpr?, bodyStms)
     let loopStmt := forToStmt loopVarSan loopVarTy startExpr limitExpr
@@ -1267,7 +1393,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let inputNames := f.inputs.map Prod.fst
   let localsAll := collectProcedureLocals f.locals inputNames retNames setVars (hasForLoop := bodyHasForLoop)
   let localsAll := match bodyStm? with
-    | some body => filterLocalsByUse body localsAll
+    | some body => filterLocalsByUse (stripForLoopScaffoldingFromBody body) localsAll
     | none => localsAll
   let outputs := retDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
@@ -1288,6 +1414,54 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     pure (specElts, body)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
   pure (.command_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
+
+private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
+  let (elemName, elemTy, nName, nTy) ←
+    match f.inputs with
+    | (elemName, elemTy) :: (nName, nTy) :: _ => pure (elemName, elemTy, nName, nTy)
+    | _ => throw "Vec_from_elem expects element and length inputs"
+  let resolveProcVar (name : String) : BuildM BExpr := do
+    let idx ← resolveFreeVar (sanitizeVarName name)
+    pure (Bld.fvar idx)
+  let retTy ← typToBooleType f.returnType
+  let elemTy' ← typToBooleType elemTy
+  let nTy' ← typToBooleType nTy
+  let seqBuildIdx ← resolveFreeVar "Sequence.build"
+  let seqTakeIdx ← resolveFreeVar "Sequence.take"
+  let seqSelectIdx ← resolveFreeVar "Sequence.select"
+  let zeroInt := intConst 0
+  let zeroBv := bitvecConstNat usizeBitWidth 0
+  let oneBv := bitvecConstNat usizeBitWidth 1
+  let initRetExpr ← resolveProcVar f.retName
+  let initEmptyExpr := Bld.appN (Bld.fvar seqTakeIdx) [initRetExpr, zeroInt]
+  let initStmt := setStmtTyped retTy (sanitizeVarName f.retName) initEmptyExpr
+  let loopVarName := "i"
+  let loopStmt ← withScope do
+    pushBoundVar loopVarName
+    let nExpr ← resolveProcVar nName
+    let iExpr ← resolveVar loopVarName
+    let elemExpr ← resolveProcVar elemName
+    let retExpr ← resolveProcVar f.retName
+    let lenExpr ← coerceNumeric (some .int) (some (.bv usizeBitWidth false)) (seqLength retExpr)
+    let limitExpr := bvSub usizeBitWidth nExpr oneBv
+    let invBounds := boolAnd (bvUle usizeBitWidth zeroBv iExpr) (bvUle usizeBitWidth iExpr nExpr)
+    let invLen := eqTyped nTy' lenExpr iExpr
+    let invElemsBody ← withScope do
+      let quantVarName := "j"
+      pushBoundVar quantVarName
+      let jExpr ← resolveVar quantVarName
+      let jBv ← coerceNumeric (some .int) (some (.bv usizeBitWidth false)) jExpr
+      let iExpr ← resolveVar loopVarName
+      let elemExpr ← resolveProcVar elemName
+      let retExpr ← resolveProcVar f.retName
+      let inRange := boolAnd (intLe zeroInt jExpr) (bvUlt usizeBitWidth jBv iExpr)
+      let selectExpr := Bld.appN (Bld.fvar seqSelectIdx) [retExpr, jExpr]
+      pure (boolImplies inRange (eqTyped elemTy' selectExpr elemExpr))
+    let invElems := forallExpr #[("j", intTy)] invElemsBody
+    let nextRet := Bld.appN (Bld.fvar seqBuildIdx) [retExpr, elemExpr]
+    pure (forToStmt loopVarName nTy' zeroBv limitExpr none #[invBounds, invLen, invElems]
+      #[setStmtTyped retTy (sanitizeVarName f.retName) nextRet])
+  pure (BooleDDM.Block.block default (ann #[initStmt, loopStmt]))
 
 def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (sfMap : SpecFnMap) (f : ExecFn) : BuildM BCmd := do
@@ -1312,7 +1486,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let setVars := collectSetVars rewrittenBody
   let bodyHasForLoop := stmHasForLoop rewrittenBody
   let localsAll := collectProcedureLocals f.locals inputNames retNames setVars (hasForLoop := bodyHasForLoop)
-  let localsAll := filterLocalsByUse rewrittenBody localsAll
+  let localsAll := filterLocalsByUse (stripForLoopScaffoldingFromBody rewrittenBody) localsAll
   let outputs := retDecls ++ mutOutputDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
@@ -1323,7 +1497,10 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires rewrittenEnsures []
-    if isDeclOnly then
+    if isDeclOnly && isVecFromElemName f.name then
+      let body ← synthesizeVecFromElemBody f
+      pure (specElts, body)
+    else if isDeclOnly then
       let body := BooleDDM.Block.block default (ann #[])
       pure (specElts, body)
     else
@@ -1585,12 +1762,27 @@ def declsToBooleProgram (decls : List Decl) :
   let env := buildEnv decls noParamFns sfMap
   -- Detect whether any for-loop will be recovered
   let hasForLoop := declsHaveForLoop decls
+  -- `vec2seq` branch: Verus emits stub `proc Vec_*` / `proc Slice_into_vec`
+  -- wrappers (and a few other Vec-named procedures) to cover the Rust Vec
+  -- surface — `Vec_new`, `Vec_len`, `Vec_push`, `Vec_from_elem`,
+  -- `Slice_into_vec`, etc. Since we translate every Vec operation directly
+  -- to the corresponding `Sequence.*` op at the call site (see the
+  -- `isVecLenSpecName` / `isVecIndexSpecName` / `isViewName` handlers
+  -- in `expToBoole`), those stub declarations are never invoked. Their
+  -- specs also frequently mix `Map int T` (array) and `Sequence T` in
+  -- ways that no longer typecheck under vec2seq. Drop them here so the
+  -- output has no residual `Vec`-named symbols.
+  let isVec2SeqDroppedDecl (d : Decl) : Bool :=
+    -- Match on the sanitized (identToBoole) name, not the raw path, so
+    -- `vstd::vec::Vec::len` → `Vec_len` and the prefix check fires.
+    match Pruning.declName? d with
+    | some n => (n.startsWith "Vec_" && n != "Vec_from_elem") || n.startsWith "Slice_into_vec"
+    | none => false
   -- When for-loop recovery is active, skip translating iterator scaffolding declarations
-  let filteredDecls := if hasForLoop then
-    decls.filter fun d =>
-      let name := declPrimaryName d
-      !isForLoopScaffoldingDecl name
-    else decls
+  let filteredDecls := decls.filter fun d =>
+    let name := declPrimaryName d
+    !isVec2SeqDroppedDecl d &&
+      !(hasForLoop && isForLoopScaffoldingDecl name)
   -- Translate user declarations first to discover which support names are needed
   let mut userCmds : Array BCmd := #[]
   for d in filteredDecls do

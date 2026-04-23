@@ -25,13 +25,14 @@ def supportDeclName : SupportDecl → String
   | .intToBv w signed => intToBvCastName w signed
   | .bvWiden fromW toW signed => bvWidenCastName fromW toW signed
   | .tuple => "Tuple"
+  | .seqZipWith => "Seq_lib_zip_with"
 
 def supportDeclUsesNat : SupportDecl → Bool
   | .nat | .natToInt | .intToNat | .bvToNat .. => true
   | _ => false
 
 def supportDeclSignature? : SupportDecl → Option (List Typ × Typ)
-  | .nat | .tuple => none
+  | .nat | .tuple | .seqZipWith => none
   | .natToInt => some ([.Nat], .Int)
   | .intToNat => some ([.Int], .Nat)
   | .bvToInt w signed =>
@@ -58,7 +59,10 @@ def numericSupportDecls : List SupportDecl :=
         []))
 
 def allSupportDecls : List SupportDecl :=
-  [.tuple, .nat] ++ numericSupportDecls
+  -- Order matters for emission: `.tuple` declares the `Tuple` datatype
+  -- that `.seqZipWith` refers to in its return type, so `.seqZipWith`
+  -- must come after it.
+  [.tuple, .nat] ++ numericSupportDecls ++ [.seqZipWith]
 
 def supportDeclForName? (fname : String) : Option SupportDecl :=
   allSupportDecls.find? (fun need => supportDeclName need == fname)

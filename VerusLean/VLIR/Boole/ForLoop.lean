@@ -228,15 +228,64 @@ private partial def flattenAllBlocks (stms : List Stm) : List Stm :=
     | .Block inner => flattenAllBlocks inner
     | s => [s]
 
+private partial def expVarRefs : Exp → List String
+  | .Const _ _ => []
+  | .Var x => [x]
+  | .Call _ _ args => (args.flatMap expVarRefs).eraseDups
+  | .CallLambda body args => (expVarRefs body ++ (args.flatMap expVarRefs)).eraseDups
+  | .StructCtor _ fields => (fields.flatMap (fun (_, e) => expVarRefs e)).eraseDups
+  | .EnumCtor _ _ data => (data.flatMap (fun (_, e) => expVarRefs e)).eraseDups
+  | .TupleCtor _ data => (data.flatMap expVarRefs).eraseDups
+  | .Unary _ e => expVarRefs e
+  | .Binary _ e1 e2 => (expVarRefs e1 ++ expVarRefs e2).eraseDups
+  | .If c t f => (expVarRefs c ++ expVarRefs t ++ expVarRefs f).eraseDups
+  | .Bind (.Let _ _ e) body => (expVarRefs e ++ expVarRefs body).eraseDups
+  | .Bind (.Quant _ _ trigs) body =>
+    ((trigs.flatMap (fun g => g.flatMap expVarRefs)) ++ expVarRefs body).eraseDups
+  | .Bind (.Lambda _) body => expVarRefs body
+  | .ArrayLiteral elems => (elems.flatMap expVarRefs).eraseDups
+  | .MatchBlock (scrut, _) body => (expVarRefs scrut ++ expVarRefs body).eraseDups
+
+private def stmtAssignedVar? : Stm → Option String
+  | .Assign lhs _ _ _ => lvalueVarName? lhs
+  | _ => none
+
+private def stmtRefs : Stm → List String
+  | .Assign _ _ rhs _ => expVarRefs rhs
+  | .Call _ _ args => (args.flatMap expVarRefs).eraseDups
+  | .Assert e | .AssertCompute e | .AssertLean e | .Assume e => expVarRefs e
+  | .AssertBitVector reqs enss => ((reqs.flatMap expVarRefs) ++ (enss.flatMap expVarRefs)).eraseDups
+  | .Return e? => e?.map expVarRefs |>.getD []
+  | .If cond _ _ => expVarRefs cond
+  | _ => []
+
+private def shouldKeepPreambleDirectly : Stm → Bool
+  | .Assign lhs _ _ _ =>
+    match lvalueVarName? lhs with
+    | some name => !isForLoopScaffoldingVar name && !name.startsWith "decrease"
+    | none => true
+  | .Call fn _ _ =>
+    !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
+  | _ => true
+
 private def filterForLoopPreamble (stms : List Stm) : List Stm :=
-  stms.filter fun
-    | .Assign lhs _ _ _ =>
-      match lvalueVarName? lhs with
-      | some name => !isForLoopScaffoldingVar name && !name.startsWith "decrease"
-      | none => true
-    | .Call fn _ _ =>
-      !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
-    | _ => true
+  let rec go (needed : List String) (keptRev : List Stm) : List Stm → List Stm
+    -- We scan `stms.reverse`, so prepending each kept stmt rebuilds the
+    -- retained prefix in source order already. Reversing again would flip
+    -- the preamble and reorder effectful setup statements.
+    | [] => keptRev
+    | s :: rest =>
+      let assigned? := stmtAssignedVar? s
+      let keep := shouldKeepPreambleDirectly s ||
+        (assigned?.map (fun name => needed.contains name) |>.getD false)
+      if keep then
+        let needed' :=
+          let needed' := assigned?.map (fun name => needed.erase name) |>.getD needed
+          ((stmtRefs s) ++ needed').eraseDups
+        go needed' (s :: keptRev) rest
+      else
+        go needed keptRev rest
+  go [] [] stms.reverse
 
 structure RecoveredForLoop where
   preStms : List Stm

@@ -149,6 +149,39 @@ def isVecIndexExecName (name : Ident) : Bool :=
 def isViewName (name : Ident) : Bool :=
   name.toString.endsWith ".view"
 
+/-- Recognize `vstd::prelude::cloned` (ghost predicate asserting that the
+    second argument is a clone of the first). For every `Clone` impl Verus
+    admits, cloning is deterministic, so `cloned(x, y)` reduces to
+    `x == y`. Matching on the name lets the translator rewrite without
+    needing a prelude definition. -/
+def isClonedName (name : Ident) : Bool :=
+  let s := name.toString
+  s.endsWith "::cloned" || s.endsWith ".cloned" || s == "cloned"
+
+def isBoxNewName (name : Ident) : Bool :=
+  identToBoole name == "Boxed_box_new"
+
+def isArrayAsSliceName (name : Ident) : Bool :=
+  identToBoole name == "Array_array_as_slice"
+
+def isSliceIntoVecName (name : Ident) : Bool :=
+  identToBoole name == "Slice_into_vec"
+
+def isVecFromElemName (name : Ident) : Bool :=
+  identToBoole name == "Vec_from_elem"
+
+def isIndexSetName (name : Ident) : Bool :=
+  identToBoole name == "Std_specs_Core_index_set"
+
+/-- `vec2seq` branch: call targets that should be dropped during
+    translation because the Vec surface collapses to `Sequence.*` ops.
+    `Vec_from_elem` is the one kept stub (we synthesize a body for it);
+    everything else named `Vec_*` or `Slice_into_vec` is a dead
+    procedure with no Boole-side counterpart. -/
+def isVec2SeqDroppedCalleeName (name : Ident) : Bool :=
+  let n := identToBoole name
+  (n.startsWith "Vec_" && n != "Vec_from_elem") || isSliceIntoVecName name
+
 def isRangeTypeName (name : Ident) : Bool :=
   let s := name.toString.toLower
   s.endsWith "range.range" || s.endsWith "range::range"

@@ -71,6 +71,30 @@ private def mkTupleDatatypeDecl : BuildM BCmd := do
   let dtDecl := BooleDDM.DatatypeDecl.datatype_decl default (ann "Tuple") typeArgs constrList
   pure (.command_datatypes default (ann #[dtDecl]))
 
+/-- Emit `function Seq_lib_zip_with<A, B>(s: Sequence A, t: Sequence B):
+    Sequence (Tuple A B);` as an abstract declaration. The return type
+    references `Tuple`, so this support decl must be emitted after
+    `.tuple`. See `allSupportDecls` ordering in `Support.lean`. -/
+private def mkSeqZipWithDecl : BuildM BCmd := do
+  let fname := "Seq_lib_zip_with"
+  addFreeVars #[fname]
+  let typeParamBindings : Array (BooleDDM.TypeVar SourceRange) := #[
+    BooleDDM.TypeVar.type_var default (ann "A"),
+    BooleDDM.TypeVar.type_var default (ann "B")]
+  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+    ann (some (BooleDDM.TypeArgs.type_args default (ann typeParamBindings)))
+  let aTy := tvarTy "A"
+  let bTy := tvarTy "B"
+  let tupleIdx ← resolveFreeVar "Tuple"
+  let sInput :=
+    BooleDDM.Binding.mkBinding default (ann "s") (BooleDDM.TypeP.expr (seqTy aTy))
+  let tInput :=
+    BooleDDM.Binding.mkBinding default (ann "t") (BooleDDM.TypeP.expr (seqTy bTy))
+  let inputBindings :=
+    BooleDDM.Bindings.mkBindings default (ann #[sInput, tInput])
+  let outputTy : BType := seqTy (fvarTy tupleIdx #[aTy, bTy])
+  pure (.command_fndecl default (ann fname) typeArgs inputBindings outputTy)
+
 def supportDeclToCommand (lowerType : TypeLowerer) (need : SupportDecl) :
     BuildM (Option BCmd) := do
   match need with
@@ -79,6 +103,9 @@ def supportDeclToCommand (lowerType : TypeLowerer) (need : SupportDecl) :
     pure (some cmd)
   | .nat => do
     let cmd ← mkAbstractTypeDecl "nat" []
+    pure (some cmd)
+  | .seqZipWith => do
+    let cmd ← mkSeqZipWithDecl
     pure (some cmd)
   | _ =>
     match supportDeclSignature? need with
