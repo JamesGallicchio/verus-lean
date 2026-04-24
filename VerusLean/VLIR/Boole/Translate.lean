@@ -74,6 +74,7 @@ private def isPureBooleBuiltinCallName (fn : Ident) : Bool :=
   isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
     || isVecIndexSpecName fn || isVecIndexExecName fn
     || isBoxNewName fn || isArrayAsSliceName fn || isSliceIntoVecName fn
+    || isCloneExecName fn
 
 /-! ## Environment Helpers -/
 
@@ -588,7 +589,8 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let y ← expToBoole env bound none yArg
         return Bld.eq x y
       | _ => mkFallback
-    else if isBoxNewName fname || isArrayAsSliceName fname || isSliceIntoVecName fname then
+    else if isBoxNewName fname || isArrayAsSliceName fname || isSliceIntoVecName fname
+        || isCloneExecName fname then
       match argsFiltered with
       | [arg] => expToBoole env bound expected? arg
       | _ => mkFallback
@@ -948,10 +950,9 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           if isSeqTyp lhsTy then firstStructParamFromExpected? (some lhsTy)
           else vecElemTyp? lhsTy
         if let some elemTy := elemTy? then
-          let lhsExpr ← resolveVar lhsName
-          let seqTakeIdx ← resolveFreeVar "Sequence.take"
+          let seqEmptyIdx ← resolveFreeVar "Sequence.empty"
           let seqBuildIdx ← resolveFreeVar "Sequence.build"
-          let emptySeq := Bld.appN (Bld.fvar seqTakeIdx) [lhsExpr, intConst 0]
+          let emptySeq := Bld.fvar seqEmptyIdx
           let elems' ← elems.mapM (expToBoole env [] (some elemTy))
           let rhs' :=
             elems'.foldl (fun acc elem => Bld.appN (Bld.fvar seqBuildIdx) [acc, elem]) emptySeq
@@ -962,7 +963,8 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     | .Call fn _typArgs args => do
       let fnName := CallFun.name fn
       if isGhostPervasiveCallName fnName then return []
-      if isBoxNewName fnName || isArrayAsSliceName fnName || isSliceIntoVecName fnName then
+      if isBoxNewName fnName || isArrayAsSliceName fnName || isSliceIntoVecName fnName
+          || isCloneExecName fnName then
         let rhs' ← expToBooleFlat env (some lhsTy) rhs
         match lvalueVarName? lhs with
         | some lhsName =>
@@ -1427,13 +1429,12 @@ private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
   let elemTy' ← typToBooleType elemTy
   let nTy' ← typToBooleType nTy
   let seqBuildIdx ← resolveFreeVar "Sequence.build"
-  let seqTakeIdx ← resolveFreeVar "Sequence.take"
+  let seqEmptyIdx ← resolveFreeVar "Sequence.empty"
   let seqSelectIdx ← resolveFreeVar "Sequence.select"
   let zeroInt := intConst 0
   let zeroBv := bitvecConstNat usizeBitWidth 0
   let oneBv := bitvecConstNat usizeBitWidth 1
-  let initRetExpr ← resolveProcVar f.retName
-  let initEmptyExpr := Bld.appN (Bld.fvar seqTakeIdx) [initRetExpr, zeroInt]
+  let initEmptyExpr := Bld.fvar seqEmptyIdx
   let initStmt := setStmtTyped retTy (sanitizeVarName f.retName) initEmptyExpr
   let loopVarName := "i"
   let loopStmt ← withScope do
@@ -1775,8 +1776,16 @@ def declsToBooleProgram (decls : List Decl) :
   let isVec2SeqDroppedDecl (d : Decl) : Bool :=
     -- Match on the sanitized (identToBoole) name, not the raw path, so
     -- `vstd::vec::Vec::len` → `Vec_len` and the prefix check fires.
+    -- Also drops procedure decls whose calls are inlined at every call
+    -- site (see `isPureBooleBuiltinCallName` / `expToBoole`): the stubs
+    -- have no remaining callers and otherwise leak as dead decls.
     match Pruning.declName? d with
-    | some n => (n.startsWith "Vec_" && n != "Vec_from_elem") || n.startsWith "Slice_into_vec"
+    | some n =>
+      (n.startsWith "Vec_" && n != "Vec_from_elem")
+        || n.startsWith "Slice_into_vec"
+        || n == "Clone_Clone_clone"
+        || n == "Boxed_box_new"
+        || n == "Array_array_as_slice"
     | none => false
   -- When for-loop recovery is active, skip translating iterator scaffolding declarations
   let filteredDecls := decls.filter fun d =>

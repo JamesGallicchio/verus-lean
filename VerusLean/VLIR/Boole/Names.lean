@@ -182,6 +182,16 @@ def isVec2SeqDroppedCalleeName (name : Ident) : Bool :=
   let n := identToBoole name
   (n.startsWith "Vec_" && n != "Vec_from_elem") || isSliceIntoVecName name
 
+/-- Recognize the exec-side `Clone::clone` method. Every `Clone` impl
+    Verus accepts is deterministic, and our spec-level `Sequence` is
+    value-typed, so `y := clone(x)` collapses to the direct assignment
+    `y := x`. Inlining at the call site also lets us drop the stub
+    `Clone_Clone_clone` procedure decl entirely — it otherwise emits an
+    empty-spec empty-body procedure whose return is effectively havoc'd
+    (unlike `Boxed_box_new`, which carries `ensures result == x`). -/
+def isCloneExecName (name : Ident) : Bool :=
+  identToBoole name == "Clone_Clone_clone"
+
 def isRangeTypeName (name : Ident) : Bool :=
   let s := name.toString.toLower
   s.endsWith "range.range" || s.endsWith "range::range"
