@@ -1410,7 +1410,11 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     let retVar? := if hasRet then some (f.retName, f.returnType) else none
     let bodyStmts ← match bodyStm? with
       | some stm => stmToBoole envLocal projLayouts mutArgMap retVar? fnName stm
-      | none => pure []
+      -- Body-less proof fn (`#[verifier::external_body]` on `proof fn`):
+      -- mirror the exec-fn isDeclOnly arm — emit `assume false;` so the
+      -- ensures are trivially satisfied. (Body-less in Strata is *not*
+      -- treated as a trusted declaration; see the exec-fn comment.)
+      | none => pure [assumeStmt "" (boolConst false)]
     let allStmts := localStmts ++ bodyStmts
     let body := BooleDDM.Block.block default (ann allStmts.toArray)
     pure (specElts, body)
@@ -1502,7 +1506,17 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
       let body ← synthesizeVecFromElemBody f
       pure (specElts, body)
     else if isDeclOnly then
-      let body := BooleDDM.Block.block default (ann #[])
+      -- `#[verifier::external]` tells Verus to ignore the given item. Verus
+      -- will error if any verified code attempts to reference the given item.
+      -- `#[verifier::external_body]` tells Verus to only consider the function
+      -- definition but not the function body, trusting that it correctly
+      -- satisfies its specification.
+      -- Strata's `command_procedure` with `body = none` is *not* treated as
+      -- a trusted declaration — it still emits per-ensures obligations that
+      -- the (missing) body must satisfy, which fails for non-trivial specs.
+      -- Emit `{ assume false; }` instead so the body trivially satisfies its
+      -- postconditions; callers continue to use the spec as written.
+      let body := BooleDDM.Block.block default (ann #[assumeStmt "" (boolConst false)])
       pure (specElts, body)
     else
       let localStmts ← localsToVarStmts localsAll
