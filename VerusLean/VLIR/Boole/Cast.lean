@@ -68,6 +68,17 @@ private def bexprBvWidth? : BExpr → Option Nat
     bvTypeWidth? ty
   | _ => none
 
+/-- Positive detector for `BExpr`s that are known to be int-typed.
+
+    This only returns true when the emitted BooleDDM node carries an explicit
+    `.int` type tag. Unknown shapes such as `.app`, `.fvar`, and `.bvar`
+    return false, so callers default to applying the requested cast. -/
+private def bexprIsKnownInt : BExpr → Bool
+  | .add_expr _ (.int _) _ _ | .sub_expr _ (.int _) _ _
+  | .mul_expr _ (.int _) _ _ | .div_expr _ (.int _) _ _
+  | .mod_expr _ (.int _) _ _ | .neg_expr _ (.int _) _ => true
+  | _ => false
+
 /-- Insert a single numeric coercion. Returns the expression unchanged when
     no coercion is needed. -/
 def coerceNumeric (src? target? : Option NumKind) (e : BExpr) :
@@ -77,7 +88,9 @@ def coerceNumeric (src? target? : Option NumKind) (e : BExpr) :
   | some src, some target =>
     if src == target then pure e
     else match src, target with
-    | .bv w s, .int => applyCast (.bvToInt w s) e
+    | .bv w s, .int =>
+      if bexprIsKnownInt e then pure e
+      else applyCast (.bvToInt w s) e
     | .bv w s, .nat => applyCast (.bvToNat w s) e
     | .nat, .int => applyCast .natToInt e
     | .int, .bv w s => applyCast (.intToBv w s) e

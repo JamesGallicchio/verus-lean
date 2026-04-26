@@ -247,33 +247,52 @@ partial def bindUnlabeledLoopControlTo (loopLabel : String) : Stm → Stm
 
 /-! ## Expression Translation -/
 
+private partial def exprHonorsExpectedInt : Exp → Bool
+  | .Var _ => true
+  | .Const _ _ => true
+  | .Binary (.Arith _ _) _ _ => true
+  | .Unary (.Box _) e => exprHonorsExpectedInt e
+  | .Unary (.Unbox _) e => exprHonorsExpectedInt e
+  | .Unary .Trigger e => exprHonorsExpectedInt e
+  | .Unary (.HasType _) e => exprHonorsExpectedInt e
+  | .Unary .Old e => exprHonorsExpectedInt e
+  | .If _ t f => exprHonorsExpectedInt t && exprHonorsExpectedInt f
+  | .Bind _ body => exprHonorsExpectedInt body
+  | .MatchBlock _ body => exprHonorsExpectedInt body
+  | .Call fn _ _ =>
+    let name := CallFun.name fn
+    isVecLenSpecName name || isVecLenExecName name
+  | _ => false
+
 mutual
 
 private partial def comparisonPrelude
     (env : VarEnv) (bound : BoundEnv) (lhs rhs : Exp) :
     BuildM (Option Typ × BExpr × BExpr) := do
-  let lhsInfo? := inferBitInfo env bound lhs
-  let rhsInfo? := inferBitInfo env bound rhs
-  let lhsNum? := inferNumKind env bound lhs
-  let rhsNum? := inferNumKind env bound rhs
-  let argTy? :=
-    chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo? <|>
-    match lhsInfo?, rhsInfo?, lhsNum?, rhsNum? with
-    | some (w, s), none, _, some .int
-    | some (w, s), none, _, some .nat =>
-      some (bitTypOfInfo w s)
-    | none, some (w, s), some .int, _
-    | none, some (w, s), some .nat, _ =>
-      some (bitTypOfInfo w s)
-    | _, _, _, _ => none
+  let lhsInfo? := inferComparisonBitInfo env bound lhs
+  let rhsInfo? := inferComparisonBitInfo env bound rhs
+  let lhsNum? := inferComparisonNumKind env bound lhs
+  let rhsNum? := inferComparisonNumKind env bound rhs
+  -- `chooseBitArgTyForCmp` only keeps a comparison in bv space when both
+  -- operands are naturally bv-shaped, or when the non-bv side is a constant
+  -- expression that fits the chosen width. Non-constant mathematical
+  -- `int`/`nat` terms fall through to `fallbackToInt`.
+  let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
   let fallbackToInt := argTy?.isNone &&
     (lhsInfo?.isSome || rhsInfo?.isSome ||
      lhsNum? == some .nat || rhsNum? == some .nat)
   if fallbackToInt then
-    let l0 ← expToBoole env bound none lhs
-    let r0 ← expToBoole env bound none rhs
-    let l ← coerceNumeric lhsNum? (some .int) l0
-    let r ← coerceNumeric rhsNum? (some .int) r0
+    -- Pass `expected = some .Int` so operands (e.g. `n + 1` with
+    -- `n : usize`) emit int arithmetic instead of bv arithmetic that
+    -- subsequently overflows under a `bv*_to_int_u` wrap. The post-coerce
+    -- is a safety net for shapes that don't honor `expected` (e.g. generic
+    -- Calls); skipped for shapes we know honor it, to avoid double-wrap.
+    let l0 ← expToBoole env bound (some Typ.Int) lhs
+    let r0 ← expToBoole env bound (some Typ.Int) rhs
+    let l ← if exprHonorsExpectedInt lhs then pure l0
+            else coerceNumeric lhsNum? (some .int) l0
+    let r ← if exprHonorsExpectedInt rhs then pure r0
+            else coerceNumeric rhsNum? (some .int) r0
     return (argTy?, l, r)
   else
     -- Same narrow-then-widen gating as `.Binary` (see that site).
@@ -370,6 +389,25 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | .Ge => return intGe l r
       | .Gt => return intGt l r
   | .Binary op lhs rhs => do
+    -- Run arith in `int` when the context demands int or any subtree
+    -- mixes int and bv operands. Otherwise bv overflow corrupts the
+    -- post-hoc `bv*_to_int_u` wrap (`n == 2^64 - 1` ↦ `bv64_to_int_u(n
+    -- + 1bv64) == 0`).
+    let arithRunsInInt :=
+      match op with
+      | .Arith _ _ =>
+        expected?.bind numKindOfTyp? == some NumKind.int ||
+        expHasMixedIntBvArith env bound (.Binary op lhs rhs)
+      | _ => false
+    if arithRunsInInt then
+      let l ← expToBoole env bound (some Typ.Int) lhs
+      let r ← expToBoole env bound (some Typ.Int) rhs
+      match applyBinaryOp op l r with
+      | some result =>
+        let targetKind? := expected?.bind numKindOfTyp?
+        let result ← coerceNumeric (some .int) targetKind? result
+        return result
+      | none => throw s!"unsupported int-context binary op: {repr op}"
     let lhsInfo? := inferBitInfo env bound lhs
     let rhsInfo? := inferBitInfo env bound rhs
     let hasMixedSignedBitArgs :=
@@ -622,7 +660,10 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | [arg] =>
         let seqExpr ← expToBoole env bound none (unwrapViewCall arg)
         let intLen := seqLength seqExpr
-        coerceNumeric (some .int) (some (.bv usizeBitWidth false)) intLen
+        match expected?.bind numKindOfTyp? with
+        | some .int => pure intLen
+        | some .nat => coerceNumeric (some .int) (some .nat) intLen
+        | _ => coerceNumeric (some .int) (some (.bv usizeBitWidth false)) intLen
       | _ => mkFallback
     else if isVecIndexSpecName fname || isVecIndexExecName fname then
       -- `v[i]` → `Sequence.select(v, i_as_int)`. Strata's

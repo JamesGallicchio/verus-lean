@@ -334,6 +334,85 @@ def inferNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=
     match inferComparableTyp? env bound e with
     | some .Int => some .int
     | some .Nat => some .nat
-    | _ => none
+    | _ =>
+      match e with
+      | .Const _ ty => numKindOfTyp? ty
+      | _ => none
+
+private structure ArithFootprint where
+  hasMathInt : Bool := false
+  hasBv : Bool := false
+deriving Inhabited
+
+private def ArithFootprint.ofNumKind : Option NumKind → ArithFootprint
+  | some (.bv ..) => { hasBv := true }
+  | some .int | some .nat => { hasMathInt := true }
+  | none => {}
+
+private def ArithFootprint.merge (lhs rhs : ArithFootprint) : ArithFootprint :=
+  { hasMathInt := lhs.hasMathInt || rhs.hasMathInt
+    hasBv := lhs.hasBv || rhs.hasBv }
+
+private def ArithFootprint.isMixed (f : ArithFootprint) : Bool :=
+  f.hasMathInt && f.hasBv
+
+/-- Classify a source arithmetic tree for numeric-domain selection.
+
+    This is deliberately source-AST based: variables keep their source type,
+    and mixed math-int/bitvector arithmetic is recognized before translation
+    commits to either Boole int operators or Boole bv operators.
+
+    Integer / nat literals don't contribute to the footprint: Verus typically
+    serializes literals with their *default* type (often `.Int`) even when
+    the surrounding context constrains them to a bv width (e.g. `8 * x1`
+    where `x1 : i8` should stay pure-bv).  A bv-typed literal still counts
+    as bv — that's how the user expresses an intentional bv constant. -/
+partial def arithFootprint (env : VarEnv) (bound : BoundEnv) : Exp → ArithFootprint
+  | .Binary (.Arith _ _) lhs rhs =>
+    (arithFootprint env bound lhs).merge (arithFootprint env bound rhs)
+  | .Unary (.Box t) _ | .Unary (.Unbox t) _ =>
+    ArithFootprint.ofNumKind (numKindOfTyp? t)
+  | .Const _ t =>
+    match numKindOfTyp? t with
+    | some (.bv ..) => { hasBv := true }
+    | _ => {}
+  | e =>
+    ArithFootprint.ofNumKind (inferNumKind env bound e)
+
+/-- True when any arithmetic subtree combines mathematical integer/nat values
+    with fixed-width bitvectors. Such arithmetic is lowered in Boole `int`
+    space with explicit `bv*_to_int_*` casts on bv operands; pure bv
+    arithmetic stays bv, and pure mathematical arithmetic stays int. -/
+partial def expHasMixedIntBvArith (env : VarEnv) (bound : BoundEnv) : Exp → Bool
+  | e@(.Binary (.Arith _ _) _ _) => (arithFootprint env bound e).isMixed
+  | .Binary _ lhs rhs =>
+    expHasMixedIntBvArith env bound lhs || expHasMixedIntBvArith env bound rhs
+  | .Unary _ e => expHasMixedIntBvArith env bound e
+  | .If c t f =>
+    expHasMixedIntBvArith env bound c ||
+    expHasMixedIntBvArith env bound t ||
+    expHasMixedIntBvArith env bound f
+  | .Bind bind body =>
+    let bindHasMixed :=
+      match bind with
+      | .Let _ _ e => expHasMixedIntBvArith env bound e
+      | .Quant _ _ triggers =>
+        triggers.any (fun group => group.any (expHasMixedIntBvArith env bound))
+      | .Lambda _ => false
+    bindHasMixed || expHasMixedIntBvArith env bound body
+  | .Call _ _ args | .CallLambda _ args | .TupleCtor _ args | .ArrayLiteral args =>
+    args.any (expHasMixedIntBvArith env bound)
+  | .StructCtor _ fields | .EnumCtor _ _ fields =>
+    fields.any (fun (_, e) => expHasMixedIntBvArith env bound e)
+  | .MatchBlock (scrutinee, _) body =>
+    expHasMixedIntBvArith env bound scrutinee ||
+    expHasMixedIntBvArith env bound body
+  | _ => false
+
+def inferComparisonNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=
+  if expHasMixedIntBvArith env bound e then some .int else inferNumKind env bound e
+
+def inferComparisonBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bool) :=
+  if expHasMixedIntBvArith env bound e then none else inferBitInfo env bound e
 
 end VerusLean.Boole.Inference
