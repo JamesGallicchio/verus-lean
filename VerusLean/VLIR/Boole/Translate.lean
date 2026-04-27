@@ -860,7 +860,13 @@ private def mkQueryObligation (env : VarEnv) (label : String) (requires ensures 
         | [] => boolConst true
         | e :: rest => rest.foldl boolAnd e
       boolImplies reqConj ensConj
-  return [assertStmt label obligation]
+  -- Skip vacuous obligations: `assert [label]: true;` proves nothing and
+  -- only adds noise. This fires e.g. when Verus pre-computes the asserted
+  -- expression to `true` before our `bitvector_query` / `nonlinear_query`
+  -- emission, leaving an empty ensures list.
+  match obligation with
+  | .btrue _ => return []
+  | _ => return [assertStmt label obligation]
 
 /-! ## Projected Assignment — BuildM-bound consumers of `Projection.lean` -/
 
