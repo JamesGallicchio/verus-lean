@@ -433,6 +433,39 @@ partial def inlineTemps (isPureCallName : Ident → Bool) : List Stm → List St
     | none => inlineTempsInStm isPureCallName stm :: rest'
 end
 
+/-- `assume true;` is the vacuous degeneration of Verus's `assert(P) by { proof }`
+    lowering (`vir/src/ast_to_sst.rs::ExprX::AssertBy`):
+
+        deadend {
+          assume(require)            ← becomes `Assume true` when `require` defaults
+          proof
+          assert(ensure)
+        }
+        assume(forall vars. require ==> ensure)
+
+    For the common `assert(P) by { proof }` form (no explicit `require`,
+    no `vars`), Verus defaults `require = true`, leaving `Assume true` as
+    a no-op statement to strip. -/
+private def isAssumeTrue : Stm → Bool
+  | .Assume (.Const (.Bool true) _) => true
+  | _ => false
+
+/-- Peel vacuous wrappers off an Assume body — the post-deadend echo of
+    `assert(P) by { proof }` in `ExprX::AssertBy` is
+    `assume(forall vars. require ==> ensure)`; when `vars = []` and
+    `require = true` (the common case), it degenerates to
+    `assume(forall [] (true ==> P))`. Strip the outer empty `forall` and
+    the `true ==>` premise: both are no-ops (`forall [] X ≡ X`,
+    `true ==> X ≡ X`). -/
+private partial def peelVacuousAssumeWrappers : Exp → Exp
+  | .Bind (.Quant _ [] _) body => peelVacuousAssumeWrappers body
+  | .Binary .Implies (.Const (.Bool true) _) body => peelVacuousAssumeWrappers body
+  | e => e
+
+private def stripVacuousImpliesInAssume : Stm → Stm
+  | .Assume e => .Assume (peelVacuousAssumeWrappers e)
+  | s => s
+
 mutual
   /-- Recursive helper: applies `normalizeStms` to nested statement lists
       (Block contents, Loop bodies, If branches), and at each `.Loop` site
@@ -461,14 +494,20 @@ mutual
 
   /-- Apply the four list-level normalization passes (inline temps, recover
       compute-proof shells, flatten nested top-level Blocks, strip singleton
-      Blocks) to a statement list, then descend into each statement. -/
+      Blocks) to a statement list, then descend into each statement.  Also
+      drop scaffolding `assume true;` and simplify `assume (true ==> P)` to
+      `assume P` — both come from Verus's proof-block lowering and are
+      semantically no-ops / redundancies. -/
   partial def normalizeStms (isPureCallName : Ident → Bool)
       (stms : List Stm) : List Stm :=
     let flattened := flattenSeqBlocks stms
     let normalized :=
       (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureCallName flattened))).map
         stripSingletonBlocks
-    normalized.map (normalizeStm isPureCallName)
+    let cleaned := normalized.filterMap (fun s =>
+      let s' := stripVacuousImpliesInAssume s
+      if isAssumeTrue s' then none else some s')
+    cleaned.map (normalizeStm isPureCallName)
 end
 
 /-- Single VLIR-level normalization pre-pass run once per body before
