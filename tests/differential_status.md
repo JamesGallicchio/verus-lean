@@ -8,26 +8,21 @@ This file tracks three things separately:
 Solver success is **not** used to classify faithfulness.
 
 ## Data Sources
-- Full run:
+- Full run (raw Core regression — kept for legacy regression tracking):
   - command: `./tests/regress_examples.sh --all-suites`
   - run id: `20260330_010858`
   - solver: `cvc5`
-- Boole output:
-  - `verus-lean` now accepts `core --dialect boole ...`
-  - current Boole mode reuses the local printer and reconstructs simple
-    range-iterator loops as Boole `for` loops (for example `vlir-tests:demo_for`)
+- Boole output (primary):
+  - `verus-lean` emits Boole as the primary output. The intended artifact to
+    inspect for any test is `tests/BoolePrograms/.../*.lean`; raw
+    `tests/BoogieFiles/.../*.core.st` is kept for Core-pipeline regression
+    tracking only.
+  - Boole `for` loops are reconstructed for simple range-iterator patterns
+    (e.g. `vlir-tests:demo_for`).
   - current Verus range-loop support is unit-step only:
     `for ... step_by(...)` is rejected before JSON export, so recovered Boole
-    `for` loops are emitted as plain `for ... to ...` loops with implicit step 1
-  - `vlir-tests:demo_for` now elaborates cleanly in Strata as Boole output
-  - Boole-primary tests for manual review:
-    `vlir-tests:demo`, `vlir-tests:demo_for`, `vlir-tests:mutual_recursion`,
-    `vlir-tests:recursion`, `verus-examples:guide/recursion`
-  - for those Boole-primary tests, the intended artifact to inspect is
-    `tests/BooleFiles/.../*.lean`; raw `tests/BoogieFiles/.../*.core.st`
-    failures are only background/Core-pipeline notes
-  - other generated Boole files are still useful smoke tests, but they do not
-    replace Core as the primary artifact unless called out explicitly below
+    `for` loops are emitted as plain `for ... to ...` loops with implicit step 1.
+  - `vlir-tests:demo_for` elaborates cleanly in Strata as Boole output.
   - targeted `for`-loop cases still blocked by non-`for` issues:
     `verus-examples:recursion` (`int`/`bv64` mismatch),
     `verus-examples:set_from_vec`, `verus-examples:mergesort`,
@@ -62,13 +57,18 @@ Additional counters (do not affect total):
 - `faithful and same as Verus output`: translation is faithful and Strata verification outcome matches Verus.
 - `faithful but different from Verus output`: translation is faithful, but Verus/Strata outcomes differ or Strata lacks support.
 - `not faithful translation`: translation currently drops/changes important semantics compared to source-level intent.
-- Manual labels below are Core-first by default.
+- Manual labels below are **Boole-first**: the primary artifact for review is
+  `tests/BoolePrograms/.../*.lean`. Raw Core (`tests/BoogieFiles/.../*.core.st`)
+  is kept as a regression artifact but no longer the canonical output for
+  judging translation quality.
 - Repeated issues are keyed by gap IDs from the `Gap Index` section below.
-- Exception: for the Boole-primary tests listed above, judge translation quality
-  from the Boole file in `tests/BooleFiles`, not from the raw Core file in
-  `tests/BoogieFiles`.
-- If a non-Boole-primary test is better in Boole for some specific reason, that
-  exception is called out explicitly in its note.
+  Some gaps are tagged `(Core-only)` when they describe a Core-pipeline-only
+  issue that the Boole pipeline already resolves; those are kept for raw-Core
+  regression tracking but should not affect the Boole-side judgment.
+- Boole has no immutable-binding form, so Rust's `let` vs `let mut`
+  distinction collapses to a uniformly mutable `var` declaration in all
+  Boole output. This is verification-equivalent and not classified as a
+  translation defect.
 
 ## Best Available Output Notes
 - `vlir-tests:demo`, `vlir-tests:demo_for`: best current output is Boole, which
@@ -82,11 +82,6 @@ Additional counters (do not affect total):
   recovers the loop structure where relevant, but the overall best current
   condition is still not faithful because `[TRANS-reveal-with-fuel]` still
   changes the source-level behavior.
-- `vlir-tests:basic_failure`, `verus-examples:guide/requires_ensures`,
-  `verus-examples:guide/requires_ensures_edit`, `verus-examples:imo_1988_6`:
-  the local Core output now renders `return` as comments again. We still note
-  `[TRANS-return-comment]` under `Gap Index`, but we classify these as faithful
-  when that is the only issue.
 
 ## faithful and same as Verus output (16)
 - `vlir-tests:basic_failure` (fail as expected)
@@ -116,44 +111,44 @@ Additional counters (do not affect total):
 - `vlir-tests:quant` (current blocker is Strata-side typing)
 - `vlir-tests:rec_adt_structural` (nat emitted as a datatype; waiting for Strata native nat support)
 - `vlir-tests:mutual_recursion` (current Boole output elaborates and is source-close; raw Core still has the `@[cases]`-on-`int` limitation only)
-- `verus-examples:bitvector_basic` (Strata SMT encoding issue on indexed bitvector literal)
+- `verus-examples:bitvector_basic` (`[TRANS-coercion-uninterpreted]` blocks several `bitvector_query` / `compute` obligations that depend on `bv8_to_bv16_u`, `bv8_to_bv32_s`, `bv8_to_int_u`, `bv8_to_int_s`)
 - `verus-examples:fun_ext` (blocked by higher-order/extensional support)
-- `verus-examples:generics` (`[TRANS-generic-reveal]`)
+- `verus-examples:generics` (`[TRANS-generic-reveal]`; `[VERIFY-generic-typevar-ddm]` raises SMT encoding errors on type-var-using obligations, and downstream asserts depending on those obligations also fail)
 - `verus-examples:guide/modes` (Tuple type now declared; blocked by other Strata issues)
 - `verus-examples:guide/datatypes` (current difference is only that datatype-constructor/selector VCs fail in Strata)
 - `verus-examples:guide/interior_mutability` (translation is source-close; the current difference is the missing `Cell` model type in Strata)
 - `verus-examples:guide/overflow` (blocked by missing arithmetic-overflow/cast support in Strata)
 - `verus-examples:guide/references` (current mismatch is Strata loop-measure reasoning)
 - `verus-examples:guide/strings` (translation is source-close; the current difference is the missing `String_string` / string-library model support in Strata)
-- `verus-examples:guide/requires_ensures` (`[TRANS-return-comment]` only)
-- `verus-examples:guide/requires_ensures_edit` (`[TRANS-return-comment]` only)
 - `verus-examples:prelude` (`seq!` now lowers through `Sequence.empty`/`Sequence.build`; the remaining mismatch is Strata's current `Sequence` frontend/indexing support)
-- `verus-examples:statements` (mixed-width bitvector arithmetic with explicit width extension)
-- `verus-examples:quantifiers` (Strata type error: `tr(i)` where `i: nat` but `tr` expects `int`)
+- `verus-examples:statements` (mixed-width bitvector arithmetic with explicit width extension; `[TRANS-coercion-uninterpreted]` causes the `b1 == i * 2` loop entry-invariant to fail — `bv8_to_bv64_u(b1)` is uninterpreted so cvc5 can't establish the relation)
+- `verus-examples:quantifiers` (typing now flows through via `nat_to_int` coercion; the universal `∀ i : nat :: nat_to_int(i) >= 0 && ...` fails because `nat_to_int` is declared without a body, so cvc5 cannot prove `nat_to_int(i) >= 0` — `[TRANS-coercion-uninterpreted]`)
 - `verus-examples:assorted_demo` (`#[verifier::external]` fn dropped, `#[verifier::external_body]` fn emitted with specs and empty body)
 - `verus-examples:cells` (translation is source-close; the current difference is the missing `Cell` model type in Strata)
 - `verus-examples:overflow` (checked-overflow operations are preserved through the current arithmetic-overflow helper model; the remaining blocker is the missing `Arithmetic_overflow` type in Strata)
 - `verus-examples:guide/integers` (missing `bv8_to_nat` coercion — Verus widening cast erasure)
 - `verus-examples:impl_basic` (structs, methods, generics, ensures clauses preserved)
-- `vlir-tests:integer_ring` (Strata type error only on intentionally-failing `type_fail`)
+- `vlir-tests:integer_ring` (Strata type error on intentionally-failing `type_fail`; cvc5 also times out on `wide_mul` ensures — non-linear bv64 multiplication beyond solver default budget)
 - `verus-examples:proposal-rw2022` (coercions at call sites, termination-check artifacts stripped)
-- `verus-examples:bitvector_equivalence` (bitvector proofs with triggers and decreases)
+- `verus-examples:bitvector_equivalence` (bitvector proofs with triggers and decreases; cvc5 times out on the `equivalence_proof_bv` ensures — large bit-blasted query)
 - `verus-examples:adts` (datatypes, variant checks, structural equality; TODO: `matches` clause)
 - `verus-examples:basic_failure` (translation is source-close; the current difference is Strata's `Sequence` indexing/frontend support in `external_span`)
 - `verus-examples:calc` (`calc!` steps lower to explicit assertion chains; the remaining mismatch is Strata's current `Sequence` frontend/indexing support plus nat/bv64 typing in the sequence-extensionality steps)
 - `verus-examples:rw2022_script` (prime testing with quantifiers/triggers, fibo with decreases)
 - `verus-examples:trigger_loops` (uninterpreted fns, multi-triggers, coercions; TODO: `choose`)
 - `vlir-tests:tests/LoopSimpleWithSpec` (loop with spec, recursive spec fn, coercions at call sites)
-- `verus-examples:imo_1988_6` (`[TRANS-return-comment]` only)
+- `verus-examples:guide/requires_ensures`
+- `verus-examples:guide/requires_ensures_edit`
+- `verus-examples:imo_1988_6`
 - `verus-examples:power_of_2` (Strata type error: `int` literals where `nat` expected)
 
 ## not faithful translation (45)
 - `verus-examples:datatypes` (`Box` erased to identity, `[TRANS-reveal-with-fuel]`, and loop/match lowering still not source-close enough)
 - `verus-examples:doubly_linked` (pointer-heavy translation not source-faithful yet)
-- `verus-examples:external` (`Ghost<int>` erased to plain `int`; `println!` in `external_body` fn not translated)
+- `verus-examples:external` (`Ghost<int>` erased to plain `int`; `println!` in `external_body` fn not translated; the `s >= n` precondition becomes `s >= bv64_to_int_u(n)` which cvc5 can't prove because `bv64_to_int_u` is uninterpreted — `[TRANS-coercion-uninterpreted]`)
 - `verus-examples:integers` (remaining non-faithful call-argument coercion shape)
 - `verus-examples:assert_by_compute` (`[TRANS-lambda-placeholder]` and `Compute_all_spec` stubs still affect sequence/range examples; nat/int literal typing still leaks into recursive nat functions such as `fib`)
-- `verus-examples:atomics` (`[TRANS-atomic-ghost-scaffolding]`: `struct_with_invariants!` / `atomic_with_ghost!` still lower to low-level `Invariant_*`, `Atomic_*`, and `assume` scaffolding; raw Core also currently hits `[MODEL-missing-types]` (`Atomic_ghost`, `Unit`))
+- `verus-examples:atomics` (`[TRANS-atomic-ghost-scaffolding]`: `struct_with_invariants!` / `atomic_with_ghost!` still lower to low-level `Invariant_*`, `Atomic_*`, and `assume` scaffolding; `[MODEL-missing-types]` (`Atomic_ghost`))
 - `verus-examples:multiset` (`broadcast use group_to_multiset_ensures` ignored; multiset extensionality still lowers to plain equality; `[TRANS-lambda-placeholder]` still affects the `sort_by` comparator)
 - `verus-examples:bitmap` (`[TRANS-lambda-placeholder]` in `u64_view`; `[TRANS-extensional-eq]` still expands source `=~=` and `assert_seqs_equal!`; and most of the `BitMap` API (`view`, `from`, `get_bit`, `set_bit`, `or`) is currently missing from emitted Core)
 - `verus-examples:bitvector_garbage_collection` (`[TRANS-lambda-placeholder]` in `bucket_view`; `[TRANS-extensional-eq]` still expands source `=~=` away to explicit formulas; raw Core also currently hits nat/int typing around `Seq_new`)
@@ -167,32 +162,32 @@ Additional counters (do not affect total):
 - `verus-examples:guide/bst_map` (`[TRANS-fuel-parameter-leakage]`: source `Map::empty`, `union_prefer_right`, and `insert` still lower to helper signatures with synthetic `Fuel` parameters)
 - `verus-examples:guide/bst_map_generic` (`[TRANS-fuel-parameter-leakage]`: source `Map::empty`, `union_prefer_right`, and `insert` still lower to helper signatures with synthetic `Fuel` parameters)
 - `verus-examples:guide/bst_map_type_invariant` (`[TRANS-fuel-parameter-leakage]`: source `Map::empty`, `union_prefer_right`, and `insert` still lower to helper signatures with synthetic `Fuel` parameters)
-- `verus-examples:guide/exec_attr` (`test_for_loop` still has `[TRANS-loop-helper-leakage]`, `[MODEL-unit]`, and `[TRANS-lambda-placeholder]` in the loop invariant; `proof_decl!` / `proof_with!` / `Ghost` / `Tracked` wrappers are flattened under `[TRANS-ghost-tracked-erasure]`)
+- `verus-examples:guide/exec_attr` (`test_for_loop` still has `[TRANS-lambda-placeholder]` in the loop invariant; `proof_decl!` / `proof_with!` / `Ghost` / `Tracked` wrappers are flattened under `[TRANS-ghost-tracked-erasure]`)
 - `verus-examples:guide/exec_spec_unverified` (`[TRANS-exec-spec-helper-leakage]`: the `exec_spec_unverified!` example lowers through internal `View_deep_view` / `exec_*` helper stubs and a distorted `Map int execPoint` representation rather than preserving the source macro structure)
 - `verus-examples:guide/exec_spec_verified` (`[TRANS-exec-spec-helper-leakage]`: the `exec_spec_verified!` example leaks internal `View_deep_view`, `View_V`, `Contrib_Exec_spec_*`, and slice/array helper stubs instead of source-like `deep_view` / `as_slice` reasoning)
 - `verus-examples:guide/external_trait_specs` (`[TRANS-trait-spec-resolution]`; raw Core also currently hits a bv64/int comparison mismatch in `test_hasher`)
-- `verus-examples:guide/higher_order_fns` (`[TRANS-exec-closure-scaffolding]`; raw Core also currently hits `[SURFACE-sequence-empty]` and `[MODEL-unit]` in the captured-closure example)
-- `verus-examples:guide/invariants` (`non_negative` still lowers its source `for` loop to raw iterator scaffolding with `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`; the source `=~=` assertion is expanded away under `[TRANS-extensional-eq]`; raw Core also still renders `return false` under `[TRANS-return-comment]`)
-- `verus-examples:guide/lib_examples` (`[TRANS-lambda-placeholder]` in returned/captured function values and collection constructors; raw Core also currently hits `[SURFACE-sequence-empty]` and helper leakage such as `Pervasive_set`; the current Vec translation itself is now the datatype-based path)
+- `verus-examples:guide/higher_order_fns` (`[TRANS-exec-closure-scaffolding]`; `[SURFACE-sequence-empty]` in the captured-closure example)
+- `verus-examples:guide/invariants` (the source `=~=` assertion is expanded away under `[TRANS-extensional-eq]`)
+- `verus-examples:guide/lib_examples` (`[TRANS-lambda-placeholder]` in returned/captured function values and collection constructors; `[SURFACE-sequence-empty]`; the current Vec translation itself is now the datatype-based path)
 - `verus-examples:guide/pervasive_example` (`s.len() == 5` still lowers under `[TRANS-seq-len-literal-typing]` to a nat/bv64 mismatch; raw Core otherwise looks source-close and then runs into current `Sequence` frontend/indexing support)
-- `verus-examples:guide/recursion` (`[TRANS-reveal-with-fuel]` in `test_triangle_reveal` / `test_triangle_assert_by`; raw Core also currently exposes `[TRANS-loop-helper-leakage]`, `[MODEL-unit]`, and `[TRANS-return-comment]` in the loop and early-return examples)
-- `verus-examples:mergesort` (`extend_from_idx` still has `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`; source `=~=` proof steps are flattened under `[TRANS-extensional-eq]`; the final `lemma_sorted_unique(..., |a, b| a <= b)` call still hits `[TRANS-lambda-placeholder]`)
-- `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; raw Core also currently hits `[SURFACE-sequence-empty]`)
+- `verus-examples:guide/recursion` (`[TRANS-reveal-with-fuel]` in `test_triangle_reveal` / `test_triangle_assert_by`)
+- `verus-examples:mergesort` (source `=~=` proof steps are flattened under `[TRANS-extensional-eq]`; the final `lemma_sorted_unique(..., |a, b| a <= b)` call still hits `[TRANS-lambda-placeholder]`)
+- `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; `[SURFACE-sequence-empty]`)
 - `verus-examples:modules` (`[TRANS-closed-visibility]`)
 - `verus-examples:recommends` (`[TRANS-reveal-with-fuel]` still strengthens the local proof step for `seq_max_int`; the recursive body also has `[TRANS-seq-len-literal-typing]`, and source `spec_affirm(...)` steps are erased from `some_predicate`)
 - `verus-examples:rfmig_script` (`[MODEL-missing-types]` still blocks `Simple_pptr`; the current Vec pieces now use the datatype-based path directly)
 - `verus-examples:rwlock_vstd` (`[TRANS-lambda-placeholder]` in the `Ghost(|v| ...)` lock invariant; raw Core also currently collapses `RwLock`/handle operations to undeclared model types under `[MODEL-missing-types]`)
-- `verus-examples:set_from_vec` (`set` extensionality still expands away under `[TRANS-extensional-eq]`; `contains` still lowers its labeled `for i in iter: ...` loop to raw iterator scaffolding with `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`)
-- `verus-examples:statics` (`[TRANS-atomic-ghost-scaffolding]`: the `Lazy` / `atomic_with_ghost!` encoding still lowers to low-level `Atomic_ghost_*`, `Invariant_*`, `Cell_*`, and `assume` scaffolding rather than source-like lazy-static structure; raw Core also currently hits `[MODEL-missing-types]` (`Cell`, `Atomic_ghost`, `Unit`))
-- `verus-examples:syntax` (`[TRANS-choose]` in `test_choose`; `[TRANS-ghost-tracked-erasure]`; `test_views` now uses the datatype-based Vec path directly; `[TRANS-broadcast-use]`; raw Core also currently hits `[MODEL-unit]`)
+- `verus-examples:set_from_vec` (`set` extensionality still expands away under `[TRANS-extensional-eq]`)
+- `verus-examples:statics` (`[TRANS-atomic-ghost-scaffolding]`: the `Lazy` / `atomic_with_ghost!` encoding still lowers to low-level `Atomic_ghost_*`, `Invariant_*`, `Cell_*`, and `assume` scaffolding rather than source-like lazy-static structure; `[MODEL-missing-types]` (`Cell`, `Atomic_ghost`))
+- `verus-examples:syntax` (`[TRANS-choose]` in `test_choose`; `[TRANS-ghost-tracked-erasure]`; `test_views` now uses the datatype-based Vec path directly; `[TRANS-broadcast-use]`)
 - `verus-examples:syntax_attr` (`#[verus_spec(with ...)]`, `proof!`, and tracked/ghost wrapper syntax are still flattened under `[TRANS-ghost-tracked-erasure]`; raw Core also currently hits Strata's polymorphic tuple-helper DDM panic)
 - `verus-examples:trait_for_fn` (`[TRANS-lambda-placeholder]`)
 - `verus-examples:test_expand_errors` (`[TRANS-hide]`, `[TRANS-reveal-with-fuel]`)
-- `verus-examples:thread` (`[TRANS-exec-closure-scaffolding]`; raw Core also currently hits `[MODEL-missing-types]` (`Thread`) and `[MODEL-unit]` through the closure requirement encoding)
+- `verus-examples:thread` (`[TRANS-exec-closure-scaffolding]`; `[MODEL-missing-types]` (`Thread`) through the closure requirement encoding)
 - `verus-examples:debug_expand` (`[TRANS-hide]`, `[TRANS-closed-visibility]`)
 - `verus-examples:recursion` (`[TRANS-reveal-with-fuel]`; Boole output now recovers the `for` loop shape, but the source-level fuel behavior is still not preserved)
-- `verus-examples:vectors` (`datatype Vec` path is now source-close; `pusher` still hits `[TRANS-lambda-placeholder]` and `[TRANS-extensional-eq]`, while `reverse` / `reverse_no_spinoff` still expose `[TRANS-loop-helper-leakage]` and `[MODEL-unit]`)
-- `vlir-tests:tests/mini_c` (`[TRANS-map-helper-typing]`: `Store = Map<Variable, Value>` still lowers `Map_insert` with a `state` receiver type; proof helper procedures also currently hit `[MODEL-unit]`)
+- `verus-examples:vectors` (`datatype Vec` path is now source-close; `pusher` still hits `[TRANS-lambda-placeholder]` and `[TRANS-extensional-eq]`)
+- `vlir-tests:tests/mini_c` (`[TRANS-map-helper-typing]`: `Store = Map<Variable, Value>` still lowers `Map_insert` with a `state` receiver type)
 
 ## others (18) [WIP]
 
@@ -288,24 +283,30 @@ Additional counters (do not affect total):
 - Affects: `verus-examples:modules`, `verus-examples:debug_expand`
 
 ### `[CORE-decreases]` `decreases` preservation
-- Loop measures are emitted in concrete `while ... decreases ...` syntax. The
-  Core AST `Stmt.loop` `measure : Option P.Expr` is populated faithfully.
-- Function/procedure-level `decreases` is not part of the semantic Core AST.
-  Verus-internal artifacts (`decrease%init*`, `CheckDecrease*`) are stripped
-  from bodies instead of being reintroduced as Core-only printer comments.
+- **Loop-level**: emitted in concrete `while ... decreases ...` /
+  `for ... decreases ...` syntax. Core's `Stmt.loop`'s `measure : Option
+  P.Expr` is populated faithfully; Boole's `for_to_by` / `for_down_to_by`
+  grammar currently has no measure slot, so for-loop `decreases` is dropped
+  on the Boole side (tracked upstream in our `add-for-loop-measure-clause`
+  branch). `while`-loop `decreases` works in both targets.
+- **Function/procedure-level `decreases`**: not part of either Core's or
+  Boole's procedure grammar. Verus-internal artifacts (`decrease%init*`,
+  `CheckDecrease*`) are stripped from bodies instead of leaking through.
 
-### `[TRANS-return-comment]` Early return rendered as comment
-- Verus SST encodes `return expr;` as `ret_var := expr; assume false;`.
-- We still encode return internally as
-  `ret_var := expr; assume [__return__]: false;`, but the local printer renders
-  it back as `// return expr;` (or `// return;`) for readability until Strata
-  grows native `return` support.
-- We currently treat this as faithful when it is the only remaining issue.
-- Affects: `vlir-tests:basic_failure`,
-  `verus-examples:guide/requires_ensures`,
-  `verus-examples:guide/requires_ensures_edit`,
-  `verus-examples:imo_1988_6`, `verus-examples:guide/invariants`, and
-  `verus-examples:set_from_vec`.
+### `[TRANS-return-comment]` Early return rendered as comment (Core-only)
+- This was a Core-pipeline-only workaround: Verus SST encodes `return expr;`
+  as `ret_var := expr; assume false;`, and the Core printer rendered the pair
+  back as `// return expr;` because Strata Core had no native return.
+- **Resolved for Boole**: Strata Boole has native `exit <ProcedureName>;`,
+  which the translator emits directly (see e.g.
+  `tests/BoolePrograms/verus-examples/imo_1988_6.lean`'s many
+  `exit is_perfect_square;` sites). No `// return` comments appear in any
+  Boole output today.
+- Still tracked here only as a raw-Core legacy note. For the previously
+  affected tests (`vlir-tests:basic_failure`,
+  `verus-examples:guide/requires_ensures{,_edit}`,
+  `verus-examples:imo_1988_6`, `verus-examples:guide/invariants`,
+  `verus-examples:set_from_vec`), the Boole output is faithful.
 
 ### `[TRANS-hastype-overflow]` `HasType` overflow guards dropped
 - Verus `HasType(U32, e)` assertions silently skipped in Core output.
@@ -342,6 +343,29 @@ Additional counters (do not affect total):
 - **Remaining gaps**: richer non-call contexts beyond plain variables
   (for example larger arithmetic expressions, projections, and other composite
   terms that still need result-side coercion insertion).
+
+### `[TRANS-coercion-uninterpreted]` Coercion functions emitted without semantics
+- Coercion helpers such as `bv64_to_int_u`, `bv8_to_bv64_u`, `bv16_to_int_u`,
+  `nat_to_int`, `int_to_nat`, and `int_to_bv64_u` are emitted as
+  declaration-only Boole functions (e.g. `function bv64_to_int_u (x : bv64) : int;`).
+  No body, no axiom set.
+- Consequence: cvc5 treats each as an arbitrary function, so any obligation
+  whose proof needs the coercion's value (`bv8_to_bv64_u(20) == 20`,
+  `bv64_to_int_u(15) == 15`, `bv16_to_int_u(i) >= 0`) is unprovable from the
+  declaration alone, even when the source-level reasoning is trivial.
+- Most visible after upstream Strata fixed earlier-pipeline typing/elaboration
+  errors: tests that previously stopped at a Strata-side type error now reach
+  the solver, where uninterpreted coercions become the binding constraint.
+- Two viable fixes:
+  - Translator-side: emit axioms alongside each declaration
+    (`assume forall x : bv64. 0 <= bv64_to_int_u(x) && bv64_to_int_u(x) < 2^64`,
+    `assume forall x : bv8. bv8_to_bv64_u(x) == ...`, etc.).
+  - Strata-side: add native bv↔int / nat↔int conversions with built-in
+    semantics so the translator can target them directly.
+- Affects: `verus-examples:bitvector_basic`, `verus-examples:external`,
+  `verus-examples:quantifiers`, `verus-examples:statements`,
+  and any test where the solver must reason about a value that flows
+  through a width-changing coercion.
 
 ### `[VERIFY-generic-typevar-ddm]` Strata still rejects some generic typed operations
 - The translator now emits faithful generic helper bodies such as
@@ -448,23 +472,31 @@ Additional counters (do not affect total):
   `verus-examples:guide/quants`, `vlir-tests:test_vstd`, and other
   sequence-heavy tests that otherwise look source-close.
 
-### `[MODEL-unit]` Missing Strata `Unit`
+### `[MODEL-unit]` Missing Strata `Unit` (Core-only)
 - Raw Core still leaks `Tuple_ctor_0(): Unit` in places where the Verus source
   did not mention a user-visible unit value.
-- Some occurrences are pure helper artifacts and should eventually be pruned;
-  other occurrences need future Strata surface/model support for unit.
-- Affects: `verus-examples:guide/exec_attr`, `verus-examples:mergesort`,
+- **Resolved for Boole**: `Tuple_ctor_0` does not appear in any current Boole
+  output. The translator either drops the unit value entirely (procedure
+  return is `()` modeled as no return slot) or rewrites the synthetic
+  `Tuple_ctor_0` away during normalization.
+- Still tracked as a raw-Core legacy note for the previously affected tests:
+  `verus-examples:guide/exec_attr`, `verus-examples:mergesort`,
   `verus-examples:set_from_vec`, `verus-examples:syntax`,
-  `vlir-tests:tests/mini_c`, `verus-examples:guide/invariants`
+  `vlir-tests:tests/mini_c`, `verus-examples:guide/invariants`.
 
-### `[TRANS-loop-helper-leakage]` Loop helper symbols leak into raw Core
+### `[TRANS-loop-helper-leakage]` Loop helper symbols leak into raw Core (Core-only)
 - Iterator-lowered loops still expose helper symbols such as
   `Pervasive_ghost_*`, `Pervasive_exec_invariant`, and `Pervasive_arbitrary`
   in raw Core output, even though they are translator scaffolding rather than
   source-level Verus syntax.
-- Affects: `verus-examples:guide/exec_attr`, `verus-examples:mergesort`,
+- **Resolved for Boole**: the translator filters these via
+  `isGhostPervasiveCallName` and the for-loop preamble live-set scan; no
+  `Pervasive_ghost_*` / `Pervasive_arbitrary` / `Pervasive_exec_invariant`
+  symbols appear in any current Boole output.
+- Still tracked as a raw-Core legacy note for the previously affected tests:
+  `verus-examples:guide/exec_attr`, `verus-examples:mergesort`,
   `verus-examples:set_from_vec`, `verus-examples:guide/invariants`,
-  `verus-examples:guide/higher_order_fns`
+  `verus-examples:guide/higher_order_fns`.
 
 ### `[MODEL-missing-types]` Missing Strata types
 - `nat` emitted as abstract type. Coercion functions declared as uninterpreted.

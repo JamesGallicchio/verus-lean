@@ -1466,7 +1466,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     let body := BooleDDM.Block.block default (ann allStmts.toArray)
     pure (specElts, body)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
-  pure (.command_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
+  pure (.boole_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
 
 private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
   let (elemName, elemTy, nName, nTy) ←
@@ -1578,7 +1578,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
       let body := BooleDDM.Block.block default (ann allStmts.toArray)
       pure (specElts, body)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
-  pure (.command_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
+  pure (.boole_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
 
 /-! ### Struct/Enum → BCmd -/
 
@@ -1690,7 +1690,7 @@ def funcCheckSstToBoole (env : VarEnv) (f : FuncCheckSst) : BuildM BCmd := do
     let body := BooleDDM.Block.block default (ann #[])
     pure (specElts, body)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
-  pure (.command_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
+  pure (.boole_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
 
 /-! ### Top-Level Declaration Translation -/
 
@@ -1896,7 +1896,8 @@ def cmdDeclName? : BCmd → Option String
   | .command_typedecl _ name _ => some name.val
   | .command_typesynonym _ name _ _ _ => some name.val
   | .command_datatypes _ _ => none  -- multiple names
-  | .command_procedure _ name _ _ _ _ _ => some name.val
+  | .boole_procedure _ name _ _ _ _ _ => some name.val
+  | .command_procedure _ name _ _ _ _ => some name.val
   | .command_axiom _ _ _ => none
   | .command_var _ bind => some (match bind with | .bind_mk _ name _ _ => name.val)
   | .command_distinct _ _ _ => none

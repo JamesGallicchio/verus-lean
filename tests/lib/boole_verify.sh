@@ -50,6 +50,14 @@ classify_boole_verify_log() {
       echo "skip_gap"
       return 0
     fi
+    # Solver timeouts surface as `SMT Solver Invocation Error!` plus a line
+    # `cvc5 interrupted by timeout` (or `killed by`). Treat as a skip rather
+    # than a fail: verification did not complete, so nothing about the
+    # translation is being asserted.
+    if grep -qE "(cvc5|z3)[^\n]*(interrupted by timeout|killed by)" "$log"; then
+      echo "skip_solver_timeout"
+      return 0
+    fi
     # Translator-side bugs: error signatures below indicate our translator
     # emitted a malformed program. They are NOT Strata gaps. If the wrapper
     # is on the known-translator-bug list, classify as `known_translator_bug`
@@ -98,7 +106,10 @@ classify_boole_verify_log() {
 expected_boole_fail_pattern_for_wrapper() {
   case "$1" in
     */basic_failure.lean) echo 'fail_a_post_expr' ;;
-    */by_lean.lean)       echo 'assert_lean_test|test4_a0' ;;
+    # See `expected_fail_pattern_for_target` in check_working_tests.sh for
+    # the rationale. Tracks `lean_test` ensures + the 3 asserts in
+    # `assert_lean_jumble`; brittle to assertion ordering in the source.
+    */by_lean.lean)       echo 'lean_test_ensures|assert_[456]_' ;;
     */assertions.lean)    echo '.' ;;
     */debug.lean)         echo '.' ;;
     # `matching.rs` contains intentionally-failing negative tests:

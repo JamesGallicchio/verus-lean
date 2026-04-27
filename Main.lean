@@ -64,7 +64,8 @@ private def collectJsonBundleFiles (target : System.FilePath) : IO (List System.
 private def booleCommandRank (cmd : Boole.Builder.BCmd) : Nat :=
   match cmd with
   | .command_fndef .. => 2
-  | .command_procedure _ _ _ _ _ _ bodyAnn => if bodyAnn.val.isSome then 2 else 1
+  | .boole_procedure _ _ _ _ _ _ bodyAnn => if bodyAnn.val.isSome then 2 else 1
+  | .command_procedure _ _ _ _ _ bodyAnn => if bodyAnn.val.isSome then 2 else 1
   | .command_typedecl .. => 2
   | .command_typesynonym .. => 2
   | .command_datatypes .. => 2

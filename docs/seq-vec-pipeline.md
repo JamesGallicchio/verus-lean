@@ -216,3 +216,88 @@ canonicalized by `stripImplSegment`, which removes `_Impl__N_` segments:
   as **function calls**, not bracket syntax (`s[i]`, `s[i := v]`).  Strata's
   DDM parser interprets bracket syntax as Map operations only.
 - Map select/update (`m[k]`, `m[k := v]`) use bracket syntax.
+
+## Design Notes & Open Trade-offs
+
+This section records design decisions and the reasoning behind them, so we
+don't relitigate them every time someone notices an asymmetry in the output.
+
+### `v.len()` dispatch: built-in vs prelude wrapper
+
+When the translator sees `v.len()` on a `Vec<T>`, it emits
+`Sequence.length(v)` directly (with a numeric coercion), bypassing the
+prelude's `Seq_len` wrapper. The dispatch happens at
+[`Translate.lean:655-666`](../VerusLean/VLIR/Boole/Translate.lean) under the
+`isVecLenSpecName || isVecLenExecName` branch.
+
+Consequence: the `Seq_len` declaration in `prelude/Seq.boole.st` is dead
+weight for tests that only call `v.len()` on Vec values (e.g. `demo_for`'s
+`find_max`, where `Seq_len` is declared but never referenced in the body).
+The prelude is still pulled in because `Seq_len` is in `seqTriggerNames`,
+even though no body will use it.
+
+**Why we keep this asymmetry**:
+- `Sequence.length(v) : int` is a Strata primitive cvc5 reasons about
+  natively. Going through `Seq_len(v) = int_to_nat(Sequence.length(v))`
+  introduces a `nat` round-trip via the abstract `nat` type, which erases
+  the integer-arithmetic axioms cvc5 has on `Sequence.length`.
+- Verus's `Vec::len() : usize` callers expect a `bv64`-shaped result for
+  comparisons/arithmetic. The translator inserts the cast at the call site
+  via `coerceNumeric`. Wrapping through `Seq_len` would compose
+  `nat → int → bv64`, which is two coercion fns chained for no semantic
+  win.
+
+**If we ever do switch**: this would only be safe once `nat` is a Strata
+primitive (or once `int_to_nat ∘ Sequence.length` is axiomatized to behave
+like `Sequence.length` on non-negative inputs). Until then, switching
+regresses tests that rely on cvc5's reasoning about `Sequence.length` as
+an integer.
+
+**Cheap interim cleanup**: remove `Seq_len` (and `Seq_lib_insert`) from
+[`seqTriggerNames`](../VerusLean/VLIR/Boole/Prelude.lean) so the prelude
+isn't pulled in by callers that only end up emitting `Sequence.length`.
+This isolates the prelude to tests that genuinely need its abstract
+higher-order declarations.
+
+### Per-function prelude gating
+
+Today the prelude is gated whole-file: any Seq trigger pulls in all 43
+lines of `Seq.boole.st`. We considered finer per-function gating (only
+emit `Seq_len` if `Seq_len` is referenced, etc.) but rejected it.
+
+**Cost**: ~150 lines of Lean in `Prelude.lean` plus a transitive-dependency
+graph (`Seq_len → int_to_nat → nat`, `Set_finite → Set`), built either by
+hand (brittle) or by parsing the prelude operations after `loadPrelude`.
+
+**Benefit**: ~25-30 lines of output reduction in Seq-using tests; zero
+benefit for tests that already get no prelude.
+
+**When it would pay off**:
+1. An unreferenced abstract decl (e.g. `Seq_lib_sort_by`'s higher-order
+   signature) trips a Strata-side error and breaks every Seq test.
+2. The prelude grows beyond ~100 lines.
+3. We want demo-quality minimal Boole output for documentation.
+
+**Decision**: don't build it now. Revisit when one of the forcing
+functions above appears.
+
+### Translation directness vs source faithfulness
+
+The general translator preference for Seq operations: when a Strata
+built-in is name-recognizable from the Verus call, emit the built-in
+directly. The prelude wrapper exists only as a fallback for
+unrecognized names and as a place to declare higher-order operations
+(`Seq_lib_map`, `Seq_lib_filter`, `Seq_lib_sort_by`, `Seq_new`,
+`Seq_lib_to_set`, `Set_finite`) that have no first-order built-in
+equivalent.
+
+Source-faithfulness loss from this choice: a `Seq_len(s)` call in source
+becomes `Sequence.length(s)` in output, and the wrapper's `nat` return
+type is replaced by an `int` with downstream coercion. The `nat`
+distinction is erased on the way down.
+
+This is the same class of erasure as Rust `let` vs `let mut` — recorded
+once in `tests/differential_status.md`'s preamble — where the target
+language's representation simply doesn't carry the source-level
+distinction. Verification semantics are preserved; lexical fidelity is
+not.

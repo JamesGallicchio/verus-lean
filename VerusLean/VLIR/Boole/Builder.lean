@@ -216,9 +216,9 @@ def coverStmt (label : String) (e : BExpr) : BStmt :=
 
 def callStmt (lhs : Array String) (pname : String) (args : Array BExpr) : BStmt :=
   if lhs.isEmpty then
-    .call_unit_statement default (ann pname) (ann args)
+    .call_statement default (ann pname) (ann (args.map (.callArgExpr default ·)))
   else
-    .call_statement default (ann (lhs.map ann)) (ann pname) (ann args)
+    .boole_call_statement default (ann (lhs.map ann)) (ann pname) (ann args)
 
 def blockStmt (label : String) (body : Array BStmt) : BStmt :=
   .block_statement default (ann label) (.block default (ann body))
