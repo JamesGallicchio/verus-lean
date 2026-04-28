@@ -179,6 +179,15 @@ def forallExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
 def existsExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
   if binds.isEmpty then body else .exists_unicode default (bindsToDeclList binds) body
 
+/-- Build `fun x : T, ... => body` using Strata Core's `lambda` op.
+
+    The body's return type slot is filled with `unknownTy`; Strata's
+    elaborator infers the concrete return type from `body`. With zero
+    binders the lambda would be vacuous, so we just return the body. -/
+def lambdaExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
+  if binds.isEmpty then body
+  else .lambda default unknownTy (bindsToDeclList binds) body
+
 /-! ## Statement constructors -/
 
 private def mkLabel (label : String) : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange :=

@@ -802,12 +802,10 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       let body' ← withScope do
         addBoundVars (vars.map Prod.fst).toArray
         expToBoole env (vars.reverse ++ bound) none body
-      -- Lambda is represented as a quantifier for now; Boole does not yet get
-      -- a source-faithful lambda node here.
       let binds ← vars.toArray.mapM (fun (v, ty) => do
         let ty' ← typToBooleType ty
         pure (sanitizeVarName v, ty'))
-      return forallExpr binds body'
+      return lambdaExpr binds body'
   | .MatchBlock _scrut body =>
     expToBoole env bound expected? body
   | .ArrayLiteral elems => do

@@ -29,7 +29,7 @@ Solver success is **not** used to classify faithfulness.
     `verus-examples:guide/exec_attr` (`Unit` / loop-helper artifacts in the
     current Core-shaped lowering),
     `verus-examples:vectors` (`datatype Vec` path is now source-close; the
-    remaining issues are `[TRANS-lambda-placeholder]`,
+    remaining issues are `[VERIFY-lambda-encoding]`,
     `[TRANS-extensional-eq]`, plus `Unit` / loop-helper artifacts in the
     reverse examples),
     `verus-examples:exec_termination_example` (residual iterator/ghost state),
@@ -147,46 +147,46 @@ Additional counters (do not affect total):
 - `verus-examples:doubly_linked` (pointer-heavy translation not source-faithful yet)
 - `verus-examples:external` (`Ghost<int>` erased to plain `int`; `println!` in `external_body` fn not translated; the `s >= n` precondition becomes `s >= bv64_to_int_u(n)` which cvc5 can't prove because `bv64_to_int_u` is uninterpreted — `[TRANS-coercion-uninterpreted]`)
 - `verus-examples:integers` (remaining non-faithful call-argument coercion shape)
-- `verus-examples:assert_by_compute` (`[TRANS-lambda-placeholder]` and `Compute_all_spec` stubs still affect sequence/range examples; nat/int literal typing still leaks into recursive nat functions such as `fib`)
+- `verus-examples:assert_by_compute` (`[VERIFY-lambda-encoding]` and `Compute_all_spec` stubs still affect sequence/range examples; nat/int literal typing still leaks into recursive nat functions such as `fib`)
 - `verus-examples:atomics` (`[TRANS-atomic-ghost-scaffolding]`: `struct_with_invariants!` / `atomic_with_ghost!` still lower to low-level `Invariant_*`, `Atomic_*`, and `assume` scaffolding; `[MODEL-missing-types]` (`Atomic_ghost`))
-- `verus-examples:multiset` (`broadcast use group_to_multiset_ensures` ignored; multiset extensionality still lowers to plain equality; `[TRANS-lambda-placeholder]` still affects the `sort_by` comparator)
-- `verus-examples:bitmap` (`[TRANS-lambda-placeholder]` in `u64_view`; `[TRANS-extensional-eq]` still expands source `=~=` and `assert_seqs_equal!`; and most of the `BitMap` API (`view`, `from`, `get_bit`, `set_bit`, `or`) is currently missing from emitted Core)
-- `verus-examples:bitvector_garbage_collection` (`[TRANS-lambda-placeholder]` in `bucket_view`; `[TRANS-extensional-eq]` still expands source `=~=` away to explicit formulas; raw Core also currently hits nat/int typing around `Seq_new`)
-- `vlir-tests:test_vstd` (`[TRANS-lambda-placeholder]` in `Set::new`, `Map::new`, and `Seq::new`)
-- `vlir-tests:maps` (`[TRANS-lambda-placeholder]` in `mk_map` lambdas; `[TRANS-higher-order-collection-stubs]` currently distorts `Set_mk_map`; raw Core map equalities are still emitted as plain `==` rather than source-like map extensional equality)
-- `vlir-tests:seqs` (`[TRANS-lambda-placeholder]` in `Seq::new`, `Seq::map`, `Seq::filter`, and `seq![x; n]`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; raw Core also currently hits `[SURFACE-sequence-empty]` and nat/int mismatches`)
-- `vlir-tests:sets` (`[TRANS-lambda-placeholder]` in `Set::new`, `Set::filter`, `Set::map`, `set_map`, and `fold`; `[TRANS-higher-order-collection-stubs]` distorts `Set_new`, `Set_filter`, `Set_lib_map`, and `Set_Fold_fold`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; `s.choose()` is currently just uninterpreted `Set_choose` without witness semantics`)
-- `verus-examples:guide/ext_equal` (`[TRANS-lambda-placeholder]`; direct `Seq`/`Set`/struct extensionality now lowers to explicit formulas, but raw Core still expands away source `=~=`/`=~~=` syntax and currently hits `[SURFACE-sequence-empty]`)
-- `verus-examples:extensionality` (`[TRANS-extensional-eq]` expands `assert_seqs_equal!`, `assert_maps_equal!`, and `assert_sets_equal!` into low-level proof scaffolding and explicit formulas; `[TRANS-lambda-placeholder]` and `[TRANS-higher-order-collection-stubs]` still affect `Map::total`, `Map::new`, and `Set::new`; raw Core also currently hits a Strata-side `Sequence` indexing type error in `are_equal`)
-- `verus-examples:guide/assert_by_compute` (`range_property` still uses uninterpreted `Compute_all_spec` plus `[TRANS-lambda-placeholder]`; nat/int literal typing still leaks into recursive nat functions such as `pow`)
+- `verus-examples:multiset` (`broadcast use group_to_multiset_ensures` ignored; multiset extensionality still lowers to plain equality; `[VERIFY-lambda-encoding]` still affects the `sort_by` comparator)
+- `verus-examples:bitmap` (`[VERIFY-lambda-encoding]` in `u64_view`; `[TRANS-extensional-eq]` still expands source `=~=` and `assert_seqs_equal!`; and most of the `BitMap` API (`view`, `from`, `get_bit`, `set_bit`, `or`) is currently missing from emitted Core)
+- `verus-examples:bitvector_garbage_collection` (`[VERIFY-lambda-encoding]` in `bucket_view`; `[TRANS-extensional-eq]` still expands source `=~=` away to explicit formulas; raw Core also currently hits nat/int typing around `Seq_new`)
+- `vlir-tests:test_vstd` (`[VERIFY-lambda-encoding]` in `Set::new`, `Map::new`, and `Seq::new`)
+- `vlir-tests:maps` (`[VERIFY-lambda-encoding]` in `mk_map` lambdas; `[TRANS-higher-order-collection-stubs]` currently distorts `Set_mk_map`; raw Core map equalities are still emitted as plain `==` rather than source-like map extensional equality)
+- `vlir-tests:seqs` (`[VERIFY-lambda-encoding]` in `Seq::new`, `Seq::map`, `Seq::filter`, and `seq![x; n]`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; raw Core also currently hits `[SURFACE-sequence-empty]` and nat/int mismatches`)
+- `vlir-tests:sets` (`[VERIFY-lambda-encoding]` in `Set::new`, `Set::filter`, `Set::map`, `set_map`, and `fold`; `[TRANS-higher-order-collection-stubs]` distorts `Set_new`, `Set_filter`, `Set_lib_map`, and `Set_Fold_fold`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; `s.choose()` is currently just uninterpreted `Set_choose` without witness semantics`)
+- `verus-examples:guide/ext_equal` (`[VERIFY-lambda-encoding]`; direct `Seq`/`Set`/struct extensionality now lowers to explicit formulas, but raw Core still expands away source `=~=`/`=~~=` syntax and currently hits `[SURFACE-sequence-empty]`)
+- `verus-examples:extensionality` (`[TRANS-extensional-eq]` expands `assert_seqs_equal!`, `assert_maps_equal!`, and `assert_sets_equal!` into low-level proof scaffolding and explicit formulas; `[VERIFY-lambda-encoding]` and `[TRANS-higher-order-collection-stubs]` still affect `Map::total`, `Map::new`, and `Set::new`; raw Core also currently hits a Strata-side `Sequence` indexing type error in `are_equal`)
+- `verus-examples:guide/assert_by_compute` (`range_property` still uses uninterpreted `Compute_all_spec` plus `[VERIFY-lambda-encoding]`; nat/int literal typing still leaks into recursive nat functions such as `pow`)
 - `verus-examples:guide/bst_map` (`[TRANS-fuel-parameter-leakage]`: source `Map::empty`, `union_prefer_right`, and `insert` still lower to helper signatures with synthetic `Fuel` parameters)
 - `verus-examples:guide/bst_map_generic` (`[TRANS-fuel-parameter-leakage]`: source `Map::empty`, `union_prefer_right`, and `insert` still lower to helper signatures with synthetic `Fuel` parameters)
 - `verus-examples:guide/bst_map_type_invariant` (`[TRANS-fuel-parameter-leakage]`: source `Map::empty`, `union_prefer_right`, and `insert` still lower to helper signatures with synthetic `Fuel` parameters)
-- `verus-examples:guide/exec_attr` (`test_for_loop` still has `[TRANS-lambda-placeholder]` in the loop invariant; `proof_decl!` / `proof_with!` / `Ghost` / `Tracked` wrappers are flattened under `[TRANS-ghost-tracked-erasure]`)
+- `verus-examples:guide/exec_attr` (`test_for_loop` still has `[VERIFY-lambda-encoding]` in the loop invariant; `proof_decl!` / `proof_with!` / `Ghost` / `Tracked` wrappers are flattened under `[TRANS-ghost-tracked-erasure]`)
 - `verus-examples:guide/exec_spec_unverified` (`[TRANS-exec-spec-helper-leakage]`: the `exec_spec_unverified!` example lowers through internal `View_deep_view` / `exec_*` helper stubs and a distorted `Map int execPoint` representation rather than preserving the source macro structure)
 - `verus-examples:guide/exec_spec_verified` (`[TRANS-exec-spec-helper-leakage]`: the `exec_spec_verified!` example leaks internal `View_deep_view`, `View_V`, `Contrib_Exec_spec_*`, and slice/array helper stubs instead of source-like `deep_view` / `as_slice` reasoning)
-- `verus-examples:guide/external_trait_specs` (`[TRANS-trait-spec-resolution]`; raw Core also currently hits a bv64/int comparison mismatch in `test_hasher`)
+- `verus-examples:guide/external_trait_specs` (`[TRANS-trait-unsupported]`; raw Core also currently hits a bv64/int comparison mismatch in `test_hasher`)
 - `verus-examples:guide/higher_order_fns` (`[TRANS-exec-closure-scaffolding]`; `[SURFACE-sequence-empty]` in the captured-closure example)
 - `verus-examples:guide/invariants` (the source `=~=` assertion is expanded away under `[TRANS-extensional-eq]`)
-- `verus-examples:guide/lib_examples` (`[TRANS-lambda-placeholder]` in returned/captured function values and collection constructors; `[SURFACE-sequence-empty]`; the current Vec translation itself is now the datatype-based path)
+- `verus-examples:guide/lib_examples` (`[VERIFY-lambda-encoding]` in returned/captured function values and collection constructors; `[SURFACE-sequence-empty]`; the current Vec translation itself is now the datatype-based path)
 - `verus-examples:guide/pervasive_example` (`s.len() == 5` still lowers under `[TRANS-seq-len-literal-typing]` to a nat/bv64 mismatch; raw Core otherwise looks source-close and then runs into current `Sequence` frontend/indexing support)
 - `verus-examples:guide/recursion` (`[TRANS-reveal-with-fuel]` in `test_triangle_reveal` / `test_triangle_assert_by`)
-- `verus-examples:mergesort` (source `=~=` proof steps are flattened under `[TRANS-extensional-eq]`; the final `lemma_sorted_unique(..., |a, b| a <= b)` call still hits `[TRANS-lambda-placeholder]`)
+- `verus-examples:mergesort` (source `=~=` proof steps are flattened under `[TRANS-extensional-eq]`; the final `lemma_sorted_unique(..., |a, b| a <= b)` call still hits `[VERIFY-lambda-encoding]`)
 - `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; `[SURFACE-sequence-empty]`)
 - `verus-examples:modules` (`[TRANS-closed-visibility]`)
 - `verus-examples:recommends` (`[TRANS-reveal-with-fuel]` still strengthens the local proof step for `seq_max_int`; the recursive body also has `[TRANS-seq-len-literal-typing]`, and source `spec_affirm(...)` steps are erased from `some_predicate`)
 - `verus-examples:rfmig_script` (`[MODEL-missing-types]` still blocks `Simple_pptr`; the current Vec pieces now use the datatype-based path directly)
-- `verus-examples:rwlock_vstd` (`[TRANS-lambda-placeholder]` in the `Ghost(|v| ...)` lock invariant; raw Core also currently collapses `RwLock`/handle operations to undeclared model types under `[MODEL-missing-types]`)
+- `verus-examples:rwlock_vstd` (`[VERIFY-lambda-encoding]` in the `Ghost(|v| ...)` lock invariant; raw Core also currently collapses `RwLock`/handle operations to undeclared model types under `[MODEL-missing-types]`)
 - `verus-examples:set_from_vec` (`set` extensionality still expands away under `[TRANS-extensional-eq]`)
 - `verus-examples:statics` (`[TRANS-atomic-ghost-scaffolding]`: the `Lazy` / `atomic_with_ghost!` encoding still lowers to low-level `Atomic_ghost_*`, `Invariant_*`, `Cell_*`, and `assume` scaffolding rather than source-like lazy-static structure; `[MODEL-missing-types]` (`Cell`, `Atomic_ghost`))
 - `verus-examples:syntax` (`[TRANS-choose]` in `test_choose`; `[TRANS-ghost-tracked-erasure]`; `test_views` now uses the datatype-based Vec path directly; `[TRANS-broadcast-use]`)
 - `verus-examples:syntax_attr` (`#[verus_spec(with ...)]`, `proof!`, and tracked/ghost wrapper syntax are still flattened under `[TRANS-ghost-tracked-erasure]`; raw Core also currently hits Strata's polymorphic tuple-helper DDM panic)
-- `verus-examples:trait_for_fn` (`[TRANS-lambda-placeholder]`)
+- `verus-examples:trait_for_fn` (`[TRANS-trait-unsupported]`: the `impl IntFn for spec_fn(int) -> int` body `self(x)` is dropped; `[VERIFY-lambda-encoding]` then blocks the call site `f.call_int(2)`)
 - `verus-examples:test_expand_errors` (`[TRANS-hide]`, `[TRANS-reveal-with-fuel]`)
 - `verus-examples:thread` (`[TRANS-exec-closure-scaffolding]`; `[MODEL-missing-types]` (`Thread`) through the closure requirement encoding)
 - `verus-examples:debug_expand` (`[TRANS-hide]`, `[TRANS-closed-visibility]`)
 - `verus-examples:recursion` (`[TRANS-reveal-with-fuel]`; Boole output now recovers the `for` loop shape, but the source-level fuel behavior is still not preserved)
-- `verus-examples:vectors` (`datatype Vec` path is now source-close; `pusher` still hits `[TRANS-lambda-placeholder]` and `[TRANS-extensional-eq]`)
+- `verus-examples:vectors` (`datatype Vec` path is now source-close; `pusher` still hits `[VERIFY-lambda-encoding]` and `[TRANS-extensional-eq]`)
 - `vlir-tests:tests/mini_c` (`[TRANS-map-helper-typing]`: `Store = Map<Variable, Value>` still lowers `Map_insert` with a `state` receiver type)
 
 ## others (18) [WIP]
@@ -377,22 +377,24 @@ Additional counters (do not affect total):
 - Affects: `vlir-tests:FindMax`, `vlir-tests:demo_while`,
   `vlir-tests:demo_while_loop_isolation`, `verus-examples:generics`
 
-### `[TRANS-lambda-placeholder]` Lambda / function-value placeholder
-- `Unsupported.lambda` is the current fallback for real lambda abstractions and
-  function-valued terms in the lowered Core AST.
-- This is broader than collection constructors: it also affects plain
-  `spec_fn` values, comparators passed to library functions, ghost predicates,
-  and function values stored in structs/sequences.
-- `choose` placeholders are tracked separately below and are not counted here.
-- Affects: `verus-examples:assert_by_compute`,
-  `verus-examples:bitmap`, `verus-examples:bitvector_garbage_collection`,
+### `[VERIFY-lambda-encoding]` Strata SMT encoder rejects lambdas
+- Per Strata PR #1049, the Boole/Core grammar accepts `fun x : T => body`
+  and `(f)(x)` syntax, but the SMT encoder does not yet encode lambda
+  abstractions in function bodies, lambda-typed parameters, or bare
+  lambda expressions: it emits `Unsupported expression:
+  Strata.BooleDDM.Expr.lambda` instead.
+- This is a Strata-side gap, not a translator defect; it caps the
+  verifier outcome of every test that flows a closure into a spec-fn
+  body or higher-order combinator.
+- Affects: `verus-examples:assert_by_compute`, `verus-examples:bitmap`,
+  `verus-examples:bitvector_garbage_collection`,
   `verus-examples:extensionality`, `verus-examples:guide/assert_by_compute`,
   `verus-examples:guide/exec_attr`, `verus-examples:guide/ext_equal`,
   `verus-examples:guide/lib_examples`, `verus-examples:mergesort`,
   `verus-examples:multiset`, `verus-examples:rwlock_vstd`,
   `verus-examples:trait_for_fn`, `verus-examples:vectors`,
-  `vlir-tests:maps`, `vlir-tests:seqs`, `vlir-tests:sets`,
-  `vlir-tests:test_vstd`
+  `vlir-tests:crypto_noref`, `vlir-tests:maps`, `vlir-tests:seqs`,
+  `vlir-tests:sets`, `vlir-tests:test_vstd`.
 
 ### `[TRANS-exec-spec-helper-leakage]` `exec_spec_*` examples still lower through internal helper stubs
 - `exec_spec_unverified!` and `exec_spec_verified!` examples currently expose
@@ -428,11 +430,29 @@ Additional counters (do not affect total):
   closure syntax.
 - Affects: `verus-examples:guide/higher_order_fns`, `verus-examples:thread`
 
-### `[TRANS-trait-spec-resolution]` External trait-spec symbols not preserved cleanly across modules
-- External trait specifications and their helper symbols are not resolved
-  cleanly across module boundaries yet, so uses of those specs can degrade into
-  low-level helper names and mismatched coercion shapes.
-- Affects: `verus-examples:guide/external_trait_specs`
+### `[TRANS-trait-unsupported]` Traits not faithfully translated
+- The translator does not yet support user-defined `trait`s in any
+  source-faithful way. Concrete losses observable today:
+  - **Trait method bodies dropped.** A `spec fn`/`proof fn` body inside an
+    `impl Trait for T` is discarded; the translated method is emitted as
+    a bodyless function. Example: in
+    [`tests/BoolePrograms/verus-examples/trait_for_fn.lean`](BoolePrograms/verus-examples/trait_for_fn.lean),
+    the `IntFn for spec_fn(int) -> int` impl body `self(x)` is lost —
+    `IntFn_call_int<Self_>` is declared without semantics.
+  - **Dispatch is uninterpreted.** Calls like `f.call_int(2)` lower to
+    `IntFn_call_int(f, 2)` but the function has no body, so cvc5 cannot
+    relate it to any specific impl.
+  - **External trait specs degrade across modules.** Uses of
+    `#[verifier::external_trait_specification]` produce low-level helper
+    names and mismatched coercion shapes when crossed across module
+    boundaries (the case previously tracked separately).
+- Treat any test that defines a `trait` or relies on trait-method
+  dispatch as currently unfaithful, regardless of which specific
+  manifestation surfaces in its output.
+- Affects: `verus-examples:trait_for_fn`,
+  `verus-examples:guide/external_trait_specs`, `verus-examples:traits`
+  (commented out of `working_tests.txt` as a known issue), and any test
+  whose source uses user-defined traits incidentally.
 
 ### `[TRANS-ghost-tracked-erasure]` Ghost/tracked/proof wrapper syntax flattened away
 - Verus surface constructs such as `proof!`, `proof_decl!`, `proof_with!`,
