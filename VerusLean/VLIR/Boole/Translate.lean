@@ -280,7 +280,8 @@ private partial def comparisonPrelude
   let argTy? := chooseBitArgTyForCmp lhs rhs lhsInfo? rhsInfo?
   let fallbackToInt := argTy?.isNone &&
     (lhsInfo?.isSome || rhsInfo?.isSome ||
-     lhsNum? == some .nat || rhsNum? == some .nat)
+     lhsNum? == some .nat || rhsNum? == some .nat ||
+     lhsNum? == some .int || rhsNum? == some .int)
   if fallbackToInt then
     -- Pass `expected = some .Int` so operands (e.g. `n + 1` with
     -- `n : usize`) emit int arithmetic instead of bv arithmetic that

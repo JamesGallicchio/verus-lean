@@ -267,10 +267,8 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
     (boundType? bound x <|> env.get? x) |>.bind bitInfoOfTyp
   | .Call fn _ args =>
     let name := CallFun.name fn
-    if isSeqLenSpecName name then
+    if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
       none
-    else if isVecLenSpecName name || isVecLenExecName name then
-      some (usizeBitWidth, false)
     else if isVecIndexSpecName name || isVecIndexExecName name then
       match args with
       | vArg :: _ =>
@@ -303,10 +301,8 @@ partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Opti
   | .Var x => boundType? bound x <|> env.get? x
   | .Call fn _ args =>
     let name := CallFun.name fn
-    if isSeqLenSpecName name then
-      some .Nat
-    else if isVecLenSpecName name || isVecLenExecName name then
-      some (.UInt usizeBitWidth)
+    if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
+      some .Int
     else if isVecIndexSpecName name || isVecIndexExecName name then
       match args with
       | vArg :: _ =>
