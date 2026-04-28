@@ -124,7 +124,7 @@ private partial def refsOfExp : Exp → List String
     let ownRefs :=
       -- `vec2seq` branch: Vec operations collapse to Sequence.* ops,
       -- so their refs trigger the Sequence prelude (not the Vec prelude).
-      if isVecLenSpecName fname || isVecLenExecName fname then ["Sequence"]
+      if isSeqLenSpecName fname || isVecLenSpecName fname || isVecLenExecName fname then ["Sequence"]
       else if isVecIndexSpecName fname || isVecIndexExecName fname then ["Sequence"]
       else if isViewName fname then ["Sequence"]
       else if seqDirectBuiltinNames.contains fnameStr then ["Sequence"]
@@ -169,7 +169,7 @@ private partial def refsOfStm : Stm → List String
     let ownRefs :=
       -- `vec2seq` branch: Vec operations collapse to Sequence.* ops,
       -- so their refs trigger the Sequence prelude (not the Vec prelude).
-      if isVecLenSpecName fname || isVecLenExecName fname then ["Sequence"]
+      if isSeqLenSpecName fname || isVecLenSpecName fname || isVecLenExecName fname then ["Sequence"]
       else if isVecIndexSpecName fname || isVecIndexExecName fname then ["Sequence"]
       else if isViewName fname then ["Sequence"]
       else if seqDirectBuiltinNames.contains fnameStr then ["Sequence"]

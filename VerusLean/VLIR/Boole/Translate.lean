@@ -71,7 +71,7 @@ private def someLabel (s : String) : Strata.Ann (Option (BooleDDM.Label SourceRa
     semantics. This is the translator-side view of library-shape names —
     kept here so `Normalize.lean` stays independent of `Names.lean`. -/
 private def isPureBooleBuiltinCallName (fn : Ident) : Bool :=
-  isViewName fn || isVecLenSpecName fn || isVecLenExecName fn
+  isViewName fn || isSeqLenSpecName fn || isVecLenSpecName fn || isVecLenExecName fn
     || isVecIndexSpecName fn || isVecIndexExecName fn
     || isBoxNewName fn || isArrayAsSliceName fn || isSliceIntoVecName fn
     || isCloneExecName fn
@@ -261,7 +261,7 @@ private partial def exprHonorsExpectedInt : Exp → Bool
   | .MatchBlock _ body => exprHonorsExpectedInt body
   | .Call fn _ _ =>
     let name := CallFun.name fn
-    isVecLenSpecName name || isVecLenExecName name
+    isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name
   | _ => false
 
 mutual
@@ -652,18 +652,22 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
             else expToBoole env bound expected? arg
           | none => expToBoole env bound expected? arg
       | _ => mkFallback
-    else if isVecLenSpecName fname || isVecLenExecName fname then
-      -- `v.len()` → `Sequence.length(v)`, then cast to bv64 so callers
-      -- that treat the result as `usize` (e.g. comparisons) still see
-      -- the bv64 shape `inferBitInfo` reports for Vec_len.
+    else if isSeqLenSpecName fname || isVecLenSpecName fname || isVecLenExecName fname then
+      -- Length operations all lower to `Sequence.length(...)`, an int.
+      -- The leaf default is `int`; we coerce only when the surrounding
+      -- context demands a specific non-int numeric type.  This avoids
+      -- needless `int_to_bv64_u` round-trips at comparison sites where
+      -- both operands are int-friendly.  `Vec::len()` may receive a
+      -- `view(v)` argument that needs unwrapping; `Seq::len()` does not.
       match argsFiltered with
       | [arg] =>
-        let seqExpr ← expToBoole env bound none (unwrapViewCall arg)
+        let arg' := if isSeqLenSpecName fname then arg else unwrapViewCall arg
+        let seqExpr ← expToBoole env bound none arg'
         let intLen := seqLength seqExpr
         match expected?.bind numKindOfTyp? with
-        | some .int => pure intLen
         | some .nat => coerceNumeric (some .int) (some .nat) intLen
-        | _ => coerceNumeric (some .int) (some (.bv usizeBitWidth false)) intLen
+        | some (.bv w s) => coerceNumeric (some .int) (some (.bv w s)) intLen
+        | _ => pure intLen
       | _ => mkFallback
     else if isVecIndexSpecName fname || isVecIndexExecName fname then
       -- `v[i]` → `Sequence.select(v, i_as_int)`. Strata's
@@ -1048,7 +1052,8 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         | none =>
           let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
           return [setStmt (sanitizeVarName rootName) updatedRoot]
-      else if isViewName fnName || isVecLenSpecName fnName || isVecLenExecName fnName
+      else if isViewName fnName || isSeqLenSpecName fnName
+            || isVecLenSpecName fnName || isVecLenExecName fnName
             || isVecIndexSpecName fnName || isVecIndexExecName fnName then
         let rhs' ← expToBooleFlat env (some lhsTy) rhs
         match lvalueVarName? lhs with

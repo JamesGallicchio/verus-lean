@@ -131,7 +131,11 @@ def isVecTypeName (name : Ident) : Bool :=
 
 def isVecLenSpecName (name : Ident) : Bool :=
   let s := name.toString
-  s.endsWith "spec_vec_len" || s.endsWith "Seq.len" || s.endsWith "seq.len"
+  s.endsWith "spec_vec_len"
+
+def isSeqLenSpecName (name : Ident) : Bool :=
+  let s := name.toString
+  s.endsWith "Seq.len" || s.endsWith "seq.len"
 
 def isVecLenExecName (name : Ident) : Bool :=
   let s := name.toString
