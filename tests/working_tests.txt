@@ -1,0 +1,56 @@
+# Stable tests that currently generate valid Boole output end-to-end.
+#
+# vlir-tests (local test files)
+tests/VerusFiles/basic_failure.rs
+tests/VerusFiles/binder_cast_regressions.rs
+tests/VerusFiles/by_lean.rs
+tests/VerusFiles/crypto_vec.rs
+tests/VerusFiles/demo.rs
+tests/VerusFiles/demo_for.rs
+tests/VerusFiles/demo_while.rs
+tests/VerusFiles/demo_while_loop_isolation.rs
+tests/VerusFiles/FindMax.rs
+tests/VerusFiles/LoopSimple.rs
+tests/VerusFiles/matching.rs
+tests/VerusFiles/mutual_recursion.rs
+tests/VerusFiles/proof_fn.rs
+tests/VerusFiles/recursion.rs
+tests/VerusFiles/test_opaque_reveal.rs
+tests/VerusFiles/test_requires.rs
+tests/VerusFiles/test_specfn.rs
+tests/adopted_rust_verify_test/integer_ring.rs
+#
+# verus/examples
+../verus/examples/adts_eq.rs
+../verus/examples/assertions.rs
+../verus/examples/assorted_demo.rs
+../verus/examples/bitvector_basic.rs
+../verus/examples/bitvector_equivalence.rs
+../verus/examples/debug.rs
+../verus/examples/external.rs
+../verus/examples/fun_ext.rs
+../verus/examples/generics.rs
+../verus/examples/imo_1988_6.rs
+../verus/examples/modules.rs
+../verus/examples/quantifiers.rs
+../verus/examples/statements.rs
+../verus/examples/structural.rs
+../verus/examples/syntax_attr.rs
+../verus/examples/test.rs
+#
+# verus/examples/guide
+../verus/examples/guide/calc.rs
+../verus/examples/guide/datatypes.rs
+../verus/examples/guide/equality.rs
+../verus/examples/guide/getting_started.rs
+../verus/examples/guide/nonlinear_bitvec.rs
+../verus/examples/guide/opaque.rs
+../verus/examples/guide/overflow.rs
+../verus/examples/guide/recursion.rs
+../verus/examples/guide/references.rs
+../verus/examples/guide/requires_ensures.rs
+../verus/examples/guide/requires_ensures_edit.rs
+#
+# generate Boole but have known issues
+# ../verus/examples/playground.rs  -- mutable reference not faithfully represented
+# ../verus/examples/traits.rs  -- type-check error on generic traits

@@ -484,6 +484,34 @@ Additional counters (do not affect total):
   represented as well-typed map helpers in the output.
 - Affects: `vlir-tests:tests/mini_c`
 
+### `[TRANS-for-loop-empty-range]` For-loop `to` bound underflows on empty ranges
+- The translator (and `synthesizeVecFromElemBody`) lowers Verus's exclusive
+  range `0..n` to Boole's inclusive `for i := 0 to n-1`. The subtraction is
+  done in `bv64` (e.g. `int_to_bv64_u(Sequence.length(text)) - bv{64}(1)`),
+  which underflows to `2^64 - 1` when `n == 0`.
+- Boole's `for ... to limit` is inclusive, so a limit of `bv{64}(2^64 - 1)`
+  would attempt up to `2^64` iterations — silently divergent rather than
+  the empty iteration the source intends.
+- Today this is masked because callers typically `requires len > 0` or the
+  surrounding spec guarantees non-empty input, so the `len == 0` path is
+  unreachable in practice. There is no test that exercises the empty-range
+  case end-to-end.
+- Three viable fixes, in order of cheapness:
+  - **Use an exclusive-bound for-loop syntax** if Strata Boole exposes one
+    (`for i := 0 < limit` style); cheapest, deterministic.
+  - **Guard the loop**: emit `if n > 0 { for i := 0 to n - 1 { ... } }` at
+    every for-loop reconstruction site (and in `synthesizeVecFromElemBody`).
+  - **Axiomatize the coercion**: orthogonal — doesn't fix the divergence,
+    just makes it provably stuck rather than silently wrong.
+- Choice between `int_to_bv64_u(n) - bv{64}(1)` (current) and
+  `int_to_bv64_u(n - 1)` is solver-side: bv subtraction is more concrete
+  for cvc5; int subtraction goes through an extra uninterpreted-coercion
+  layer. Current form is preferred until the empty-range guard is in place.
+- Affects: every test that uses a for-loop reconstruction or
+  `Vec_from_elem`. Concrete instance: `vlir-tests:crypto_noref`'s
+  `encrypt`/`decrypt` loops at `for i : bv64 := bv{64}(0) to
+  int_to_bv64_u(Sequence.length(text)) - bv{64}(1)`.
+
 ### `[SURFACE-sequence-empty]` `Sequence.empty` as intended future syntax
 - `Sequence.empty` is now emitted intentionally as future-facing Strata syntax.
 - This is treated as faithful translation and a current Strata frontend gap,

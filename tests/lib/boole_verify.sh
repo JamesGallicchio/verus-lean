@@ -28,7 +28,12 @@ classify_boole_verify_log() {
   local known_translator_bug_pattern="${4:-}"
   # Lean elaboration errors: skip_sequence > skip_gap > known_translator_bug > fail
   if [ "$rc" -ne 0 ] || grep -q "error:" "$log"; then
-    if grep -qE "Sequence|Strata\\.BooleDDM\\.Expr\\.seq_|Unsupported expression: .*seq_" "$log"; then
+    # Match only the two concrete signatures that mean "Strata is missing
+    # Sequence support". The bare `Sequence` token is too broad: Strata's
+    # type-checking errors print the full builtin operator list as a hint
+    # (containing `Sequence.length`, `Sequence.empty`, etc.), so any
+    # type-check failure would be miscategorized as a Sequence skip.
+    if grep -qE "Unsupported Boole type: Strata\\.BooleDDM\\.BooleType\\.Sequence|Unknown expr identifier Sequence\\.empty" "$log"; then
       echo "skip_sequence"
       return 0
     fi
