@@ -122,43 +122,47 @@ add_rs_files_from_dir() {
   done < <(find "$dir" -maxdepth 1 -type f -name '*.rs' | sort)
 }
 
-for suite in "${selected_suites[@]}"; do
-  case "$suite" in
-    vlir-tests)
-      add_rs_files_from_dir "$VERUSFILES_DIR"
-      add_rs_files_from_dir "$ADOPTED_RVT_DIR"
-      ;;
-    verus-examples)
-      add_rs_files_from_dir "$VERUS_DIR/examples"
-      add_rs_files_from_dir "$VERUS_DIR/examples/guide"
-      ;;
-    rust-verify-generated)
-      if [ ! -f "$RVT_CURATED_LIST" ]; then
-        echo "Missing rust-verify-generated list: $RVT_CURATED_LIST"
-        exit 1
-      fi
-      while IFS= read -r line; do
-        case "$line" in ""|\#*) continue ;; esac
-        if [ -f "$line" ]; then
-          targets+=("$line")
-        elif [ -f "$ROOT_DIR/$line" ]; then
-          targets+=("$ROOT_DIR/$line")
+if [ ${#selected_suites[@]} -gt 0 ]; then
+  for suite in "${selected_suites[@]}"; do
+    case "$suite" in
+      vlir-tests)
+        add_rs_files_from_dir "$VERUSFILES_DIR"
+        add_rs_files_from_dir "$ADOPTED_RVT_DIR"
+        ;;
+      verus-examples)
+        add_rs_files_from_dir "$VERUS_DIR/examples"
+        add_rs_files_from_dir "$VERUS_DIR/examples/guide"
+        ;;
+      rust-verify-generated)
+        if [ ! -f "$RVT_CURATED_LIST" ]; then
+          echo "Missing rust-verify-generated list: $RVT_CURATED_LIST"
+          exit 1
         fi
-      done < "$RVT_CURATED_LIST"
-      ;;
-  esac
-done
+        while IFS= read -r line; do
+          case "$line" in ""|\#*) continue ;; esac
+          if [ -f "$line" ]; then
+            targets+=("$line")
+          elif [ -f "$ROOT_DIR/$line" ]; then
+            targets+=("$ROOT_DIR/$line")
+          fi
+        done < "$RVT_CURATED_LIST"
+        ;;
+    esac
+  done
+fi
 
-for example in "${requested_examples[@]}"; do
-  if [ -f "$example" ]; then
-    targets+=("$example")
-  elif [ -f "$ROOT_DIR/$example" ]; then
-    targets+=("$ROOT_DIR/$example")
-  else
-    echo "Missing target: $example"
-    exit 1
-  fi
-done
+if [ ${#requested_examples[@]} -gt 0 ]; then
+  for example in "${requested_examples[@]}"; do
+    if [ -f "$example" ]; then
+      targets+=("$example")
+    elif [ -f "$ROOT_DIR/$example" ]; then
+      targets+=("$ROOT_DIR/$example")
+    else
+      echo "Missing target: $example"
+      exit 1
+    fi
+  done
+fi
 
 if [ ${#targets[@]} -eq 0 ]; then
   echo "No targets selected."
@@ -210,7 +214,11 @@ for target in "${targets[@]}"; do
 
   log="$(mktemp "$REGRESSION_LOGS_DIR/run.XXXXXX.log")"
   set +e
-  (cd "$ROOT_DIR" && ./tests/run_tests.sh --boole "${verbose_flag[@]}" "$target") >"$log" 2>&1
+  if $verbose; then
+    (cd "$ROOT_DIR" && ./tests/run_tests.sh --boole --verbose "$target") >"$log" 2>&1
+  else
+    (cd "$ROOT_DIR" && ./tests/run_tests.sh --boole "$target") >"$log" 2>&1
+  fi
   rc=$?
   set -e
   if $verbose; then
