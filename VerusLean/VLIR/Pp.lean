@@ -37,7 +37,10 @@ def Typ.pp (ty : Typ) : String :=
   | .SInt w => s!"Int{w}"
   | .Char => "Char"
   | .StrSlice => "String"
-  | .Array ty => s!"Array ({ty.pp})"
+  | .Array ty len? =>
+    match len? with
+    | some n => s!"Array ({ty.pp}; {n})"
+    | none => s!"Array ({ty.pp})"
   | .TypParam i => i
   | .SpecFn params ret =>
     if params.length > 0 then

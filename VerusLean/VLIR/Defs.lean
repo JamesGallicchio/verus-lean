@@ -103,7 +103,10 @@ inductive Typ where
   | SInt (width : Nat)    /- Signed fixed-width integers      -/
   | Char
   | StrSlice
-  | Array (t : Typ)       /- Array, ignore length in Rust     -/
+  | Array (t : Typ) (len : Option Nat)
+      /- Rust array/slice storage. `some n` preserves `[T; n]`; `none`
+         represents unsized slice-like storage whose length is a value-level
+         property rather than part of the type. -/
   | TypParam (i : String)  /- Type parameter. For example, `α` in `List α`. -/
   | SpecFn (params : List Typ) (ret : Typ)
   | Decorated (dec : TypDecoration) (ty : Typ)
@@ -623,7 +626,20 @@ def Typ.decEq (t₁ t₂ : Typ) : Decidable (t₁ = t₂) := by
     | isFalse ht₁, _ => simp [ht₁]; exact instDecidableFalse
     | _, isFalse ht₂ => simp [ht₂]; exact instDecidableFalse
   -- Array
-  · exact Typ.decEq _ _
+  · rename_i t₁ len₁ t₂ len₂
+    match Typ.decEq t₁ t₂ with
+    | isTrue ht =>
+      by_cases hlen : len₁ = len₂
+      · cases ht
+        cases hlen
+        exact isTrue ⟨rfl, rfl⟩
+      · apply isFalse
+        intro h
+        exact hlen h.2
+    | isFalse ht =>
+      apply isFalse
+      intro h
+      exact ht h.1
   -- SpecFn
   . rename_i p₁ r₁ p₂ r₂
     match Typ.decListEq p₁ p₂, Typ.decEq r₁ r₂ with
@@ -672,7 +688,7 @@ theorem Typ.sizeOf_lt_of_mem (i : Ident) (params : List Typ)
   done
 
 def Typ.height : Typ → _root_.Nat
-  | .Array ty => 1 + ty.height
+  | .Array ty _ => 1 + ty.height
   | .Struct _ params
   | .Enum _ params => 1 + params.attach.foldl (init := 0) (λ acc ⟨ty, _⟩ => max acc ty.height)
   | _ => 1

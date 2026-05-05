@@ -95,7 +95,7 @@ def needsVecPrelude (referencedNames : List String) : Bool :=
 
 private def refsOfTyp : Typ → List String
   | .Empty | .Unit | .Bool | .Int | .Nat | .UInt _ | .SInt _ | .Char | .StrSlice => []
-  | .Array t => refsOfTyp t
+  | .Array t _ => refsOfTyp t
   | .Tuple t1 t2 => (refsOfTyp t1 ++ refsOfTyp t2).eraseDups
   | .TypParam _ => []
   | .SpecFn params ret => ((params.flatMap refsOfTyp) ++ refsOfTyp ret).eraseDups

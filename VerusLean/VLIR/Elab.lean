@@ -70,7 +70,7 @@ def Typ.toTerm (ty : Typ) : CoreM Term := do
   | .SInt _ => `(BitVec 32)
   | .Char => return mkIdent ``_root_.Char
   | .StrSlice => return mkIdent ``_root_.String
-  | .Array t => do
+  | .Array t _ => do
     let t ← t.toTerm
     `($ArrayIdent $t)
   | .TypParam name =>

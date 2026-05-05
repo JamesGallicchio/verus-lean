@@ -126,9 +126,19 @@ def seqElemTyp? : Typ → Option Typ
   | _ => none
 
 def arrayElemTyp? : Typ → Option Typ
-  | .Array elem => some elem
+  | .Array elem _ => some elem
   | .Decorated _ ty => arrayElemTyp? ty
   | _ => none
+
+def arrayLen? : Typ → Option Nat
+  | .Array _ len? => len?
+  | .Decorated _ ty => arrayLen? ty
+  | _ => none
+
+def isFixedArrayTyp : Typ → Bool
+  | .Array _ (some _) => true
+  | .Decorated _ ty => isFixedArrayTyp ty
+  | _ => false
 
 def setElemTyp? : Typ → Option Typ
   | .Struct name params =>
@@ -273,7 +283,11 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
   | .Call fn _ args =>
     let name := CallFun.name fn
     if isSliceLenSpecName name || isSliceLenExecName name then
-      some (usizeBitWidth, false)
+      -- `slice::len` lowers to `Sequence.length(slice)` (int) at the
+      -- call site, same as `Vec::len` / `Seq::len`.  Returning `none`
+      -- here lets `comparisonPrelude` correctly fall back to int when
+      -- the other operand is bv (e.g. `k < blocks.len()` with `k : usize`).
+      none
     else if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
       none
     else if isVecIndexSpecName name || isVecIndexExecName name then
@@ -309,7 +323,8 @@ partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Opti
   | .Call fn _ args =>
     let name := CallFun.name fn
     if isSliceLenSpecName name || isSliceLenExecName name then
-      some (.UInt usizeBitWidth)
+      -- `slice::len` lowers to `Sequence.length(slice)` (int).
+      some .Int
     else if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
       some .Int
     else if isVecIndexSpecName name || isVecIndexExecName name then

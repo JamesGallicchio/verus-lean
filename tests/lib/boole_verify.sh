@@ -171,8 +171,10 @@ run_boole_verify() {
     known_translator_bug_pattern="$(known_translator_bug_pattern_for_wrapper "$lean_file")"
   fi
   verify_log="$(mktemp)"
+  set +e
   (cd "$STRATA_DIR" && lake env lean "$lean_file") >"$verify_log" 2>&1
   rc=$?
+  set -e
   if [ "$output_mode" = "full" ] || [ "$verbose" = "true" ]; then
     cat "$verify_log"
   fi

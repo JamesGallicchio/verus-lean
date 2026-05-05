@@ -36,8 +36,9 @@ inductive SupportDecl where
       references `Tuple`, which itself is only available after the
       `.tuple` support decl is emitted. -/
   | seqZipWith
-  /-- Abstract array-fill helper used for Rust `[x; N]` values when arrays
-      are modeled as maps from integer indices to elements. -/
+  /-- Abstract fallback helper for Rust `[x; n]` values when no fixed
+      compile-time length is available at the call site. Fixed `[x; N]`
+      arrays lower to concrete `Sequence.build` chains instead. -/
   | arrayFill
   deriving DecidableEq, Repr
 

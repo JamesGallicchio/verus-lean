@@ -131,9 +131,12 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
     if isSupportedBvWidth w then pure (bvTy w) else pure intTy
   | .Char => pure intTy
   | .StrSlice => pure strTy
-  | .Array t => do
+  | .Array t _len? => do
     let elemTy ← typToBooleType t
-    pure (mapTy intTy elemTy)
+    -- Preserve `len?` in VLIR (`Typ.Array`) for future contracts, but the
+    -- current Boole model lowers both fixed arrays and slices to plain
+    -- `Sequence T`.
+    pure (seqTy elemTy)
   | .TypParam name => do
     let idx ← resolveFreeVar (sanitizeIdent name)
     pure (fvarTy idx)
@@ -272,15 +275,23 @@ private def arrayFillExpr (elem : BExpr) : BuildM BExpr := do
   let fillIdx ← resolveFreeVar "Array_array_fill_for_copy_types"
   pure (Bld.app (Bld.fvar fillIdx) elem)
 
-private def arrayLiteralMapExpr (elems : List BExpr) : BuildM BExpr := do
-  match elems with
-  | [] =>
-    let litIdx ← resolveFreeVar "Array_literal_0"
-    pure (Bld.fvar litIdx)
-  | first :: _ =>
-    let base ← arrayFillExpr first
-    elems.zipIdx.foldlM (init := base) (fun acc (elem, i) =>
-      pure (mapSet acc (intConst (Int.ofNat i)) elem))
+private def seqEmptyExpr : BuildM BExpr := do
+  pure (Bld.fvar (← resolveFreeVar "Sequence.empty"))
+
+private def seqBuildExpr (seq elem : BExpr) : BuildM BExpr := do
+  pure (Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.build")) [seq, elem])
+
+private def seqLiteralExpr (elems : List BExpr) : BuildM BExpr := do
+  elems.foldlM (fun acc elem => seqBuildExpr acc elem) (← seqEmptyExpr)
+
+private def seqRepeatExpr (len : Nat) (elem : BExpr) : BuildM BExpr := do
+  (List.range len).foldlM (fun acc _ => seqBuildExpr acc elem) (← seqEmptyExpr)
+
+private def arrayFillOrRepeatExpr (expected? : Option Typ) (elem : BExpr) : BuildM BExpr := do
+  match expected?.bind arrayLen? with
+  | some len =>
+    seqRepeatExpr len elem
+  | none => arrayFillExpr elem
 
 mutual
 
@@ -657,14 +668,14 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let arrayExpr ← expToBoole env bound none arrayArg
         let rawIdx ← expToBoole env bound none indexArg
         let intIdx ← coerceNumeric (inferNumKind env bound indexArg) (some .int) rawIdx
-        pure (mapGet arrayExpr intIdx)
+        pure (Bld.seqSelect arrayExpr intIdx)
       | _ => mkFallback
     else if isArrayFillForCopyTypesName fname then
       match argsFiltered with
       | [elemArg] =>
         let elemExpected? := expected?.bind arrayElemTyp?
         let elemExpr ← expToBoole env bound elemExpected? elemArg
-        arrayFillExpr elemExpr
+        arrayFillOrRepeatExpr expected? elemExpr
       | _ => mkFallback
     else if isWrappingAddName fname then
       -- `wrapping_add` is a procedure call only at the surface; bv-add
@@ -690,12 +701,18 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         | none => mkFallback
       | _ => mkFallback
     else if isSliceLenSpecName fname || isSliceLenExecName fname then
+      -- Slices are translated as `Sequence T`, so `slice.len()` lowers
+      -- directly to `Sequence.length(slice)` (returning int) — no need for
+      -- an uninterpreted `Slice_spec_slice_len` helper.  The exec-side
+      -- `Slice_len` procedure stub becomes dead after this inlining and is
+      -- dropped via `isVec2SeqDroppedDecl`; the spec-side
+      -- `vstd::slice::spec_slice_len` is unreferenced after this and is
+      -- dropped by `pruneUnreferencedVstdSpecs`.
       match argsFiltered with
       | [sliceArg] =>
         let sliceExpr ← expToBoole env bound none sliceArg
-        let lenIdx ← resolveFreeVar "Slice_spec_slice_len"
-        let lenExpr := Bld.app (Bld.fvar lenIdx) sliceExpr
-        coerceNumeric (some (.bv usizeBitWidth false)) (expected?.bind numKindOfTyp?) lenExpr
+        let intLen := seqLength sliceExpr
+        coerceNumeric (some .int) (expected?.bind numKindOfTyp?) intLen
       | _ => mkFallback
     else if isSliceIndexGetName fname then
       match argsFiltered with
@@ -703,7 +720,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let sliceExpr ← expToBoole env bound none sliceArg
         let rawIdx ← expToBoole env bound none indexArg
         let intIdx ← coerceNumeric (inferNumKind env bound indexArg) (some .int) rawIdx
-        pure (mapGet sliceExpr intIdx)
+        pure (Bld.seqSelect sliceExpr intIdx)
       | _ => mkFallback
     else if isViewName fname then
       match argsFiltered with
@@ -895,13 +912,9 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         none
     let args ← elems.mapM (expToBoole env bound elemExpected?)
     if expected?.map isSeqTyp |>.getD false then
-      -- Lower `seq![a, b, c]` to Sequence.empty/Sequence.build chain
-      let seqEmptyIdx ← resolveFreeVar "Sequence.empty"
-      let seqBuildIdx ← resolveFreeVar "Sequence.build"
-      return args.foldl (init := Bld.fvar seqEmptyIdx) (fun acc arg =>
-        Bld.appN (Bld.fvar seqBuildIdx) [acc, arg])
+      seqLiteralExpr args
     else if expected?.bind arrayElemTyp? |>.isSome then
-      arrayLiteralMapExpr args
+      seqLiteralExpr args
     else do
       let litIdx ← resolveFreeVar s!"Array_literal_{elems.length}"
       return Bld.appN (Bld.fvar litIdx) args
@@ -1019,7 +1032,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           let valueExpr ← expToBoole env [] none valueArg
           let updated ←
             match arrayElemTyp? containerTy with
-            | some _ => pure (mapSet containerExpr intIdx valueExpr)
+            | some _ => pure (Bld.seqUpdate containerExpr intIdx valueExpr)
             | none =>
               let updateIdx ← resolveFreeVar "Sequence.update"
               pure (Bld.appN (Bld.fvar updateIdx) [containerExpr, intIdx, valueExpr])
@@ -1915,19 +1928,6 @@ private def declsHaveForLoop (decls : List Decl) : Bool :=
 
 def declsToBooleProgram (decls : List Decl) :
     BuildM (Array BCmd) := do
-  -- Drop Verus-synthesised impl-block accessor spec fns that aren't
-  -- transitively referenced by any user-level decl. Eager emission of every
-  -- `Impl__N_arrow_*` bloats the output and slows verification; most tests
-  -- use only a handful.
-  let decls := pruneUnreferencedImpls decls
-  let decls := pruneUnreferencedVstdSpecs decls
-  let noParamFns := collectNoParamFnNamesFromDecls decls
-  let projLayouts := buildProjLayouts decls
-  let mutArgMap := collectMutArgMapFromDecls decls
-  let sfMap := collectSpecFns decls
-  let env := buildEnv decls noParamFns sfMap
-  -- Detect whether any for-loop will be recovered
-  let hasForLoop := declsHaveForLoop decls
   -- `vec2seq` branch: Verus emits stub `proc Vec_*` / `proc Slice_into_vec`
   -- wrappers (and a few other Vec-named procedures) to cover the Rust Vec
   -- surface — `Vec_new`, `Vec_len`, `Vec_push`, `Vec_from_elem`,
@@ -1935,8 +1935,8 @@ def declsToBooleProgram (decls : List Decl) :
   -- to the corresponding `Sequence.*` op at the call site (see the
   -- `isVecLenSpecName` / `isVecIndexSpecName` / `isViewName` handlers
   -- in `expToBoole`), those stub declarations are never invoked. Their
-  -- specs also frequently mix `Map int T` (array) and `Sequence T` in
-  -- ways that no longer typecheck under vec2seq. Drop them here so the
+  -- specs are now redundant with the direct `Sequence.*` lowering and can
+  -- leave dead symbols behind. Drop them here so the
   -- output has no residual `Vec`-named symbols.
   let isVec2SeqDroppedDecl (d : Decl) : Bool :=
     -- Match on the sanitized (identToBoole) name, not the raw path, so
@@ -1952,12 +1952,33 @@ def declsToBooleProgram (decls : List Decl) :
         || n == "Boxed_box_new"
         || n == "Array_array_as_slice"
         || n == "Num_wrapping_add"
+        || n == "Slice_len"
+        || n == "Slice_slice_index_get"
     | none => false
+  -- Drop the inlined-at-callsite stubs *before* the reference-based prunes
+  -- below.  Otherwise their (about-to-be-dropped) `ensures` clauses pin
+  -- vstd spec fns that nothing else references — e.g. `Slice_len`'s
+  -- ensures references `Slice_spec_slice_len`, keeping it alive after
+  -- `pruneUnreferencedVstdSpecs` even though every real call to
+  -- `slice.len()` lowers directly to `Sequence.length(slice)`.
+  let decls := decls.filter (fun d => !isVec2SeqDroppedDecl d)
+  -- Drop Verus-synthesised impl-block accessor spec fns that aren't
+  -- transitively referenced by any user-level decl. Eager emission of every
+  -- `Impl__N_arrow_*` bloats the output and slows verification; most tests
+  -- use only a handful.
+  let decls := pruneUnreferencedImpls decls
+  let decls := pruneUnreferencedVstdSpecs decls
+  let noParamFns := collectNoParamFnNamesFromDecls decls
+  let projLayouts := buildProjLayouts decls
+  let mutArgMap := collectMutArgMapFromDecls decls
+  let sfMap := collectSpecFns decls
+  let env := buildEnv decls noParamFns sfMap
+  -- Detect whether any for-loop will be recovered
+  let hasForLoop := declsHaveForLoop decls
   -- When for-loop recovery is active, skip translating iterator scaffolding declarations
   let filteredDecls := decls.filter fun d =>
     let name := declPrimaryName d
-    !isVec2SeqDroppedDecl d &&
-      !(hasForLoop && isForLoopScaffoldingDecl name)
+    !(hasForLoop && isForLoopScaffoldingDecl name)
   -- Translate user declarations first to discover which support names are needed
   let mut userCmds : Array BCmd := #[]
   for d in filteredDecls do

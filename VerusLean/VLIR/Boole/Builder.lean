@@ -43,7 +43,7 @@ def bvTy (w : Nat) : BType :=
   | _  => panic! s!"bvTy: unsupported bitvector width {w} (expected 1|8|16|32|64); \
     callers must filter via Coercions.isSupportedBvWidth"
 
-def mapTy (key val : BType) : BType := .Map default val key
+def mapTy (key val : BType) : BType := .Map default key val
 def seqTy (elem : BType) : BType := .Sequence default elem
 def arrowTy (dom cod : BType) : BType := .arrow default dom cod
 def tvarTy (name : String) : BType := .tvar default name
@@ -153,6 +153,8 @@ def mapSet (m k v : BExpr) : BExpr := .map_set default unknownTy unknownTy m k v
 
 /-- Sequence length. -/
 def seqLength (s : BExpr) : BExpr := .seq_length default unknownTy s
+def seqSelect (s i : BExpr) : BExpr := .seq_select default unknownTy s i
+def seqUpdate (s i v : BExpr) : BExpr := .seq_update default unknownTy s i v
 
 /-- Old expression (procedure pre-state). -/
 def old (e : BExpr) : BExpr := .old default unknownTy e

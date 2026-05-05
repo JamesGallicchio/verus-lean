@@ -261,8 +261,7 @@ to repeat them.
 - `vlir-tests:mini_c` (mirrored from `verus/tests/mini_c.rs` into `tests/VerusFiles/`; generates Boole but emits malformed tuple projection `Tuple.._2` while lowering match tuple temporaries — translator-side malformed-output bug)
 - `vlir-tests:seqs` (`[VERIFY-lambda-encoding]` in `Seq::new`, `Seq::map`, `Seq::filter`, and `seq![x; n]`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; raw Core also currently hits `[SURFACE-sequence-empty]` and nat/int mismatches`)
 - `vlir-tests:sets` (`[VERIFY-lambda-encoding]` in `Set::new`, `Set::filter`, `Set::map`, `set_map`, and `fold`; `[TRANS-higher-order-collection-stubs]` distorts `Set_new`, `Set_filter`, `Set_lib_map`, and `Set_Fold_fold`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; `s.choose()` is currently just uninterpreted `Set_choose` without witness semantics`)
-- `vlir-tests:test_array` (translator emits `Array_literal_3` symbol that is undeclared; array-literal lowering is not yet wired in Boole — needs a translator-side encoding for fixed-size array literals)
-- `vlir-tests:test_vstd` (`[VERIFY-lambda-encoding]` in `Set_new(fun i => ...)`, `Map_new(fun i => ..., fun i => ...)`, `Seq_new(5, fun i => ...)`; same `Array_literal_<N>` undeclared-symbol issue as `test_array` for fixed-size array literals)
+- `vlir-tests:test_vstd` (`[VERIFY-lambda-encoding]` in `Set_new(fun i => ...)`, `Map_new(fun i => ..., fun i => ...)`, `Seq_new(5, fun i => ...)`; fixed-size array literals now lower to concrete `Sequence.empty`/`Sequence.build` chains)
 
 ## Gap Index
 

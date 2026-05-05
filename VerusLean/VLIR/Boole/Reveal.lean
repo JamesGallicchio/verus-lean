@@ -35,7 +35,7 @@ open VerusLean.Boole.Names
 partial def typTypeVars : Typ → List String
   | .TypParam n => [sanitizeIdent n]
   | .Tuple t1 t2 => (typTypeVars t1 ++ typTypeVars t2).eraseDups
-  | .Array t => typTypeVars t
+  | .Array t _ => typTypeVars t
   | .SpecFn ps ret => ((ps.flatMap typTypeVars) ++ typTypeVars ret).eraseDups
   | .Decorated _ t => typTypeVars t
   | .Struct _ ps => (ps.flatMap typTypeVars).eraseDups

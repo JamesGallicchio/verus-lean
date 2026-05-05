@@ -107,7 +107,7 @@ private def mkArrayFillDecl : BuildM BCmd := do
     BooleDDM.Binding.mkBinding default (ann "value") (BooleDDM.TypeP.expr tTy)
   let inputBindings :=
     BooleDDM.Bindings.mkBindings default (ann #[input])
-  let outputTy : BType := mapTy intTy tTy
+  let outputTy : BType := seqTy tTy
   pure (.command_fndecl default (ann fname) typeArgs inputBindings outputTy)
 
 def supportDeclToCommand (lowerType : TypeLowerer) (need : SupportDecl) :

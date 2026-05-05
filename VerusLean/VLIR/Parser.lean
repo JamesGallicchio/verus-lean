@@ -320,6 +320,37 @@ def TypDecoration.fromJson (j : Json) (ty : Typ) : m Typ := do
   | "ConstPtr" => return .Decorated .ConstPtr ty
   | _ => throw s!"TypDecoration.fromJson: Expected one of \{ Never, Ref, MutRef, Box, Rc, Arc, Ghost, Tracked }, got {j}"
 
+private def constIntNatFromJson? (j : Json) : Option Nat :=
+  match j.getObjVal? "ConstInt" with
+  | .error _ => none
+  | .ok v =>
+    match v.getArr? with
+    | .error _ => none
+    | .ok arr =>
+      match arr[0]?, arr[1]? with
+      | some signJson, some limbsJson =>
+        match signJson with
+        | Json.num signNum =>
+          if signNum.exponent != 0 then none else
+          match signNum.mantissa with
+          | 0 => some 0
+          | 1 =>
+            match limbsJson.getArr? with
+            | .error _ => none
+            | .ok limbs =>
+              let base : Nat := 4294967296
+              let rec go (i : Nat) (weight acc : Nat) : Option Nat :=
+                if h : i < limbs.size then
+                  match limbs[i].getNat? with
+                  | .ok limb => go (i + 1) (weight * base) (acc + limb * weight)
+                  | .error _ => none
+                else
+                  some acc
+              go 0 1 0
+          | _ => none
+        | _ => none
+      | _, _ => none
+
 partial def Typ.fromJson (j : Json) : m Typ := do
   match j.getStr? with
   | .ok "Bool" => return .Bool
@@ -341,18 +372,19 @@ partial def Typ.fromJson (j : Json) : m Typ := do
           let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
           let elemTys ← arr[1].getArrM
           if h : elemTys.size ≥ 1 then
-            return .Array (← Typ.fromJson elemTys[0])
+            return .Array (← Typ.fromJson elemTys[0]) none
           else
             throw s!"slice primitive missing element type: {obj}"
         | .ok "Global" => return .AirNamed "Global"
         | .ok "Array" =>
-          -- In Verus, arrays are specified by their type and length
-          -- We drop the length requirement (for now TODO)
-          -- This type is in the first element of the array in the first index of `t`
+          -- In Verus, arrays are specified by their element type and length.
+          -- Preserve literal const lengths in VLIR so Boole lowering can keep
+          -- `[T; N]` distinct from `[T; M]`.
           let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
           let ⟨arrTyp, _⟩ ← arr[1].getArrWithSizeGeM 2
           let typ ← Typ.fromJson arrTyp[0]
-          return .Array typ
+          let len? := arrTyp[1]?.bind constIntNatFromJson?
+          return .Array typ len?
         | _ => throw s!"unsupported primitive type: {j}"
       | none => throw s!"error, json: {obj}"
 
