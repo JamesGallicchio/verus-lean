@@ -276,8 +276,18 @@ def pathedNameFromJson (j : Json) (pathKey : String := "path") : m Ident := do
   let name := segments.foldl (init := ident) (fun acc name =>
     let nameCap := name.capitalize
     -- skip the middle capitalized name segment if we have a Vstd name
-    if isVstd && (name = nameCap || name.contains '%') then
+    if isVstd && name = nameCap then
       acc
+    else if isVstd && name.contains '%' then
+      -- A `%` in a vstd segment marks a Verus-internal suffix
+      -- (e.g. `len%returns_clause_autospec` denotes the autospec view
+      -- of the exec function `len`).  Keep the prefix before `%` so the
+      -- autospec resolves to the same identifier as the underlying
+      -- function.  Internal impl path segments such as `impl&%0` remain
+      -- path scaffolding and should still be skipped.
+      let head := (name.splitOn "%").headD ""
+      if head.isEmpty || head.contains '&' then acc
+      else Lean.Name.str acc head.capitalize
     else
       Lean.Name.str acc nameCap)
 
@@ -1524,7 +1534,17 @@ private def recursiveCasesIdxHintFromTermCheck
 
 def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
   let name ← pathedNameFromNameJson j
-  if isVstdName name then return none else
+  -- Drop vstd spec fns that carry a body — they're vstd-internal helpers
+  -- whose translations we don't want to import.  Uninterpreted vstd spec
+  -- fns (`spec_axioms: null` in the JSON) are kept so they become plain
+  -- function declarations: exec wrappers emitted from `core::*::impl&%0::*`
+  -- routinely reference them in their `ensures` clauses (e.g. `Slice_len`'s
+  -- ensures names `Slice_spec_slice_len`, lowered from
+  -- `vstd::slice::spec_slice_len`).  Without this, Strata fails with
+  -- `Unknown variable Slice_spec_slice_len` at the wrapper boundary.
+  if isVstdName name then
+    let hasBody := (Lean.Json.getObjValByPath j ["axioms", "spec_axioms", "body_exp"]).toOption.isSome
+    if hasBody then return none
   let args ← fnParseArgs j
   let argNames := args.map Prod.fst
 
@@ -1851,7 +1871,12 @@ def datatypeFromJson (j : Json) : VParser (Option Decl) := do
     let typeParams ← typeParamsFromJson j
     return some <| Decl.struct <| Struct.mk name typeParams []
   | "External" =>
-    return none
+    -- Preserve external datatypes as abstract Boole types.  Some executable
+    -- scaffolding that survives translation (for example unrecovered slice
+    -- iterators) still refers to these nominal types even though Verus does
+    -- not expose constructors for them.
+    let enum ← Enum.fromJson j
+    return some (Decl.enum enum)
   | _ => throw s!"Unsupported datatype: {dtType}"
 
 

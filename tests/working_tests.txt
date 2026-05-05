@@ -4,14 +4,16 @@
 tests/VerusFiles/basic_failure.rs
 tests/VerusFiles/binder_cast_regressions.rs
 tests/VerusFiles/by_lean.rs
-tests/VerusFiles/crypto_vec.rs
+tests/VerusFiles/crypto_noref.rs
 tests/VerusFiles/demo.rs
 tests/VerusFiles/demo_for.rs
 tests/VerusFiles/demo_while.rs
 tests/VerusFiles/demo_while_loop_isolation.rs
 tests/VerusFiles/FindMax.rs
 tests/VerusFiles/LoopSimple.rs
+tests/VerusFiles/LoopSimpleWithSpec.rs
 tests/VerusFiles/matching.rs
+tests/VerusFiles/mini_c.rs
 tests/VerusFiles/mutual_recursion.rs
 tests/VerusFiles/proof_fn.rs
 tests/VerusFiles/recursion.rs

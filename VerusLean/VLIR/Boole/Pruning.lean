@@ -127,4 +127,76 @@ def pruneUnreferencedImpls (decls : List Decl) : List Decl :=
       | none => true
     else true)
 
+/-- Identify vstd spec fns that came in as uninterpreted (`spec_axioms: null`
+    in the JSON) — these are kept after parsing because exec wrappers can
+    name them in their `ensures` clauses (e.g. `Slice_spec_slice_len` is
+    referenced from `Slice_len`'s ensures, lowered from
+    `vstd::slice::spec_slice_len`). Ones that nothing else references should
+    still be dropped so they don't leak declarations like
+    `Pervasive_exec_invariant` that mention vstd-private types
+    (`Pervasive_ExecIter`) we don't translate. -/
+def declIsVstdUninterpretedSpec : Decl → Bool
+  | .specFn f =>
+    f.body.isNone &&
+      (let h := Ident.head f.name; h == "Vstd" || h == "vstd")
+  | _ => false
+
+/-- `Pervasive_*` helpers (e.g. `Pervasive_arbitrary`,
+    `Pervasive_exec_invariant`, `Pervasive_ghost_*`) are auto-synthesized
+    by Verus into for-loop measure/invariant clauses.  The translator's
+    for-loop recovery strips those clauses from the emitted Boole — but the
+    references survive in the IR long enough for `declRefs` to see them.
+    Drop their declarations unconditionally so we don't leak dangling
+    references to vstd-private types like `Pervasive_ExecIter`. -/
+private def isPervasiveScaffoldingBooleName (n : String) : Bool :=
+  n.startsWith "Pervasive_"
+
+/-- A vstd spec fn whose calls are all inlined at the call site by
+    `expToBoole` (matched by `isPureBooleBuiltinCallName`).  Examples:
+    `view`, `Seq.len`, `Vec.len`, `Vec.index`, `cloned`, `Box::new`,
+    `Array::array_as_slice`, `Slice::into_vec`, `Clone::clone`,
+    `Array::array_index_get`, `Array::array_fill_for_copy_types`.
+
+    Keeping declarations for these would leak return/input type references
+    to vstd-private types like `View_V` that we don't translate, since the
+    declarations are never actually used in the emitted Boole. -/
+def declCallIsInlinedAtCallSite : Decl → Bool
+  | .specFn f =>
+    isViewName f.name || isSeqLenSpecName f.name || isVecLenSpecName f.name ||
+      isVecLenExecName f.name || isVecIndexSpecName f.name ||
+      isVecIndexExecName f.name || isClonedName f.name || isBoxNewName f.name ||
+      isArrayAsSliceName f.name || isSliceIntoVecName f.name ||
+      isCloneExecName f.name || isArrayIndexGetName f.name ||
+      isArrayFillForCopyTypesName f.name
+  | _ => false
+
+/-- Drop vstd uninterpreted spec fns that no other decl references.  Verus
+    pre-inlines autospec wrappers (e.g. `len%returns_clause_autospec`'s body
+    `spec_slice_len(slice)` is already substituted into the exec ensures
+    before export), so a single-pass reference scan over non-vstd-uninterpreted
+    decls is sufficient — no transitive closure through specfn bodies needed.
+
+    Two categories are dropped unconditionally even when they appear
+    referenced:
+      * `Pervasive_*` scaffolding helpers — their references live inside
+        for-loop measure/invariant clauses that the translator strips.
+      * Helpers whose calls are inlined at the call site (`view`, `Seq.len`,
+        etc.) — their declarations are never actually used in the emitted
+        Boole, but their type signatures would leak references to
+        vstd-private associated types like `View_V`. -/
+def pruneUnreferencedVstdSpecs (decls : List Decl) : List Decl :=
+  let referenced :=
+    (decls.filter (fun d => !declIsVstdUninterpretedSpec d)).flatMap declRefs
+  let referencedSet := referenced.eraseDups
+  decls.filter (fun d =>
+    if declIsVstdUninterpretedSpec d then
+      if declCallIsInlinedAtCallSite d then false
+      else
+        match declName? d with
+        | some n =>
+          if isPervasiveScaffoldingBooleName n then false
+          else referencedSet.contains n
+        | none => false
+    else true)
+
 end VerusLean.Boole.Pruning

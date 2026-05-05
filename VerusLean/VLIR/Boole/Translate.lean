@@ -73,8 +73,10 @@ private def someLabel (s : String) : Strata.Ann (Option (BooleDDM.Label SourceRa
 private def isPureBooleBuiltinCallName (fn : Ident) : Bool :=
   isViewName fn || isSeqLenSpecName fn || isVecLenSpecName fn || isVecLenExecName fn
     || isVecIndexSpecName fn || isVecIndexExecName fn
+    || isArrayIndexGetName fn || isArrayFillForCopyTypesName fn
+    || isSliceLenSpecName fn || isSliceLenExecName fn || isSliceIndexGetName fn
     || isBoxNewName fn || isArrayAsSliceName fn || isSliceIntoVecName fn
-    || isCloneExecName fn
+    || isCloneExecName fn || isWrappingAddName fn
 
 /-! ## Environment Helpers -/
 
@@ -261,8 +263,24 @@ private partial def exprHonorsExpectedInt : Exp → Bool
   | .MatchBlock _ body => exprHonorsExpectedInt body
   | .Call fn _ _ =>
     let name := CallFun.name fn
-    isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name
+    isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name ||
+      isSliceLenSpecName name || isSliceLenExecName name || isWrappingAddName name
   | _ => false
+
+private def arrayFillExpr (elem : BExpr) : BuildM BExpr := do
+  requireSupport .arrayFill
+  let fillIdx ← resolveFreeVar "Array_array_fill_for_copy_types"
+  pure (Bld.app (Bld.fvar fillIdx) elem)
+
+private def arrayLiteralMapExpr (elems : List BExpr) : BuildM BExpr := do
+  match elems with
+  | [] =>
+    let litIdx ← resolveFreeVar "Array_literal_0"
+    pure (Bld.fvar litIdx)
+  | first :: _ =>
+    let base ← arrayFillExpr first
+    elems.zipIdx.foldlM (init := base) (fun acc (elem, i) =>
+      pure (mapSet acc (intConst (Int.ofNat i)) elem))
 
 mutual
 
@@ -633,6 +651,60 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       match argsFiltered with
       | [arg] => expToBoole env bound expected? arg
       | _ => mkFallback
+    else if isArrayIndexGetName fname then
+      match argsFiltered with
+      | [arrayArg, indexArg] =>
+        let arrayExpr ← expToBoole env bound none arrayArg
+        let rawIdx ← expToBoole env bound none indexArg
+        let intIdx ← coerceNumeric (inferNumKind env bound indexArg) (some .int) rawIdx
+        pure (mapGet arrayExpr intIdx)
+      | _ => mkFallback
+    else if isArrayFillForCopyTypesName fname then
+      match argsFiltered with
+      | [elemArg] =>
+        let elemExpected? := expected?.bind arrayElemTyp?
+        let elemExpr ← expToBoole env bound elemExpected? elemArg
+        arrayFillExpr elemExpr
+      | _ => mkFallback
+    else if isWrappingAddName fname then
+      -- `wrapping_add` is a procedure call only at the surface; bv-add
+      -- is already mod-2^N in SMT bv semantics, so inline it as a flat
+      -- `bvAdd width x y` to avoid forcing the solver across a procedure
+      -- boundary with a conditional ensures.  Width comes from the
+      -- expected return type if known, otherwise from the first arg's
+      -- inferred numeric kind.
+      match argsFiltered with
+      | [xArg, yArg] =>
+        let infoFromExpected := expected?.bind bitInfoOfTyp
+        let infoFromArg :=
+          match inferNumKind env bound xArg with
+          | some (.bv w signed) => some (w, signed)
+          | _ => none
+        match infoFromExpected.orElse (fun _ => infoFromArg) with
+        | some (w, signed) =>
+          let argTy := bitTypOfInfo w signed
+          let xExpr ← expToBoole env bound (some argTy) xArg
+          let yExpr ← expToBoole env bound (some argTy) yArg
+          let sum := Bld.bvAdd w xExpr yExpr
+          coerceNumeric (some (.bv w signed)) (expected?.bind numKindOfTyp?) sum
+        | none => mkFallback
+      | _ => mkFallback
+    else if isSliceLenSpecName fname || isSliceLenExecName fname then
+      match argsFiltered with
+      | [sliceArg] =>
+        let sliceExpr ← expToBoole env bound none sliceArg
+        let lenIdx ← resolveFreeVar "Slice_spec_slice_len"
+        let lenExpr := Bld.app (Bld.fvar lenIdx) sliceExpr
+        coerceNumeric (some (.bv usizeBitWidth false)) (expected?.bind numKindOfTyp?) lenExpr
+      | _ => mkFallback
+    else if isSliceIndexGetName fname then
+      match argsFiltered with
+      | [sliceArg, indexArg] =>
+        let sliceExpr ← expToBoole env bound none sliceArg
+        let rawIdx ← expToBoole env bound none indexArg
+        let intIdx ← coerceNumeric (inferNumKind env bound indexArg) (some .int) rawIdx
+        pure (mapGet sliceExpr intIdx)
+      | _ => mkFallback
     else if isViewName fname then
       match argsFiltered with
       | [arg] =>
@@ -817,6 +889,8 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     let elemExpected? :=
       if expected?.map isSeqTyp |>.getD false then
         firstStructParamFromExpected? expected?
+      else if expected?.bind arrayElemTyp? |>.isSome then
+        expected?.bind arrayElemTyp?
       else
         none
     let args ← elems.mapM (expToBoole env bound elemExpected?)
@@ -826,6 +900,8 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       let seqBuildIdx ← resolveFreeVar "Sequence.build"
       return args.foldl (init := Bld.fvar seqEmptyIdx) (fun acc arg =>
         Bld.appN (Bld.fvar seqBuildIdx) [acc, arg])
+    else if expected?.bind arrayElemTyp? |>.isSome then
+      arrayLiteralMapExpr args
     else do
       let litIdx ← resolveFreeVar s!"Array_literal_{elems.length}"
       return Bld.appN (Bld.fvar litIdx) args
@@ -870,6 +946,11 @@ private def mkQueryObligation (env : VarEnv) (label : String) (requires ensures 
   match obligation with
   | .btrue _ => return []
   | _ => return [assertStmt label obligation]
+
+private def isUnitValueExp : Exp → Bool
+  | .EnumCtor _ "tuple%0" [] => true
+  | .TupleCtor 0 [] => true
+  | _ => false
 
 /-! ## Projected Assignment — BuildM-bound consumers of `Projection.lean` -/
 
@@ -932,12 +1013,16 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         | some baseName =>
           let some containerTy := env.get? baseName
             | throw s!"missing container type for index_set target {baseName}"
-          let seqExpr ← expToBoole env [] (some containerTy) (unwrapViewCall containerArg)
+          let containerExpr ← expToBoole env [] (some containerTy) (unwrapViewCall containerArg)
           let rawIdx ← expToBoole env [] none indexArg
           let intIdx ← coerceNumeric (inferNumKind env [] indexArg) (some .int) rawIdx
           let valueExpr ← expToBoole env [] none valueArg
-          let updateIdx ← resolveFreeVar "Sequence.update"
-          let updated := Bld.appN (Bld.fvar updateIdx) [seqExpr, intIdx, valueExpr]
+          let updated ←
+            match arrayElemTyp? containerTy with
+            | some _ => pure (mapSet containerExpr intIdx valueExpr)
+            | none =>
+              let updateIdx ← resolveFreeVar "Sequence.update"
+              pure (Bld.appN (Bld.fvar updateIdx) [containerExpr, intIdx, valueExpr])
           let containerTy' ← typToBooleType containerTy
           return [setStmtTyped containerTy' (sanitizeVarName baseName) updated]
         | none =>
@@ -993,6 +1078,8 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       return [assumeStmt "" e]
   | .Assign lhs lhsTy rhs _lhsIsInit => do
     if shouldDropAssignAsForLoopScaffolding lhs then
+      return []
+    if isUnitValueExp rhs then
       return []
     if let some lhsName := lvalueVarName? lhs then
       if let some elems := arrayLiteralElemsFromViewArg? rhs then
@@ -1055,7 +1142,10 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           return [setStmt (sanitizeVarName rootName) updatedRoot]
       else if isViewName fnName || isSeqLenSpecName fnName
             || isVecLenSpecName fnName || isVecLenExecName fnName
-            || isVecIndexSpecName fnName || isVecIndexExecName fnName then
+            || isVecIndexSpecName fnName || isVecIndexExecName fnName
+            || isArrayIndexGetName fnName || isArrayFillForCopyTypesName fnName
+            || isSliceLenSpecName fnName || isSliceLenExecName fnName
+            || isSliceIndexGetName fnName || isWrappingAddName fnName then
         let rhs' ← expToBooleFlat env (some lhsTy) rhs
         match lvalueVarName? lhs with
         | some lhsName =>
@@ -1470,7 +1560,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     let body := BooleDDM.Block.block default (ann allStmts.toArray)
     pure (specElts, body)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
-  pure (.boole_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
+  pure (.boole_procedure default name typeArgs inputBindings outputsAnn (ann none) spec (ann (some body)))
 
 private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
   let (elemName, elemTy, nName, nTy) ←
@@ -1582,7 +1672,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
       let body := BooleDDM.Block.block default (ann allStmts.toArray)
       pure (specElts, body)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
-  pure (.boole_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
+  pure (.boole_procedure default name typeArgs inputBindings outputsAnn (ann none) spec (ann (some body)))
 
 /-! ### Struct/Enum → BCmd -/
 
@@ -1615,14 +1705,23 @@ def enumToBoole (e : Enum) : BuildM BCmd := do
   let dtName := datatypeNameOf e.name
   addFreeVars #[dtName]
   if e.fields.isEmpty then
+    if dtName == "Slice_Iter_iter" then
+      requireSupport .tuple
+      let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+        ann (some (BooleDDM.Bindings.mkBindings default (ann #[
+          BooleDDM.Binding.mkBinding default (ann "T") (BooleDDM.TypeP.type default)])))
+      let tupleIdx ← resolveFreeVar "Tuple"
+      let rhs := fvarTy tupleIdx #[intTy, mapTy intTy (tvarTy "T")]
+      pure (.command_typesynonym default (ann dtName) args (ann none) rhs)
+    else
     -- Abstract type
-    let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
-      if e.typeParams.isEmpty then ann none
-      else
-        let bindings := e.typeParams.toArray.map fun param =>
-          BooleDDM.Binding.mkBinding default (ann (sanitizeIdent param)) (BooleDDM.TypeP.type default)
-        ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
-    pure (.command_typedecl default (ann dtName) args)
+      let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+        if e.typeParams.isEmpty then ann none
+        else
+          let bindings := e.typeParams.toArray.map fun param =>
+            BooleDDM.Binding.mkBinding default (ann (sanitizeIdent param)) (BooleDDM.TypeP.type default)
+          ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
+      pure (.command_typedecl default (ann dtName) args)
   else
     -- Register all names
     for field in e.fields do
@@ -1694,7 +1793,7 @@ def funcCheckSstToBoole (env : VarEnv) (f : FuncCheckSst) : BuildM BCmd := do
     let body := BooleDDM.Block.block default (ann #[])
     pure (specElts, body)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
-  pure (.boole_procedure default name typeArgs inputBindings outputsAnn spec (ann (some body)))
+  pure (.boole_procedure default name typeArgs inputBindings outputsAnn (ann none) spec (ann (some body)))
 
 /-! ### Top-Level Declaration Translation -/
 
@@ -1821,6 +1920,7 @@ def declsToBooleProgram (decls : List Decl) :
   -- `Impl__N_arrow_*` bloats the output and slows verification; most tests
   -- use only a handful.
   let decls := pruneUnreferencedImpls decls
+  let decls := pruneUnreferencedVstdSpecs decls
   let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
   let mutArgMap := collectMutArgMapFromDecls decls
@@ -1851,6 +1951,7 @@ def declsToBooleProgram (decls : List Decl) :
         || n == "Clone_Clone_clone"
         || n == "Boxed_box_new"
         || n == "Array_array_as_slice"
+        || n == "Num_wrapping_add"
     | none => false
   -- When for-loop recovery is active, skip translating iterator scaffolding declarations
   let filteredDecls := decls.filter fun d =>
@@ -1900,7 +2001,7 @@ def cmdDeclName? : BCmd → Option String
   | .command_typedecl _ name _ => some name.val
   | .command_typesynonym _ name _ _ _ => some name.val
   | .command_datatypes _ _ => none  -- multiple names
-  | .boole_procedure _ name _ _ _ _ _ => some name.val
+  | .boole_procedure _ name _ _ _ _ _ _ => some name.val
   | .command_procedure _ name _ _ _ _ => some name.val
   | .command_axiom _ _ _ => none
   | .command_var _ bind => some (match bind with | .bind_mk _ name _ _ => name.val)

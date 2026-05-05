@@ -95,6 +95,21 @@ private def mkSeqZipWithDecl : BuildM BCmd := do
   let outputTy : BType := seqTy (fvarTy tupleIdx #[aTy, bTy])
   pure (.command_fndecl default (ann fname) typeArgs inputBindings outputTy)
 
+private def mkArrayFillDecl : BuildM BCmd := do
+  let fname := "Array_array_fill_for_copy_types"
+  addFreeVars #[fname]
+  let typeParamBindings : Array (BooleDDM.TypeVar SourceRange) := #[
+    BooleDDM.TypeVar.type_var default (ann "T")]
+  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+    ann (some (BooleDDM.TypeArgs.type_args default (ann typeParamBindings)))
+  let tTy := tvarTy "T"
+  let input :=
+    BooleDDM.Binding.mkBinding default (ann "value") (BooleDDM.TypeP.expr tTy)
+  let inputBindings :=
+    BooleDDM.Bindings.mkBindings default (ann #[input])
+  let outputTy : BType := mapTy intTy tTy
+  pure (.command_fndecl default (ann fname) typeArgs inputBindings outputTy)
+
 def supportDeclToCommand (lowerType : TypeLowerer) (need : SupportDecl) :
     BuildM (Option BCmd) := do
   match need with
@@ -106,6 +121,9 @@ def supportDeclToCommand (lowerType : TypeLowerer) (need : SupportDecl) :
     pure (some cmd)
   | .seqZipWith => do
     let cmd ← mkSeqZipWithDecl
+    pure (some cmd)
+  | .arrayFill => do
+    let cmd ← mkArrayFillDecl
     pure (some cmd)
   | _ =>
     match supportDeclSignature? need with

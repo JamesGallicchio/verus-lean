@@ -38,14 +38,14 @@ Solver success is **not** used to classify faithfulness.
     `verus-examples:guide/invariants` (`bv64` where `int` expected)
   - the raw summary below is still based on Core output plus `strata verify`
 
-## Boole Regression Summary (Full Run, run id `20260430_204358`)
-Tests in regression and classified in this doc: **120**.
+## Boole Regression Summary (base full run `20260430_204358` plus mirrored tests)
+Tests in regression and classified in this doc: **122**.
 `regress_examples.sh --all-suites` scans `tests/VerusFiles/`,
 `tests/adopted_rust_verify_test/`, `verus/examples/`, and
 `verus/examples/guide/` at `find -maxdepth 1`.
 
 Bucket totals: 16 (faithful and same) + 48 (faithful but different) +
-56 (not faithful) = **120**, matching the regression test count.
+58 (not faithful) = **122**, matching the regression test count.
 
 Classification rule (faithfulness-first): a test is placed in a bucket by
 asking, in order, (1) is the emitted Boole faithful to the source — i.e. it
@@ -59,13 +59,14 @@ Personal scratch tests under `tests/scratch/` (e.g. `crypto*.rs`) live in
 `.git/info/exclude` and are intentionally not part of the regression count
 or this doc.
 
-Primary verify statuses from the regression run (sum to 120):
+Primary verify statuses from the base regression run plus the two mirrored
+`vlir-tests` entries above (sum to 122):
 - generation failures: 0
 - missing json: 8
 - verify passed: 17
 - verify skipped (Sequence): 18
 - verify skipped (Strata gap): 24
-- known translator bugs: 0
+- known translator bugs: 2
 - verify failures: 53
 
 Notes:
@@ -203,7 +204,7 @@ to repeat them.
 - `vlir-tests:test_requires` (translation faithful: `[bitvector_query]` and `[nonlinear_query]` proof-mode labels preserved on the `test_success` and `bound_check` assertions. Verify SKIP — Strata-side dispatch for these proof-mode labels is incomplete on this case, mirroring `guide/nonlinear_bitvec`)
 - `vlir-tests:vec_ops` (verify SKIP (Sequence): Vec operations lower through Sequence prelude; blocked by Strata's Sequence frontend/indexing support)
 
-## not faithful translation (56)
+## not faithful translation (58)
 - `verus-examples:assert_by_compute` (`[VERIFY-lambda-encoding]` for lambdas in `Seq::new`-style spec functions; `[TRANS-coercion-uninterpreted]` for `nat_to_int(Fib_fib(...))` and friends; `assert(...) by (compute_only)` lowers to `assume <pre-computed-result>;` directly. `Compute_all_spec` stubs surface in `guide__assert_by_compute`, not here)
 - `verus-examples:atomics` (`[TRANS-atomic-ghost-scaffolding]`: `struct_with_invariants!` / `atomic_with_ghost!` still lower to low-level `Invariant_*`, `Atomic_*`, and `assume` scaffolding; `[MODEL-missing-types]` (`Atomic_ghost`))
 - `verus-examples:basic_lock1` (`[TRANS-atomic-ghost-scaffolding]`: `InvariantPredicate` impl + `open_local_invariant!` lower to `Invariant_*`/`Atomic_*`/`Cell_*` helper scaffolding; `[MODEL-missing-types]` — `Atomic`, `Cell`, `Invariant`)
@@ -255,7 +256,9 @@ to repeat them.
 - `verus-examples:trait_for_fn` (`[TRANS-trait-unsupported]`: the `impl IntFn for spec_fn(int) -> int` body `self(x)` is dropped; `[VERIFY-lambda-encoding]` then blocks the call site `f.call_int(2)`)
 - `verus-examples:vectors` (`datatype Vec` path is now source-close; `pusher` still hits `[VERIFY-lambda-encoding]` and `[TRANS-extensional-eq]`)
 - `verus-examples:verified_vec` (no Boole `.lean` output produced — generation step fails silently for this test; cause TBD, likely a translator-side abort on Vec lowering)
+- `vlir-tests:LoopSimpleWithSpec` (mirrored from `verus/tests/LoopSimpleWithSpec.rs` into `tests/VerusFiles/`; generates clean Boole but Strata-side verify reports `Expression has type int when nat expected` — a translator-side missed-coercion bug rather than a Strata gap, classified by the runner as translator-bug-shape rather than `[TRANS-coercion-uninterpreted]`)
 - `vlir-tests:maps` (`[VERIFY-lambda-encoding]` in `mk_map` lambdas; `[TRANS-higher-order-collection-stubs]` currently distorts `Set_mk_map`; raw Core map equalities are still emitted as plain `==` rather than source-like map extensional equality)
+- `vlir-tests:mini_c` (mirrored from `verus/tests/mini_c.rs` into `tests/VerusFiles/`; generates Boole but emits malformed tuple projection `Tuple.._2` while lowering match tuple temporaries — translator-side malformed-output bug)
 - `vlir-tests:seqs` (`[VERIFY-lambda-encoding]` in `Seq::new`, `Seq::map`, `Seq::filter`, and `seq![x; n]`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; raw Core also currently hits `[SURFACE-sequence-empty]` and nat/int mismatches`)
 - `vlir-tests:sets` (`[VERIFY-lambda-encoding]` in `Set::new`, `Set::filter`, `Set::map`, `set_map`, and `fold`; `[TRANS-higher-order-collection-stubs]` distorts `Set_new`, `Set_filter`, `Set_lib_map`, and `Set_Fold_fold`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; `s.choose()` is currently just uninterpreted `Set_choose` without witness semantics`)
 - `vlir-tests:test_array` (translator emits `Array_literal_3` symbol that is undeclared; array-literal lowering is not yet wired in Boole — needs a translator-side encoding for fixed-size array literals)
@@ -551,12 +554,6 @@ to repeat them.
 - Affects: `verus-examples:guide/lib_examples`, `verus-examples:rfmig_script`,
   `verus-examples:syntax`, `verus-examples:vectors`
 
-### `[TRANS-map-helper-typing]` Map helper signatures not source-faithful
-- Some current Core helper declarations for map operations are emitted with the
-  wrong receiver type, so source-level `Map` / store operations are no longer
-  represented as well-typed map helpers in the output.
-- Affects: `vlir-tests:tests/mini_c`
-
 ### `[TRANS-for-loop-empty-range]` For-loop `to` bound underflows on empty ranges
 - The translator (and `synthesizeVecFromElemBody`) lowers Verus's exclusive
   range `0..n` to Boole's inclusive `for i := 0 to n-1`. The subtraction is
@@ -603,7 +600,7 @@ to repeat them.
 - Still tracked as a raw-Core legacy note for the previously affected tests:
   `verus-examples:guide/exec_attr`, `verus-examples:mergesort`,
   `verus-examples:set_from_vec`, `verus-examples:syntax`,
-  `vlir-tests:tests/mini_c`, `verus-examples:guide/invariants`.
+  `verus-examples:guide/invariants`.
 
 ### `[TRANS-loop-helper-leakage]` Loop helper symbols leak into raw Core (Core-only)
 - Iterator-lowered loops still expose helper symbols such as

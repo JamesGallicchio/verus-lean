@@ -121,16 +121,67 @@ where
         | none => findLoopVarAfterIf rest
       | _ => findLoopVarAfterIf rest
 
+  expVarRefsLocal : Exp → List String
+    | .Const _ _ => []
+    | .Var x => [x]
+    | .Call _ _ args => (args.flatMap expVarRefsLocal).eraseDups
+    | .CallLambda body args => (expVarRefsLocal body ++ (args.flatMap expVarRefsLocal)).eraseDups
+    | .StructCtor _ fields => (fields.flatMap (fun (_, e) => expVarRefsLocal e)).eraseDups
+    | .EnumCtor _ _ data => (data.flatMap (fun (_, e) => expVarRefsLocal e)).eraseDups
+    | .TupleCtor _ data => (data.flatMap expVarRefsLocal).eraseDups
+    | .Unary _ e => expVarRefsLocal e
+    | .Binary _ e1 e2 => (expVarRefsLocal e1 ++ expVarRefsLocal e2).eraseDups
+    | .If c t f => (expVarRefsLocal c ++ expVarRefsLocal t ++ expVarRefsLocal f).eraseDups
+    | .Bind (.Let _ _ e) body => (expVarRefsLocal e ++ expVarRefsLocal body).eraseDups
+    | .Bind (.Quant _ _ trigs) body =>
+      ((trigs.flatMap (fun g => g.flatMap expVarRefsLocal)) ++ expVarRefsLocal body).eraseDups
+    | .Bind (.Lambda _) body => expVarRefsLocal body
+    | .ArrayLiteral elems => (elems.flatMap expVarRefsLocal).eraseDups
+    | .MatchBlock (scrut, _) body => (expVarRefsLocal scrut ++ expVarRefsLocal body).eraseDups
+
+  stmtAssignedVarLocal? : Stm → Option String
+    | .Assign lhs _ _ _ => lvalueVarName? lhs
+    | _ => none
+
+  stmtRefsLocal : Stm → List String
+    | .Assign _ _ rhs _ => expVarRefsLocal rhs
+    | .Call _ _ args => (args.flatMap expVarRefsLocal).eraseDups
+    | .Assert e | .AssertCompute e | .AssertLean e | .Assume e => expVarRefsLocal e
+    | .AssertBitVector reqs enss => ((reqs.flatMap expVarRefsLocal) ++ (enss.flatMap expVarRefsLocal)).eraseDups
+    | .Return e? => e?.map expVarRefsLocal |>.getD []
+    | .If cond _ _ => expVarRefsLocal cond
+    | _ => []
+
   filterScaffoldingStms (stms : List Stm) : List Stm :=
-    stms.filter fun
+    let directKeep : Stm → Bool
       | .Assign lhs _ _ _ =>
         match lvalueVarName? lhs with
-        | some name => !isForLoopScaffoldingVar name
+        | some name =>
+          -- `VERUS_*` and decrease locals are loop-scaffolding.  Ordinary
+          -- `tmp%N` locals may carry user computations after normalization
+          -- (array reads, rotate calls, wrapping adds, etc.), so keep them
+          -- when a later retained statement references them.
+          !(name.startsWith "VERUS_" || name.startsWith "decrease" ||
+            name.startsWith "tmp%%")
         | none => true
       | .Call fn _ _ =>
         !(isIteratorNextName fn || isIntoIterName fn || isGhostPervasiveCallName fn)
       | .Assume (.Const (.Bool false) _) => false
       | _ => true
+    let rec go (needed : List String) (keptRev : List Stm) : List Stm → List Stm
+      | [] => keptRev
+      | s :: rest =>
+        let assigned? := stmtAssignedVarLocal? s
+        let keep := directKeep s ||
+          (assigned?.map (fun name => needed.contains name) |>.getD false)
+        if keep then
+          let needed' :=
+            let needed' := assigned?.map (fun name => needed.erase name) |>.getD needed
+            ((stmtRefsLocal s) ++ needed').eraseDups
+          go needed' (s :: keptRev) rest
+        else
+          go needed keptRev rest
+    go [] [] stms.reverse
 
 structure ForLoopRangeInfo where
   startExp : Exp

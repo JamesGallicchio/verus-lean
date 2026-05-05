@@ -168,6 +168,27 @@ def isBoxNewName (name : Ident) : Bool :=
 def isArrayAsSliceName (name : Ident) : Bool :=
   identToBoole name == "Array_array_as_slice"
 
+def isArrayIndexGetName (name : Ident) : Bool :=
+  identToBoole name == "Array_array_index_get"
+
+def isArrayFillForCopyTypesName (name : Ident) : Bool :=
+  identToBoole name == "Array_array_fill_for_copy_types"
+
+/-- Recognize `core::num::<impl uN>::wrapping_add` for any integer width.
+    Verus emits one impl-block per integer width (`impl&%N`); after
+    `identToBoole` they all canonicalize to `Num_wrapping_add`. -/
+def isWrappingAddName (name : Ident) : Bool :=
+  identToBoole name == "Num_wrapping_add"
+
+def isSliceLenSpecName (name : Ident) : Bool :=
+  identToBoole name == "Slice_spec_slice_len"
+
+def isSliceLenExecName (name : Ident) : Bool :=
+  identToBoole name == "Slice_len"
+
+def isSliceIndexGetName (name : Ident) : Bool :=
+  identToBoole name == "Slice_slice_index_get"
+
 def isSliceIntoVecName (name : Ident) : Bool :=
   identToBoole name == "Slice_into_vec"
 

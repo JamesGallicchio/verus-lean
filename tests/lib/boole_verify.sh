@@ -65,15 +65,20 @@ classify_boole_verify_log() {
     fi
     # Translator-side bugs: error signatures below indicate our translator
     # emitted a malformed program. They are NOT Strata gaps. If the wrapper
-    # is on the known-translator-bug list, classify as `known_translator_bug`
-    # (tracked but not a regression); otherwise surface as `fail` so new
-    # occurrences of these signatures are visible.
+    # is on the known-translator-bug list *and* the log matches that concrete
+    # signature, classify as `known_translator_bug` (tracked but not a
+    # regression); otherwise surface as `fail` so new occurrences of these
+    # signatures are visible.
     #   * "Unknown bound variable with index"  (bvar index miscount)
     #   * "Cannot find this fvar in the context"  (ill-scoped fvar, e.g. `old p`)
     #   * "Expression has type .* when int expected"  (missed coercion)
-    if [ -n "$known_translator_bug_pattern" ]; then
-      echo "known_translator_bug"
-      return 0
+    if [ -n "$known_translator_bug_pattern" ] && grep -qE "$known_translator_bug_pattern" "$log"; then
+      local non_bug_errors
+      non_bug_errors="$(grep "error:" "$log" | grep -Ev "$known_translator_bug_pattern|aborting evaluation since the expression depends on the 'sorry' axiom" || true)"
+      if [ -z "$non_bug_errors" ]; then
+        echo "known_translator_bug"
+        return 0
+      fi
     fi
     echo "fail"
     return 0
@@ -128,10 +133,19 @@ expected_boole_fail_pattern_for_wrapper() {
 
 # Wrappers known to trip a translator-side bug (as opposed to a Strata
 # limitation). See "Known translator bugs" in docs/boole-translation-todo.md
-# for the bug descriptions and the fix plan. Returning `.` means "any
-# obligation / Lean error from this wrapper is attributed to the known bug".
+# for the bug descriptions and the fix plan.
 known_translator_bug_pattern_for_wrapper() {
   case "$1" in
+    # mini_c currently emits a malformed tuple projection `Tuple.._2` while
+    # lowering match tuple temporaries; Lean elaboration aborts before any
+    # obligation runs. Tracked in differential_status.md.
+    */vlir-tests/mini_c.lean) echo 'Unknown variable Tuple\.\._2' ;;
+    # LoopSimpleWithSpec uses `triangle0(i as nat)` style spec-fn calls; the
+    # translator does not insert an `int -> nat` coercion at the call boundary,
+    # so Strata reports `Expression has type int when nat expected` at Lean
+    # elaboration time. Same family as the missed-coercion shape called out in
+    # the per-bug list at the top of `classify_boole_verify_log`.
+    */vlir-tests/LoopSimpleWithSpec.lean) echo 'Expression has type int when nat expected' ;;
     *) echo "" ;;
   esac
 }

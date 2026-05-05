@@ -125,6 +125,11 @@ def seqElemTyp? : Typ → Option Typ
   | .Decorated _ ty => seqElemTyp? ty
   | _ => none
 
+def arrayElemTyp? : Typ → Option Typ
+  | .Array elem => some elem
+  | .Decorated _ ty => arrayElemTyp? ty
+  | _ => none
+
 def setElemTyp? : Typ → Option Typ
   | .Struct name params =>
     match params with
@@ -267,7 +272,9 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
     (boundType? bound x <|> env.get? x) |>.bind bitInfoOfTyp
   | .Call fn _ args =>
     let name := CallFun.name fn
-    if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
+    if isSliceLenSpecName name || isSliceLenExecName name then
+      some (usizeBitWidth, false)
+    else if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
       none
     else if isVecIndexSpecName name || isVecIndexExecName name then
       match args with
@@ -301,7 +308,9 @@ partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Opti
   | .Var x => boundType? bound x <|> env.get? x
   | .Call fn _ args =>
     let name := CallFun.name fn
-    if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
+    if isSliceLenSpecName name || isSliceLenExecName name then
+      some (.UInt usizeBitWidth)
+    else if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
       some .Int
     else if isVecIndexSpecName name || isVecIndexExecName name then
       match args with

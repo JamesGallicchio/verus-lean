@@ -243,7 +243,7 @@ def iteStmt (cond : BExpr) (thenBody : Array BStmt) (elseBody : Array BStmt) : B
 
 private def invsFromArray (invs : Array BExpr) : BooleDDM.Invariants SourceRange :=
   invs.foldl (fun acc e =>
-    BooleDDM.Invariants.consInvariants default e acc)
+    BooleDDM.Invariants.consInvariants default (ann none) e acc)
     (.nilInvariants default)
 
 private def mkMeasure (m : Option BExpr) : Strata.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange :=
