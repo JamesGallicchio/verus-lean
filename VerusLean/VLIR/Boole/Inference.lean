@@ -148,6 +148,23 @@ def setElemTyp? : Typ → Option Typ
   | .Decorated _ ty => setElemTyp? ty
   | _ => none
 
+/-- Boole exposes typed empty-sequence constants per element type
+    (`Sequence.empty_bv32`, `Sequence.empty_int`, etc.) because the DDM
+    parser cannot resolve the polymorphic `Sequence.empty` without
+    arguments — see `seq_empty_*` in `Strata/Languages/Boole/Grammar.lean`.
+    Pick the right token for the element type, falling back to the bare
+    `"Sequence.empty"` name for element types we haven't covered yet
+    (which the DDM parser will still reject — but the failure mode is
+    explicit and easy to extend here). -/
+partial def seqEmptyTokenName : Typ → String
+  | .Decorated _ ty => seqEmptyTokenName ty
+  | .UInt 8  | .SInt 8  => "Sequence.empty_bv8"
+  | .UInt 16 | .SInt 16 => "Sequence.empty_bv16"
+  | .UInt 32 | .SInt 32 => "Sequence.empty_bv32"
+  | .UInt 64 | .SInt 64 => "Sequence.empty_bv64"
+  | .Int | .Nat => "Sequence.empty_int"
+  | _ => "Sequence.empty"
+
 /-- Pull out the first type parameter of an `expected?` `Struct` /
     `Decorated` type. Used to thread per-element types into sequence /
     array literal lowering when the surrounding context already knows

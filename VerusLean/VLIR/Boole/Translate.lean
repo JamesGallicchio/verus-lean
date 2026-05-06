@@ -275,22 +275,31 @@ private def arrayFillExpr (elem : BExpr) : BuildM BExpr := do
   let fillIdx ← resolveFreeVar "Array_array_fill_for_copy_types"
   pure (Bld.app (Bld.fvar fillIdx) elem)
 
-private def seqEmptyExpr : BuildM BExpr := do
-  pure (Bld.fvar (← resolveFreeVar "Sequence.empty"))
+/-- Emit a typed empty-sequence literal.  `elemTy` selects the correct
+    `Sequence.empty_<T>` token; see `seqEmptyTokenName`.  Boole's DDM parser
+    cannot resolve a polymorphic `Sequence.empty` without arguments, so we
+    must commit to an element type at emission time. -/
+private def seqEmptyExpr (elemTy : Typ) : BuildM BExpr := do
+  pure (Bld.fvar (← resolveFreeVar (seqEmptyTokenName elemTy)))
 
 private def seqBuildExpr (seq elem : BExpr) : BuildM BExpr := do
   pure (Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.build")) [seq, elem])
 
-private def seqLiteralExpr (elems : List BExpr) : BuildM BExpr := do
-  elems.foldlM (fun acc elem => seqBuildExpr acc elem) (← seqEmptyExpr)
+private def seqLiteralExpr (elemTy : Typ) (elems : List BExpr) : BuildM BExpr := do
+  elems.foldlM (fun acc elem => seqBuildExpr acc elem) (← seqEmptyExpr elemTy)
 
-private def seqRepeatExpr (len : Nat) (elem : BExpr) : BuildM BExpr := do
-  (List.range len).foldlM (fun acc _ => seqBuildExpr acc elem) (← seqEmptyExpr)
+private def seqRepeatExpr (elemTy : Typ) (len : Nat) (elem : BExpr) : BuildM BExpr := do
+  (List.range len).foldlM (fun acc _ => seqBuildExpr acc elem) (← seqEmptyExpr elemTy)
 
 private def arrayFillOrRepeatExpr (expected? : Option Typ) (elem : BExpr) : BuildM BExpr := do
   match expected?.bind arrayLen? with
   | some len =>
-    seqRepeatExpr len elem
+    -- Element type comes from the `expected?` array's element type when
+    -- known.  If the array shape is unrecognized we fall back to the
+    -- untyped name, which will surface as a parser error — preferable to a
+    -- silently-wrong typed pick.
+    let elemTy := (expected?.bind arrayElemTyp?).getD .Empty
+    seqRepeatExpr elemTy len elem
   | none => arrayFillExpr elem
 
 mutual
@@ -794,8 +803,15 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
           [s, intSub (seqLength s) one]
       | _ => mkFallback
     else if fnameStr == "Seq_empty" then do
-      let fnIdx ← resolveFreeVar "Sequence.empty"
-      return Bld.fvar fnIdx
+      -- Pick the element type from the propagated `expected?` (a
+      -- `Sequence T` or `Vec T` type when the surrounding context has
+      -- one).  When neither is available we fall back to the untyped
+      -- `Sequence.empty`, which surfaces as a parser error rather than a
+      -- silently-wrong typed pick.
+      let elemTy :=
+        (expected?.bind seqElemTyp?).orElse (fun _ => expected?.bind vecElemTyp?)
+          |>.getD .Empty
+      seqEmptyExpr elemTy
     else if fnameStr == "Seq_update" then
       match argsFiltered with
       | [sArg, iArg, vArg] =>
@@ -911,10 +927,15 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       else
         none
     let args ← elems.mapM (expToBoole env bound elemExpected?)
+    -- The element type is needed to pick the right `Sequence.empty_<T>`
+    -- token.  Falling back to `.Empty` produces the untyped
+    -- `Sequence.empty` name, which surfaces as a clean parser error if it
+    -- ever fires (no element-type information was reachable).
+    let elemTy := elemExpected?.getD .Empty
     if expected?.map isSeqTyp |>.getD false then
-      seqLiteralExpr args
+      seqLiteralExpr elemTy args
     else if expected?.bind arrayElemTyp? |>.isSome then
-      seqLiteralExpr args
+      seqLiteralExpr elemTy args
     else do
       let litIdx ← resolveFreeVar s!"Array_literal_{elems.length}"
       return Bld.appN (Bld.fvar litIdx) args
@@ -1117,7 +1138,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           if isSeqTyp lhsTy then firstStructParamFromExpected? (some lhsTy)
           else vecElemTyp? lhsTy
         if let some elemTy := elemTy? then
-          let seqEmptyIdx ← resolveFreeVar "Sequence.empty"
+          let seqEmptyIdx ← resolveFreeVar (seqEmptyTokenName elemTy)
           let seqBuildIdx ← resolveFreeVar "Sequence.build"
           let emptySeq := Bld.fvar seqEmptyIdx
           let elems' ← elems.mapM (expToBoole env [] (some elemTy))
@@ -1616,7 +1637,9 @@ private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
   let elemTy' ← typToBooleType elemTy
   let nTy' ← typToBooleType nTy
   let seqBuildIdx ← resolveFreeVar "Sequence.build"
-  let seqEmptyIdx ← resolveFreeVar "Sequence.empty"
+  -- Pick the typed empty matching the Vec element type captured from
+  -- the procedure inputs.
+  let seqEmptyIdx ← resolveFreeVar (seqEmptyTokenName elemTy)
   let seqSelectIdx ← resolveFreeVar "Sequence.select"
   let zeroInt := intConst 0
   let zeroBv := bitvecConstNat usizeBitWidth 0
