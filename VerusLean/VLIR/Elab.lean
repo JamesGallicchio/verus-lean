@@ -746,7 +746,7 @@ def SpecFn.toCommand (f : SpecFn) : CoreM (TSyntax `command) := do
           termination_by $dec)
 
 def ProofFn.toCommand (f : ProofFn) : CoreM (TSyntax `command) := do
-  let ⟨name, inputs, _retName, _returnType, requires, ensures, body, _locals⟩ := f
+  let ⟨name, inputs, _retName, _returnType, requires, ensures, body, _decreases, _locals⟩ := f
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let _ ← -- Currently we ignore the proof body if the whole proof function is marked with `by(lean)`
@@ -759,7 +759,7 @@ def ProofFn.toCommand (f : ProofFn) : CoreM (TSyntax `command) := do
       auto? )
 
 def ExecFn.toCommand (f : ExecFn) : CoreM (TSyntax `command) := do
-  let ⟨name, inputs, _retName, returnType, _requires, _ensures, _body, _locals⟩ := f
+  let ⟨name, inputs, _retName, returnType, _requires, _ensures, _body, _decreases, _locals⟩ := f
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let returnType ← returnType.toTerm

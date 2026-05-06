@@ -528,6 +528,12 @@ structure ProofFn where
   requires : List Exp
   ensures : List Exp
   body : Option Stm
+  /-- Source-level `decreases` clause (preserved from
+      `exec_proof_check.local_decls_decreases_init` in the Verus JSON).
+      Each `Stm.Assign` here binds a synthesized `decrease%initN`
+      variable to one decreases expression; the list captures the
+      lexicographic order when the source has multiple decreases terms. -/
+  decreases : List Stm := []
   locals : List LocalDeclInfo := []
 deriving Repr, Inhabited, Hashable
 
@@ -539,6 +545,10 @@ structure ExecFn where
   requires : List Exp
   ensures : List Exp
   body : Stm
+  /-- Source-level `decreases` clause (preserved from
+      `exec_proof_check.local_decls_decreases_init` in the Verus JSON).
+      Same shape as `ProofFn.decreases`. -/
+  decreases : List Stm := []
   locals : List LocalDeclInfo := []
 deriving Repr, Inhabited, Hashable
 

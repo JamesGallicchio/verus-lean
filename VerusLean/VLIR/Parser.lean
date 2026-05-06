@@ -1678,6 +1678,19 @@ def localDeclsFromJson (j : Json) : VParser (List LocalDeclInfo) := do
     return locals.toList
 
 
+/-- Extract the source-level `decreases` clause from an `exec_proof_check`
+    block.  Verus emits one `Stm.Assign` per decreases term, binding a
+    synthesized `decrease%initN` local to the term's value.  We preserve the
+    list verbatim so downstream lowerings can pick the relevant RHS without
+    re-parsing.  Returns `[]` if the JSON has no `local_decls_decreases_init`
+    array (e.g. non-recursive functions). -/
+private def decreasesFromExecProofCheck (j : Json) : VParser (List Stm) := do
+  match j.getArrByPath? ["exec_proof_check", "local_decls_decreases_init"] with
+  | .ok arr =>
+    let stms ← arr.mapM (fromJsonSpanned · Stm.fromJson)
+    pure stms.toList
+  | .error _ => pure []
+
 def ProofFn.fromJson (j : Json) : VParser ProofFn := do
   let name ← pathedNameFromNameJson j
   let args ← fnParseArgs j
@@ -1689,9 +1702,9 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
       pure ("%return", .Unit)
   match Lean.Json.getObjValByPath j ["exec_proof_check"] with
   | .ok .null =>
-    return ProofFn.mk name args retName returnType [] [] none []
+    return ProofFn.mk name args retName returnType [] [] none [] []
   | .error _ =>
-    return ProofFn.mk name args retName returnType [] [] none []
+    return ProofFn.mk name args retName returnType [] [] none [] []
   | .ok _ =>
     pure ()
 
@@ -1729,8 +1742,9 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
   -- For proof functions, this expression is stored in the "exec_proof_check"
   let bodyObj ← j.getObjValByPathM ["exec_proof_check", "body", "x"]
   let bodyStm ← Stm.fromJson bodyObj
+  let decreases ← decreasesFromExecProofCheck j
   let locals ← localDeclsFromJson j
-  return ProofFn.mk name args retName returnType requires.toList ensures bodyStm locals
+  return ProofFn.mk name args retName returnType requires.toList ensures bodyStm decreases locals
   --else
     --return ProofFn.mk name args requires.toList ensures.toList none
 
@@ -1794,7 +1808,12 @@ def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
       localDeclsFromJson j
     else
       pure []
-  return some <| ExecFn.mk name args retName returnType requires.toList ensures bodyStm locals
+  let decreases ←
+    if hasExecProofBody then
+      decreasesFromExecProofCheck j
+    else
+      pure []
+  return some <| ExecFn.mk name args retName returnType requires.toList ensures bodyStm decreases locals
 
 
 def typeParamsFromJson (j : Json) : m (List String) := do

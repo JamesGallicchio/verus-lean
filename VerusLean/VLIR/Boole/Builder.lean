@@ -248,7 +248,7 @@ private def invsFromArray (invs : Array BExpr) : BooleDDM.Invariants SourceRange
     BooleDDM.Invariants.consInvariants default (ann none) e acc)
     (.nilInvariants default)
 
-private def mkMeasure (m : Option BExpr) : Strata.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange :=
+def mkMeasure (m : Option BExpr) : Strata.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange :=
   match m with
   | none => ann none
   | some m => ann (some (.measure_mk default m))
@@ -262,8 +262,12 @@ def forToStmt (loopVar : String) (loopTy : BType)
     (start limit : BExpr) (measure : Option BExpr)
     (invs : Array BExpr) (body : Array BStmt) : BStmt :=
   let binder := MonoBind.mono_bind_mk default (ann loopVar) loopTy
-  .for_to_by_statement default binder start limit (mkMeasure measure)
-    (ann none) (invsFromArray invs) (.block default (ann body))
+  -- Field order in `for_to_by_statement` is (v, init, limit, step?, decr?, invs, body)
+  -- per kondylidou/pr/benchmarks commit `9d3e26e5b`.  `step?` is `none`
+  -- because the verus-lean translator only emits +1 ranges; `decr?` carries
+  -- the optional measure.
+  .for_to_by_statement default binder start limit (ann none)
+    (mkMeasure measure) (invsFromArray invs) (.block default (ann body))
 
 def exitStmt (label : Option String) : BStmt :=
   match label with

@@ -935,6 +935,23 @@ abbrev expToBooleFlat (env : VarEnv) (expected? : Option Typ) (e : Exp) :
     BuildM BExpr :=
   expToBoole env [] expected? e
 
+/-- Lower a `decreases` clause (preserved on `ExecFn` / `ProofFn` as a list
+    of `Stm.Assign decrease%initN := rhs`) into Boole's procedure-level
+    `decr : Option Measure` slot.  Verus emits one Assign per source
+    decreases term; we currently take the RHS of the first.  Lexicographic
+    decreases (multiple terms) would need combining — deferred until the
+    Boole side actually consumes `decr` (today it is captured but ignored
+    as `_decr` in `Verify.lean`).  Returns `mkMeasure none` when the list
+    is empty or shaped unexpectedly. -/
+private def decreasesToMeasureAnn (env : VarEnv) (decreases : List Stm) :
+    BuildM (Strata.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange) := do
+  match decreases with
+  | [] => pure (Bld.mkMeasure none)
+  | (.Assign _ _ rhs _) :: _ =>
+    let e ← expToBooleFlat env (some .Int) rhs
+    pure (Bld.mkMeasure (some e))
+  | _ :: _ => pure (Bld.mkMeasure none)
+
 /-! ## Statement Translation -/
 
 private def mkQueryObligation (env : VarEnv) (label : String) (requires ensures : List Exp) :
@@ -1551,15 +1568,27 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let localsAll := match bodyStm? with
     | some body => filterLocalsByUse (stripForLoopScaffoldingFromBody body) localsAll
     | none => localsAll
+  -- Drop names that the recovered for-loop's binder declares inline (post
+  -- kondylidou/pr/benchmarks 9d3e26e5b: a separate `var i;` would conflict
+  -- with the `for i := …` binder, producing "Variable i already in context").
+  let localsAll := match bodyStm? with
+    | some body => filterOutForLoopBinders body localsAll
+    | none => localsAll
   let outputs := retDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
   let outputsAnn := ann outputDecls?
   let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
-  let (specElts, body) ← withScope do
+  let (specElts, body, decrAnn) ← withScope do
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires f.ensures []
+    -- Lower the source-level `decreases` clause BEFORE body translation so
+    -- the bound-var stack is in a known-clean state (just inputs+outputs).
+    -- The body's internal scopes can otherwise leave the stack longer than
+    -- this scope expects, producing dangling `bvar!N` indices in the
+    -- decreases expression.
+    let decrAnn ← decreasesToMeasureAnn envLocal f.decreases
     let localStmts ← localsToVarStmts localsAll
     let retVar? := if hasRet then some (f.retName, f.returnType) else none
     let bodyStmts ← match bodyStm? with
@@ -1571,9 +1600,9 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
       | none => pure [assumeStmt "" (boolConst false)]
     let allStmts := localStmts ++ bodyStmts
     let body := BooleDDM.Block.block default (ann allStmts.toArray)
-    pure (specElts, body)
+    pure (specElts, body, decrAnn)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
-  pure (.boole_procedure default name typeArgs inputBindings outputsAnn (ann none) spec (ann (some body)))
+  pure (.boole_procedure default name typeArgs inputBindings outputsAnn decrAnn spec (ann (some body)))
 
 private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
   let (elemName, elemTy, nName, nTy) ←
@@ -1622,6 +1651,30 @@ private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
       #[setStmtTyped retTy (sanitizeVarName f.retName) nextRet])
   pure (BooleDDM.Block.block default (ann #[initStmt, loopStmt]))
 
+/-- Collect base-variable names that appear as the *container* argument of
+    a `Std_specs_Core_index_set(container, index, value)` call anywhere in
+    the body.  The translator's call-site lowering (in `stmToBoole`) rewrites
+    these to `container := Sequence.update(container, index, value)`, so the
+    mutation reaches the emitted Boole even though the source AST holds it
+    as a `Stm.Call`, not a `Stm.Assign`.  Used to identify by-value input
+    parameters that need a shadow local. -/
+partial def collectIndexSetTargets : Stm → List String
+  | .Block stms => stms.flatMap collectIndexSetTargets
+  | .If _ b1 b2 =>
+    collectIndexSetTargets b1 ++ (b2.map collectIndexSetTargets).getD []
+  | .Loop _ _ cond body _ _ =>
+    (match cond with
+      | some (s, _) => collectIndexSetTargets s
+      | none => []) ++ collectIndexSetTargets body
+  | .DeadEnd s | .OpenInvariant s | .ClosureInner s => collectIndexSetTargets s
+  | .Call fn _ args =>
+    if isIndexSetName fn then
+      match args.head? with
+      | some e => (vecVarFromExp e).toList
+      | none => []
+    else []
+  | _ => []
+
 def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (sfMap : SpecFnMap) (f : ExecFn) : BuildM BCmd := do
   let fnName := identToBoole f.name
@@ -1631,7 +1684,30 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let mutOutDecls :=
     f.inputs.filterMap (fun (n, t) =>
       (mutRefPayload? t).map (fun payloadTy => (n, s!"{n}_out", payloadTy)))
-  let mutRenames := mutOutDecls.map (fun (n, outName, _) => (n, outName))
+  -- By-value mutable parameters: Verus permits `mut p: T` for non-`&mut`
+  -- parameters and the body assigns to them in place.  Strata's
+  -- modifies-discipline rejects mutating an input parameter, so for every
+  -- non-`&mut` input that the body assigns to we introduce a shadow local
+  -- `<name>_local`, copy the parameter value at procedure entry, and
+  -- rewrite all body references to the shadow name.  Parallels the
+  -- `mutOutDecls` pattern used for `&mut` parameters.
+  let mutRefInputNames := mutOutDecls.map (fun (n, _, _) => n)
+  -- Names mutated by direct `Assign` LHS in the body.
+  let assignedInBody := (collectSetVars f.body).map LocalDeclInfo.name
+  -- Names mutated indirectly via `Std_specs_Core_index_set(container, …)`
+  -- calls.  The translator rewrites these to `container := Sequence.update(…)`
+  -- in `stmToBoole`, so the mutation appears in the emitted Boole even though
+  -- `collectSetVars` doesn't see it in the source AST.
+  let mutatedNames := assignedInBody ++ collectIndexSetTargets f.body
+  let byValMutDecls : List (String × String × Typ) :=
+    f.inputs.filterMap (fun (n, t) =>
+      if mutRefInputNames.contains n then none
+      else if mutatedNames.contains n then
+        some (n, s!"{n}_local", t)
+      else none)
+  let mutRenames :=
+    mutOutDecls.map (fun (n, outName, _) => (n, outName)) ++
+    byValMutDecls.map (fun (n, localName, _) => (n, localName))
   let rewrittenBody :=
     let b := stripDecreaseArtifacts (expandReveals sfMap (applyNameSubstsStm mutRenames f.body))
     let b := normalizeBody isPureBooleBuiltinCallName b
@@ -1646,46 +1722,69 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let bodyHasForLoop := stmHasForLoop rewrittenBody
   let localsAll := collectProcedureLocals f.locals inputNames retNames setVars (hasForLoop := bodyHasForLoop)
   let localsAll := filterLocalsByUse (stripForLoopScaffoldingFromBody rewrittenBody) localsAll
+  -- Drop names that the recovered for-loop's binder declares inline.
+  let localsAll := filterOutForLoopBinders rewrittenBody localsAll
+  -- Append shadow-locals for mutated by-value parameters.  These are
+  -- referenced by the body (after the `<n>` → `<n>_local` rename above) but
+  -- aren't surfaced by `collectSetVars` because the mutation appears as an
+  -- `index_set` Call rather than an `Assign`.  Adding them ensures both the
+  -- `var <n>_local : T;` declaration and the env entry needed to translate
+  -- the body's references.
+  let localsAll := localsAll ++ byValMutDecls.map (fun (_, localName, ty) =>
+    { name := localName, ty := ty, origin := .implicitSet : LocalDeclInfo })
   let outputs := retDecls ++ mutOutputDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
   let outputsAnn := ann outputDecls?
   let isDeclOnly := match f.body with | .Block [] => true | _ => false
   let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
-  let (specElts, body) ← withScope do
+  let (specElts, body, decrAnn) ← withScope do
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires rewrittenEnsures []
-    if isDeclOnly && isVecFromElemName f.name then
-      let body ← synthesizeVecFromElemBody f
-      pure (specElts, body)
-    else if isDeclOnly then
-      -- `#[verifier::external]` tells Verus to ignore the given item. Verus
-      -- will error if any verified code attempts to reference the given item.
-      -- `#[verifier::external_body]` tells Verus to only consider the function
-      -- definition but not the function body, trusting that it correctly
-      -- satisfies its specification.
-      -- Strata's `command_procedure` with `body = none` is *not* treated as
-      -- a trusted declaration — it still emits per-ensures obligations that
-      -- the (missing) body must satisfy, which fails for non-trivial specs.
-      -- Emit `{ assume false; }` instead so the body trivially satisfies its
-      -- postconditions; callers continue to use the spec as written.
-      let body := BooleDDM.Block.block default (ann #[assumeStmt "" (boolConst false)])
-      pure (specElts, body)
-    else
-      let localStmts ← localsToVarStmts localsAll
-      -- Init mutable-out variables from inputs
-      let mutOutInits ← mutOutDecls.mapM (fun (inName, outName, payloadTy) => do
-        let inExpr ← resolveVar inName
-        let outTy ← typToBooleType payloadTy
-        pure (setStmtTyped outTy (sanitizeVarName outName) inExpr))
-      let retVar? := if hasRet then some (f.retName, f.returnType) else none
-      let bodyStmts ← stmToBoole envLocal projLayouts mutArgMap retVar? fnName rewrittenBody
-      let allStmts := localStmts ++ mutOutInits ++ bodyStmts
-      let body := BooleDDM.Block.block default (ann allStmts.toArray)
-      pure (specElts, body)
+    -- Lower the source-level `decreases` clause BEFORE body translation so
+    -- the bound-var stack is in a known-clean state.  Body translation may
+    -- leave additional bound vars on the stack, which would produce
+    -- dangling `bvar!N` indices in the decreases expression.
+    let decrAnn ← decreasesToMeasureAnn envLocal f.decreases
+    let (specElts, body) ←
+      if isDeclOnly && isVecFromElemName f.name then
+        let body ← synthesizeVecFromElemBody f
+        pure (specElts, body)
+      else if isDeclOnly then
+        -- `#[verifier::external]` tells Verus to ignore the given item. Verus
+        -- will error if any verified code attempts to reference the given item.
+        -- `#[verifier::external_body]` tells Verus to only consider the function
+        -- definition but not the function body, trusting that it correctly
+        -- satisfies its specification.
+        -- Strata's `command_procedure` with `body = none` is *not* treated as
+        -- a trusted declaration — it still emits per-ensures obligations that
+        -- the (missing) body must satisfy, which fails for non-trivial specs.
+        -- Emit `{ assume false; }` instead so the body trivially satisfies its
+        -- postconditions; callers continue to use the spec as written.
+        let body := BooleDDM.Block.block default (ann #[assumeStmt "" (boolConst false)])
+        pure (specElts, body)
+      else
+        let localStmts ← localsToVarStmts localsAll
+        -- Init mutable-out variables from inputs
+        let mutOutInits ← mutOutDecls.mapM (fun (inName, outName, payloadTy) => do
+          let inExpr ← resolveVar inName
+          let outTy ← typToBooleType payloadTy
+          pure (setStmtTyped outTy (sanitizeVarName outName) inExpr))
+        -- Init shadow locals for mutated by-value parameters from the
+        -- corresponding input parameter.
+        let byValInits ← byValMutDecls.mapM (fun (inName, localName, payloadTy) => do
+          let inExpr ← resolveVar inName
+          let localTy ← typToBooleType payloadTy
+          pure (setStmtTyped localTy (sanitizeVarName localName) inExpr))
+        let retVar? := if hasRet then some (f.retName, f.returnType) else none
+        let bodyStmts ← stmToBoole envLocal projLayouts mutArgMap retVar? fnName rewrittenBody
+        let allStmts := localStmts ++ mutOutInits ++ byValInits ++ bodyStmts
+        let body := BooleDDM.Block.block default (ann allStmts.toArray)
+        pure (specElts, body)
+    pure (specElts, body, decrAnn)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
-  pure (.boole_procedure default name typeArgs inputBindings outputsAnn (ann none) spec (ann (some body)))
+  pure (.boole_procedure default name typeArgs inputBindings outputsAnn decrAnn spec (ann (some body)))
 
 /-! ### Struct/Enum → BCmd -/
 

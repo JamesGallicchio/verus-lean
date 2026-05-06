@@ -27,6 +27,7 @@ export VerusLean.Boole.Builder (
   varStmt initStmt setStmt havocStmt
   assertStmt assumeStmt coverStmt callStmt blockStmt setStmtTyped
   iteStmt whileStmt forToStmt exitStmt returnStmt
+  mkMeasure
 )
 
 end VerusLean.Boole.Bld

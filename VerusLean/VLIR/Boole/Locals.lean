@@ -143,4 +143,46 @@ def filterLocalsByUse
     (body : Stm) (locals : List LocalDeclInfo) : List LocalDeclInfo :=
   locals.filter (fun decl => stmMentionsVar decl.name body)
 
+-- Collect the binder names of every recovered source `for` loop in the
+-- body.  In the post-rebase Boole grammar (`kondylidou/pr/benchmarks` tip
+-- 9d3e26e5b onward) the `for_to_by_statement` binder declares its loop
+-- variable inline, so a separate `var i : bv64;` in the procedure's
+-- var-block would conflict with "Variable i of type bv64 already in
+-- context" at type-check time.  We exclude these names from the emitted
+-- locals list.
+mutual
+  partial def collectForLoopVarNamesStm : Stm → List String
+    | .Block stms => collectForLoopVarNamesStms stms
+    | .If _ b1 b2 =>
+      collectForLoopVarNamesStm b1 ++ (b2.map collectForLoopVarNamesStm).getD []
+    | .Loop _ _ cond body _ _ =>
+      let condStms := match cond with
+        | some (s, _) => collectForLoopVarNamesStm s
+        | none => []
+      condStms ++ collectForLoopVarNamesStm body
+    | .DeadEnd stm => collectForLoopVarNamesStm stm
+    | .OpenInvariant stm => collectForLoopVarNamesStm stm
+    | .ClosureInner body => collectForLoopVarNamesStm body
+    | _ => []
+
+  partial def collectForLoopVarNamesStms : List Stm → List String
+    | [] => []
+    | stms =>
+      match recoverForLoop? stms with
+      | some loop =>
+        loop.loopVarName :: collectForLoopVarNamesStm (.Block loop.userBody) ++
+          collectForLoopVarNamesStms loop.postStms
+      | none =>
+        match stms with
+        | [] => []
+        | s :: rest =>
+          collectForLoopVarNamesStm s ++ collectForLoopVarNamesStms rest
+end
+
+/-- Filter out locals whose names match for-loop binders found in the body. -/
+def filterOutForLoopBinders
+    (body : Stm) (locals : List LocalDeclInfo) : List LocalDeclInfo :=
+  let binders := (collectForLoopVarNamesStm body).eraseDups
+  locals.filter (fun decl => !binders.contains decl.name)
+
 end VerusLean.Boole.Locals
