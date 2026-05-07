@@ -836,7 +836,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     else if fnameStr == "Seq_skip" then
       match argsFiltered with
       | [sArg, nArg] =>
-        mkSeqBuiltinCall "drop"
+        mkSeqBuiltinCall "skip"
           [(sArg, lookupFnParamTypeFull env fnameStr 0), (nArg, some .Int)]
       | _ => mkFallback
     else if fnameStr == "Seq_add" then
@@ -851,10 +851,8 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let s ← expToBoole env bound (lookupFnParamTypeFull env fnameStr 0) sArg
         let start ← expToBoole env bound (some .Int) startArg
         let stop ← expToBoole env bound (some .Int) endArg
-        let len := intSub stop start
-        let dropped := Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.drop")) [s, start]
-        let taken := Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.take")) [dropped, len]
-        return taken
+        let subrangeIdx ← resolveFreeVar "Sequence.subrange"
+        return Bld.appN (Bld.fvar subrangeIdx) [s, start, stop]
       | _ => mkFallback
     else if fnameStr == "Seq_lib_contains" then
       match argsFiltered with
