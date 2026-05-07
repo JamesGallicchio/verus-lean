@@ -1334,25 +1334,25 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
       pushBoundVar loopVarSan
       let invExprs ← loop.invariants.toArray.mapM (fun inv =>
         expToBooleFlat env (some .Bool) inv.body)
-      -- Drop the source-level `decreases` witness. Two reasons this is
-      -- total rather than selective:
-      --   (1) Strata's `for_to_by` / `for_down_to_by` grammar has no
-      --       measure slot (tracked upstream in our
-      --       `add-for-loop-measure-clause` branch).
-      --   (2) When the Verus source has no explicit `decreases`, Verus
-      --       auto-synthesizes one as
-      --         `if isSome(Pervasive_ghost_decrease(iter))
-      --             then Option_Some_0(...) else Pervasive_arbitrary`.
-      --       `Pervasive_ghost_decrease` is not in our prelude, and the
-      --       `isGhostPervasiveCallName` filter only fires on statement-
-      --       level calls, not inside expressions — so keeping the
-      --       expression would emit it as an unknown fvar.
-      -- When the grammar slot lands, restore the earlier lowering but
-      -- skip clauses whose head is a `Pervasive_ghost_*` call:
-      --   loop.decrease.head?.filter (not a ghost-pervasive Exp)
-      --     |>.mapM (fun e => expToBooleFlat env none e
-      --               >>= coerceNumeric _ (some .int))
-      let measureExpr? := none
+      -- Lower the first source `decreases` term into the for-loop's
+      -- measure slot.  Lexicographic decreases (multiple terms) collapse
+      -- to the head — combining them is future work.  Skip clauses whose
+      -- head is a `Pervasive_ghost_*` call, which is how Verus shapes the
+      -- auto-synthesized decrease for an iterator without an explicit
+      -- source clause:
+      --   `if isSome(Pervasive_ghost_decrease(iter))
+      --       then Option_Some_0(...) else Pervasive_arbitrary`
+      -- That expression references iterator scaffolding that isn't in
+      -- our prelude; lowering it would surface as an unresolved fvar.
+      let measureExpr? ← match loop.decrease.head? with
+        | some e =>
+          if expContainsGhostPervasiveCall e then pure none
+          else do
+            let ce0 ← expToBooleFlat env none e
+            let srcKind? := inferNumKind env [] e
+            let ce ← coerceNumeric srcKind? (some .int) ce0
+            pure (some ce)
+        | none => pure none
       let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? procName (Stm.Block loop.userBody)
       pure (invExprs, measureExpr?, bodyStms)
     let loopStmt := forToStmt loopVarSan loopVarTy startExpr limitExpr

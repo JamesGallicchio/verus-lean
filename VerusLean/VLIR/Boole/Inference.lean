@@ -456,4 +456,38 @@ def inferComparisonNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option 
 def inferComparisonBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bool) :=
   if expHasMixedIntBvArith env bound e then none else inferBitInfo env bound e
 
+/-- Detects Verus' auto-synthesized for-loop decreases.  When the source
+    has no explicit `decreases` clause, Verus inserts something shaped like
+    `if isSome(Pervasive_ghost_decrease(iter)) then Option_Some_0(...) else
+    Pervasive_arbitrary` — the leaf calls reference iterator scaffolding
+    that isn't in the prelude, so emitting it as a Boole measure would
+    surface as an unresolved fvar.  We use this to skip those decreases
+    rather than lower them. -/
+partial def expContainsGhostPervasiveCall : Exp → Bool
+  | .Call fn _ args =>
+    isGhostPervasiveCallName (CallFun.name fn) ||
+      args.any expContainsGhostPervasiveCall
+  | .CallLambda body args =>
+    expContainsGhostPervasiveCall body || args.any expContainsGhostPervasiveCall
+  | .StructCtor _ fields => fields.any (fun (_, e) => expContainsGhostPervasiveCall e)
+  | .EnumCtor _ _ fields => fields.any (fun (_, e) => expContainsGhostPervasiveCall e)
+  | .TupleCtor _ elems => elems.any expContainsGhostPervasiveCall
+  | .Unary _ e => expContainsGhostPervasiveCall e
+  | .Binary _ a b => expContainsGhostPervasiveCall a || expContainsGhostPervasiveCall b
+  | .If c t f =>
+    expContainsGhostPervasiveCall c ||
+      expContainsGhostPervasiveCall t ||
+      expContainsGhostPervasiveCall f
+  | .Bind bind body =>
+    let bindHas := match bind with
+      | .Let _ _ e => expContainsGhostPervasiveCall e
+      | .Quant _ _ triggers =>
+        triggers.any (fun group => group.any expContainsGhostPervasiveCall)
+      | .Lambda _ => false
+    bindHas || expContainsGhostPervasiveCall body
+  | .ArrayLiteral elems => elems.any expContainsGhostPervasiveCall
+  | .MatchBlock (scrut, _) body =>
+    expContainsGhostPervasiveCall scrut || expContainsGhostPervasiveCall body
+  | _ => false
+
 end VerusLean.Boole.Inference
