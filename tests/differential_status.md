@@ -681,32 +681,39 @@ to repeat them.
   `bad_loop` requires).  Adjacent to `[TRANS-coercion-uninterpreted]`
   but the failure is at type-check rather than at solver time.
 
-### `[SURFACE-sequence-empty]` typed `Sequence.empty_<T>` mostly resolved
-- **2026-05-07 update — typed dispatch ships in `expected?`-known
-  contexts** (verus-boogie commit `8048d3a`).  Boole's grammar
-  exposes `Sequence.empty_bv8 / _bv16 / _bv32 / _bv64 / _int` (the
-  DDM parser cannot resolve a polymorphic `Sequence.empty` without
-  arguments).  The translator now picks the right token via the new
+### `[SURFACE-sequence-empty]` typed `Sequence.empty_<T>` resolved
+- **2026-05-07 — typed dispatch in `expected?`-known contexts**
+  (verus-boogie commit `8048d3a`).  Boole's grammar exposes
+  `Sequence.empty_bv8 / _bv16 / _bv32 / _bv64 / _int` (the DDM
+  parser cannot resolve a polymorphic `Sequence.empty` without
+  arguments).  The translator picks the right token via the new
   `seqEmptyTokenName` helper at every `resolveFreeVar
-  "Sequence.empty"` site (`Translate.lean` lines 279, 797, 1120,
-  1619), threaded through `seqEmptyExpr`/`seqLiteralExpr`/
-  `seqRepeatExpr`.  Verified on `sha256_compact_indexed.lean` —
-  emits `Sequence.empty_bv32` automatically; eliminated the previous
-  manual edits the wrapper required.
-- **Remaining gap** (open in `boole-translation-todo.md`): when a
-  sequence literal appears in **equality / comparison position
-  inside a bool-typed context** (e.g. `assert v == Sequence.build(…,
-  Sequence.empty, …)`), `expected? = some .Bool` and the element
-  type isn't reachable through `firstStructParamFromExpected?`.
-  Surfaces in `tests/BoolePrograms/verus-examples/guide__lib_examples.lean`
-  with `Unknown expr identifier Sequence.empty` errors on
-  comparison RHS literals.  Fix likely needs the comparison-prelude
-  to thread the inferred operand type into the literal side's
-  `expected?`.
-- Affects: `verus-examples:guide/lib_examples` (still hits the
-  equality-position gap), `verus-examples:guide/quants`,
-  `vlir-tests:test_vstd`, and other sequence-heavy tests where
-  literals appear in bool-typed comparisons.
+  "Sequence.empty"` site, threaded through `seqEmptyExpr` /
+  `seqLiteralExpr` / `seqRepeatExpr`.  Eliminated the manual edits
+  the SHA-256 wrapper required.
+- **2026-05-08 — equality-position gap closed.**  When a sequence
+  literal appears in `assert v == Sequence.append(…, Sequence.build(…,
+  Sequence.empty, …), …)`, the inner `Sequence.empty` was previously
+  emitted untyped because `expected? = some .Bool` carried no
+  element-type hint and `Seq_*` arms looked up the polymorphic
+  static signature instead of using the call's `expected?`.  Two
+  changes: (a) `comparisonPrelude` now uses `inferComparableTyp?`
+  to propagate one side's concrete type as `expected?` to the other
+  side when neither side has bv info; (b) every `Seq_*` arm in
+  `expToBoole`'s Call branch now prefers a concrete `Sequence T`
+  `expected?` over the polymorphic `lookupFnParamTypeFull` value via
+  the new `seqArgExpected?` helper — letting nested
+  `Sequence.append`/`Sequence.build` chains thread the element type
+  down to `Sequence.empty_<T>` literals at the leaves.
+- **Validation**: `verus-examples:guide/lib_examples`,
+  `verus-examples:guide/quants`, and `vlir-tests:test_vstd` now
+  emit zero untyped `Sequence.empty` tokens.  Each test still fails
+  for a different (pre-existing) reason — `lib_examples` on
+  int-vs-nat coercion in `Seq_new(5, fun i: int => …)`,
+  `quants` on the multi-binder / expression-level `[TRANS-choose]`
+  gaps, `test_vstd` on `Unknown variable Map_new` — but the
+  `Sequence.empty` typed-dispatch issue itself is resolved across
+  all reachable contexts.
 
 ### `[MODEL-unit]` Missing Strata `Unit` (Core-only)
 - Raw Core still leaks `Tuple_ctor_0(): Unit` in places where the Verus source

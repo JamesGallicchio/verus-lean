@@ -337,6 +337,13 @@ private partial def comparisonPrelude
     -- Same narrow-then-widen gating as `.Binary` (see that site).
     let lExpected? := if lhsInfo?.isSome then none else argTy?
     let rExpected? := if rhsInfo?.isSome then none else argTy?
+    -- Non-numeric (e.g. sequence) comparisons: neither side carries a bv
+    -- `argTy?`, so without help the literal side gets `expected? = none`
+    -- and any `Sequence.empty` inside it falls back to the untyped name.
+    -- Use `inferComparableTyp?` to read the typed side's concrete type and
+    -- propagate it as `expected?` to the OTHER side.
+    let lExpected? := lExpected? <|> inferComparableTyp? env bound rhs
+    let rExpected? := rExpected? <|> inferComparableTyp? env bound lhs
     let l0 ← expToBoole env bound lExpected? lhs
     let r0 ← expToBoole env bound rExpected? rhs
     let targetInfo? := argTy?.bind bitInfoOfTyp
@@ -633,6 +640,17 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       let args' ← argSpecs.mapM (fun (arg, ty?) => expToBoole env bound ty? arg)
       let fnIdx ← resolveFreeVar s!"Sequence.{opName}"
       return Bld.appN (Bld.fvar fnIdx) args'
+    -- For Seq_* whose result is a `Sequence T`, prefer the call's
+    -- `expected?` (which may be concrete, e.g. `Sequence bv32` from a
+    -- comparison context) over the polymorphic static signature
+    -- (`Sequence (TypParam "T")`).  This lets nested
+    -- `Sequence.append` / `Sequence.build` chains thread a concrete
+    -- element type down to `Sequence.empty_<T>` literals at the
+    -- leaves.  When `expected?` is not a `Sequence …`, fall back to
+    -- the static signature.
+    let seqArgExpected? : Option Typ :=
+      if (expected?.map isSeqTyp).getD false then expected?
+      else lookupFnParamTypeFull env fnameStr 0
     let mkFallback := do
       -- Some library fns have abstract declarations emitted as
       -- support decls (not in the prelude text) because their types
@@ -815,40 +833,38 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     else if fnameStr == "Seq_update" then
       match argsFiltered with
       | [sArg, iArg, vArg] =>
+        let elemTy? := seqArgExpected?.bind seqElemTyp?
+            <|> lookupFnParamTypeFull env fnameStr 2
         mkSeqBuiltinCall "update"
-          [(sArg, lookupFnParamTypeFull env fnameStr 0),
-           (iArg, some .Int),
-           (vArg, lookupFnParamTypeFull env fnameStr 2)]
+          [(sArg, seqArgExpected?), (iArg, some .Int), (vArg, elemTy?)]
       | _ => mkFallback
     else if fnameStr == "Seq_push" then
       match argsFiltered with
       | [sArg, vArg] =>
-        mkSeqBuiltinCall "build"
-          [(sArg, lookupFnParamTypeFull env fnameStr 0),
-           (vArg, lookupFnParamTypeFull env fnameStr 1)]
+        let elemTy? := seqArgExpected?.bind seqElemTyp?
+            <|> lookupFnParamTypeFull env fnameStr 1
+        mkSeqBuiltinCall "build" [(sArg, seqArgExpected?), (vArg, elemTy?)]
       | _ => mkFallback
     else if fnameStr == "Seq_take" then
       match argsFiltered with
       | [sArg, nArg] =>
-        mkSeqBuiltinCall "take"
-          [(sArg, lookupFnParamTypeFull env fnameStr 0), (nArg, some .Int)]
+        mkSeqBuiltinCall "take" [(sArg, seqArgExpected?), (nArg, some .Int)]
       | _ => mkFallback
     else if fnameStr == "Seq_skip" then
       match argsFiltered with
       | [sArg, nArg] =>
-        mkSeqBuiltinCall "skip"
-          [(sArg, lookupFnParamTypeFull env fnameStr 0), (nArg, some .Int)]
+        mkSeqBuiltinCall "skip" [(sArg, seqArgExpected?), (nArg, some .Int)]
       | _ => mkFallback
     else if fnameStr == "Seq_add" then
       match argsFiltered with
       | [s1Arg, s2Arg] =>
-        let seqTy? := lookupFnParamTypeFull env fnameStr 0
-        mkSeqBuiltinCall "append" [(s1Arg, seqTy?), (s2Arg, seqTy?)]
+        mkSeqBuiltinCall "append"
+          [(s1Arg, seqArgExpected?), (s2Arg, seqArgExpected?)]
       | _ => mkFallback
     else if fnameStr == "Seq_subrange" then
       match argsFiltered with
       | [sArg, startArg, endArg] =>
-        let s ← expToBoole env bound (lookupFnParamTypeFull env fnameStr 0) sArg
+        let s ← expToBoole env bound seqArgExpected? sArg
         let start ← expToBoole env bound (some .Int) startArg
         let stop ← expToBoole env bound (some .Int) endArg
         let subrangeIdx ← resolveFreeVar "Sequence.subrange"
@@ -864,7 +880,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     else if fnameStr == "Seq_lib_drop_last" then
       match argsFiltered with
       | [sArg] =>
-        let s ← expToBoole env bound (lookupFnParamTypeFull env fnameStr 0) sArg
+        let s ← expToBoole env bound seqArgExpected? sArg
         let one := intConst 1
         let lenMinusOne := intSub (seqLength s) one
         return Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.take")) [s, lenMinusOne]
@@ -872,7 +888,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     else if fnameStr == "Seq_lib_remove" then
       match argsFiltered with
       | [sArg, iArg] =>
-        let s ← expToBoole env bound (lookupFnParamTypeFull env fnameStr 0) sArg
+        let s ← expToBoole env bound seqArgExpected? sArg
         let i ← expToBoole env bound (some .Int) iArg
         let one := intConst 1
         let suffixStart := intAdd i one
