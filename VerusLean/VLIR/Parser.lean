@@ -937,10 +937,13 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
     -- throw "not yet implemented Bind.Lambda"
 
   | ("Choose", obj) =>
-    let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 1
+    -- Verus shape: [binders, triggers, predicate].  Triggers are erased
+    -- (matches Quant's no-trigger policy); the predicate is parsed with
+    -- the binders in scope so its bvars resolve correctly.
+    let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 3
     let binders ← VarBinder.typBindersFromJson arr[0]
-    -- We currently erase choose predicates/triggers and keep binder information.
-    return .Lambda binders
+    let pred ← withBoundVars binders (fromJsonSpanned arr[2] Exp.fromJson)
+    return .Choose binders pred
 
   | s => throw s!"unexpected: {s}"
 

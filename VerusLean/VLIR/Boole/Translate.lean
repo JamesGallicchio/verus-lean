@@ -914,6 +914,14 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let ty' ← typToBooleType ty
         pure (sanitizeVarName v, ty'))
       return lambdaExpr binds body'
+    | .Choose _vars _pred =>
+      -- Boole has no expression-level `choose`; the predicate is dropped
+      -- here.  In practice the Verus shape is `let lhs = choose|v| pred(v)`,
+      -- which `stmToBoole`'s `.Assign` arm intercepts and emits as a
+      -- `choose_assign` statement (preserving the predicate); only that
+      -- path is currently exercised by tests.  Fallback when reached
+      -- elsewhere: translate the body verbatim.
+      expToBoole env bound expected? body
   | .MatchBlock _scrut body =>
     expToBoole env bound expected? body
   | .ArrayLiteral elems => do
@@ -1145,6 +1153,21 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           let lhsTy' ← typToBooleType lhsTy
           return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
     let rhsCore := peelCallWrappers rhs
+    -- `let lhs = choose|v| pred(v)` lowers to Boole's `choose_assign`
+    -- statement (`lhs := choose v : T :: pred;`).  The Verus AST for this
+    -- shape is `Bind (Choose [(v, ty)] pred) (Var v)` after wrappers are
+    -- stripped; we recognise it here rather than letting the expression
+    -- path drop the predicate.  Single-binder only — multi-binder
+    -- choose-let lowers to a tuple destructure on the Verus side, which
+    -- doesn't reach this arm.
+    if let some lhsName := lvalueVarName? lhs then
+      if let .Bind (.Choose [(v, vTy)] pred) (.Var bodyVar) := rhsCore then
+        if v == bodyVar then
+          let vTy' ← typToBooleType vTy
+          let pred' ← withScope do
+            addBoundVars #[v]
+            expToBooleFlat env (some .Bool) pred
+          return [chooseAssignStmt (sanitizeVarName lhsName) (sanitizeVarName v) vTy' pred']
     match rhsCore with
     | .Call fn _typArgs args => do
       let fnName := CallFun.name fn

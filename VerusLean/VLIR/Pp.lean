@@ -145,6 +145,9 @@ partial def Bind.pp (b : Bind) : String :=
   | .Lambda vars =>
     let varsStr := vars.map (fun ⟨i, ty⟩ => s!"({i} : {ty.pp})")
     s!"λ {varsStr} =>"
+  | .Choose vars pred =>
+    let varsStr := vars.map (fun ⟨i, ty⟩ => s!"({i} : {ty.pp})")
+    s!"choose {varsStr} :: {Exp.pp pred}"
 
 partial def Exp.pp (e : Exp) : String :=
   match e with

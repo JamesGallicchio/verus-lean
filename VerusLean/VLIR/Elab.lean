@@ -317,6 +317,11 @@ partial def Bind.toTerm (b : Bind) (t : Term) : CoreM Term := do
         let ty ← ty.toTerm
         `(funBinder| ($i : $ty)))
     `(fun $(varsLambda):funBinder* => $t)
+  | .Choose _vars _pred =>
+    -- Verus' `choose|x| pred(x)` has no direct Lean term form; emit `t`
+    -- (the choose body, typically a binder reference) as a placeholder.
+    -- The Boole pipeline handles the proper lowering to `choose_assign`.
+    return t
 
 -- TODO: only include parentheses if the term is nontrivial
 partial def VstdFnToTerm (fn : Ident) (exps : List Exp) : CoreM Term := do

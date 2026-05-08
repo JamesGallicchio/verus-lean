@@ -216,6 +216,15 @@ def setStmt (name : String) (rhs : BExpr) : BStmt :=
 def havocStmt (name : String) : BStmt :=
   .havoc_statement default (ann name)
 
+/-- Build `lhs := choose v : T :: pred;`.  Strata lowers this to
+    `havoc lhs; assume pred[v ↦ lhs];` in the verify pipeline (see
+    `Strata/Languages/Boole/Verify.lean`'s `.choose_assign` arm).  The
+    `pred` expression must be translated with `v` bound at de Bruijn 0
+    so the parser/elaborator picks it up correctly. -/
+def chooseAssignStmt (lhs : String) (v : String) (vTy : BType) (pred : BExpr) : BStmt :=
+  let bind := MonoBind.mono_bind_mk default (ann v) vTy
+  .choose_assign default (ann lhs) bind pred
+
 def assertStmt (label : String) (e : BExpr) : BStmt :=
   .assert default (ann none) (mkLabel label) e
 

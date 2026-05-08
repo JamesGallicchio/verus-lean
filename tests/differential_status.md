@@ -14,6 +14,20 @@ Solver success is **not** used to classify faithfulness.
 - Upstream Strata HEAD: `2e055ab09` (`strata-org/Strata` main as of 2026-04-30).
   Local Strata working tree adds the for-loop `measure` clause, mutual-recursion
   sibling-bvar fix, and datatype-decl symbol registration on top.
+- **2026-05-07 update — Strata pin advanced** to `kondylidou/pr/benchmarks`
+  head `c33cfbe25` (= `boole-pr1075-rebased` after fast-forward).
+  The PR branch supersedes the original three local patches:
+  `for_to_by_statement` / `for_down_to_by_statement` now carry
+  `decr : Option Measure` upstream (the for-loop measure patch is
+  landed); the mutual-recursion sibling-bvar and datatype-symbol patches
+  need re-verification before being re-applied.  Three new local patches
+  are maintained on top of the new tip: (a) `body:0` precedence on the
+  three for-loop body productions in `Boole/Grammar.lean`;
+  (b) `bvDefaultOpName` consolidation in `Boole/Verify.lean` extending
+  the BV-unsigned-default rewrite to `Mod`/`Div` (was comparison-only)
+  and applying it from `toCoreTypedUn` as well as `toCoreTypedBin`;
+  (c) `bvsdiv` / `bvsmod` arms in `toCoreExpr`.  See
+  `docs/boole-translation-todo.md` (local) for full diff details.
 - Boole output (primary):
   - `verus-lean` emits Boole as the primary output. The intended artifact to
     inspect for any test is `tests/BoolePrograms/.../*.lean`; raw
@@ -304,14 +318,30 @@ to repeat them.
 
 ### `[CORE-decreases]` `decreases` preservation
 - **Loop-level**: emitted in concrete `while ... decreases ...` /
-  `for ... decreases ...` syntax. Core's `Stmt.loop`'s `measure : Option
-  P.Expr` is populated faithfully; Boole's `for_to_by` / `for_down_to_by`
-  grammar currently has no measure slot, so for-loop `decreases` is dropped
-  on the Boole side (tracked upstream in our `add-for-loop-measure-clause`
-  branch). `while`-loop `decreases` works in both targets.
-- **Function/procedure-level `decreases`**: not part of either Core's or
-  Boole's procedure grammar. Verus-internal artifacts (`decrease%init*`,
-  `CheckDecrease*`) are stripped from bodies instead of leaking through.
+  `for ... decreases ...` syntax in both Core and Boole.  Core's
+  `Stmt.loop`'s `measure : Option P.Expr` is populated faithfully.
+  **2026-05-07 update — for-loop measure now ships on the Boole side.**
+  After the Strata pin advanced to `kondylidou/pr/benchmarks`,
+  `for_to_by_statement` / `for_down_to_by_statement` carry
+  `decr : Option Measure` upstream, and our translator's for-loop
+  recovery branch threads the source `decreases` head term into
+  the slot via `decreasesToMeasureAnn` (verus-boogie commit
+  `7cf1f7d`).  Verus' auto-synthesized `Pervasive_ghost_decrease(iter)`
+  shape is filtered via the new `expContainsGhostPervasiveCall`
+  walker so it doesn't leak as an unresolved fvar.  Verified on
+  `tests/VerusFiles/demo_for.rs` (`for i in 1..v.len() decreases
+  v.len() - i`).
+- **Function/procedure-level `decreases`**: **2026-05-07 update —
+  shipped on the Boole side** (verus-boogie commit `4ed9b72`).
+  The translator preserves Verus' `local_decls_decreases_init`
+  through JSON parsing onto `ProofFn.decreases` / `ExecFn.decreases`,
+  then lowers the head term into Boole's `Option Measure` slot on
+  `boole_procedure`.  Strata still ignores the slot today (no SMT
+  termination check at the procedure level), but the AST is in
+  place.  Verus-internal artifacts (`decrease%init*`,
+  `CheckDecrease*`) continue to be stripped from bodies.
+  Lex-decreases (multiple terms) collapse to the head; full
+  lexicographic support waits on Strata accepting a tuple measure.
 
 ### `[TRANS-return-comment]` Early return rendered as comment (Core-only)
 - This was a Core-pipeline-only workaround: Verus SST encodes `return expr;`
@@ -526,12 +556,42 @@ to repeat them.
 - Affects: `verus-examples:guide/nonlinear_bitvec`, `verus-examples:quantifiers`,
   and any test using explicit `#[trigger]` / `#![auto]` annotations.
 
-### `[TRANS-choose]` `choose` operator not faithfully translated
-- Verus's `choose|z| g(z)` (Hilbert's epsilon) is parsed as `Bind.Lambda [z]`,
-  erasing the predicate. The faithful encoding would be
-  `havoc z; assume (exists z' :: g(z')) ==> g(z);`.
-- Affects: `verus-examples:syntax`,
-  `verus-examples:trigger_loops` (`choose_example`, `quantifier_example`).
+### `[TRANS-choose]` `choose` operator partially translated
+- **2026-05-07 update — statement-level single-binder `choose` now
+  ships faithfully.**  `Bind.Choose (vars) (pred)` was restored as
+  a first-class VLIR constructor (was previously dropped to
+  `Bind.Lambda [z]` with the predicate erased); `Parser.lean`'s
+  `Choose` arm now reads the predicate from the JSON's `arr[2]`;
+  every `Bind` walker (`Pp`, `Elab`, `Normalize`, `ForLoop`,
+  `Pruning`, `Prelude`, `Inference`) handles the new constructor;
+  `stmToBoole`'s `.Assign` arm detects `Bind (Choose [(v, ty)] pred)
+  (Var v)` after `peelCallWrappers` and emits Boole's
+  `choose_assign : Statement`
+  (`lhs := choose v : T :: pred;`), which Strata lowers to
+  `havoc lhs; assume pred[v ↦ lhs];`.
+- Verified on `tests/scratch/choose_min.rs` (1/1 obligation passes).
+  Cross-checked against the 9 statement-level single-binder
+  occurrences across `trigger_loops.rs` (lines 25, 33),
+  `syntax.rs:279`, `quants.rs` (lines 295, 312, 313),
+  `chapter-1-22.rs` (lines 188, 224) — all emit clean
+  `choose_assign` form.
+- **Two shapes remain unfaithful:**
+  - **Multi-binder choose-let** (`let (x, y) = choose|i, j| pred(i, j)`):
+    Verus desugars to a tuple destructure, so the `Stm.Assign` arm
+    doesn't match.  Surfaces as `Tuple_ctor_2(i, j)` with `i, j`
+    unbound — Strata catches it as `Unknown expr identifier`,
+    not a silent miscompile.  Verus examples:
+    `syntax.rs:284`, `quants.rs:325`.
+  - **Expression-level choose** (`f(choose|j| pred(j))` in argument
+    or other sub-expression position):
+    `expToBoole`'s `.Choose` arm translates the body and silently
+    drops the predicate.  Verus examples:
+    `quants.rs:452`, `state_machines/refinement.rs:81`,
+    `state_machines/refinement_labels.rs:91`,
+    `summer_school/chapter-6-1.rs:117`.  Fix sketch: pre-pass in
+    `Boole/Normalize.lean` that hoists choose-bearing sub-
+    expressions to fresh-temp `Stm.Assign`s, exposing the
+    statement-level path.
 
 ### `[TRANS-float-unsupported]` Floating-point types/operations not yet translated
 - Source `f64`/`f32` literals lower to `Unsupported.Float64`/`Unsupported.Float32`
@@ -581,13 +641,72 @@ to repeat them.
   `encrypt`/`decrypt` loops at `for i : bv64 := bv{64}(0) to
   int_to_bv64_u(Sequence.length(text)) - bv{64}(1)`.
 
-### `[SURFACE-sequence-empty]` `Sequence.empty` as intended future syntax
-- `Sequence.empty` is now emitted intentionally as future-facing Strata syntax.
-- This is treated as faithful translation and a current Strata frontend gap,
-  not as a translation defect.
-- Affects: `verus-examples:guide/lib_examples`,
-  `verus-examples:guide/quants`, `vlir-tests:test_vstd`, and other
-  sequence-heavy tests that otherwise look source-close.
+### `[VERIFY-datatype-tester-ordering]` Strata: datatype tester resolves as free variable when its datatype is declared first
+- **Filed against Strata.**  Trigger conditions bisected: program
+  has ≥4 datatype declarations AND the position-0 datatype's
+  testers (`<dt>..is<ctor>`) are referenced by a later function
+  or procedure body.  Type-check fails with `Free Variables:
+  [<dt>..is<ctor>]` on an auto-generated obligation that includes
+  the same tester twice — once recognised as an op (`~`-prefixed),
+  once as a free variable.
+- Localised to `Boole.toCoreProgram`'s lowering (the LContext
+  function-table construction path).  The same program written
+  directly in Core verifies cleanly, so the bug is Boole-side
+  rather than Core-side.  No translator workaround possible from
+  our side.
+- **Causes flake on tests/working_tests.txt**: Verus' Lean
+  exporter (`vir/src/sst_to_lean.rs::lctx.dts: HashSet<Dt>`)
+  iterates non-deterministically, so `verus-examples:guide/datatypes`
+  intermittently triggers the position-0 condition and flips
+  pass/fail between runs of the same source.  Awaiting Strata
+  maintainer fix.
+- Affects: `verus-examples:guide/datatypes` (run-to-run flake),
+  any future test with ≥4 datatypes where one has match-cased
+  testers.
+
+### `[TRANS-nat-quantifier-arith]` `nat` binders in quantifier arithmetic context
+- Verus source: `requires forall|x: nat, y: nat| f(x + 1, 2 * y)
+  && …`.  The translator emits the binders with type `nat` and
+  the arithmetic with type `int`, producing
+  `∀ x : nat, y : nat :: f(x + 1, 2 * y) && …` which Strata
+  rejects with *Expression has type int when nat expected*.
+- Surfaced while sweeping `choose|x|` test sites (priority-8
+  validation pass).  The test's choose statements lower
+  correctly; the surrounding `requires` clause's nat-quantifier
+  hits this pre-existing bug instead.
+- Likely fix: either coerce binders to `int` for arithmetic
+  contexts (matching how scalars are handled elsewhere in the
+  pipeline) or wrap each use of the binder in `nat_to_int(...)`.
+- Affects: `verus-examples:trigger_loops` (line 36's
+  `bad_loop` requires).  Adjacent to `[TRANS-coercion-uninterpreted]`
+  but the failure is at type-check rather than at solver time.
+
+### `[SURFACE-sequence-empty]` typed `Sequence.empty_<T>` mostly resolved
+- **2026-05-07 update — typed dispatch ships in `expected?`-known
+  contexts** (verus-boogie commit `8048d3a`).  Boole's grammar
+  exposes `Sequence.empty_bv8 / _bv16 / _bv32 / _bv64 / _int` (the
+  DDM parser cannot resolve a polymorphic `Sequence.empty` without
+  arguments).  The translator now picks the right token via the new
+  `seqEmptyTokenName` helper at every `resolveFreeVar
+  "Sequence.empty"` site (`Translate.lean` lines 279, 797, 1120,
+  1619), threaded through `seqEmptyExpr`/`seqLiteralExpr`/
+  `seqRepeatExpr`.  Verified on `sha256_compact_indexed.lean` —
+  emits `Sequence.empty_bv32` automatically; eliminated the previous
+  manual edits the wrapper required.
+- **Remaining gap** (open in `boole-translation-todo.md`): when a
+  sequence literal appears in **equality / comparison position
+  inside a bool-typed context** (e.g. `assert v == Sequence.build(…,
+  Sequence.empty, …)`), `expected? = some .Bool` and the element
+  type isn't reachable through `firstStructParamFromExpected?`.
+  Surfaces in `tests/BoolePrograms/verus-examples/guide__lib_examples.lean`
+  with `Unknown expr identifier Sequence.empty` errors on
+  comparison RHS literals.  Fix likely needs the comparison-prelude
+  to thread the inferred operand type into the literal side's
+  `expected?`.
+- Affects: `verus-examples:guide/lib_examples` (still hits the
+  equality-position gap), `verus-examples:guide/quants`,
+  `vlir-tests:test_vstd`, and other sequence-heavy tests where
+  literals appear in bool-typed comparisons.
 
 ### `[MODEL-unit]` Missing Strata `Unit` (Core-only)
 - Raw Core still leaks `Tuple_ctor_0(): Unit` in places where the Verus source

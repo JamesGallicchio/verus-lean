@@ -440,6 +440,7 @@ partial def expHasMixedIntBvArith (env : VarEnv) (bound : BoundEnv) : Exp → Bo
       | .Quant _ _ triggers =>
         triggers.any (fun group => group.any (expHasMixedIntBvArith env bound))
       | .Lambda _ => false
+      | .Choose _ pred => expHasMixedIntBvArith env bound pred
     bindHasMixed || expHasMixedIntBvArith env bound body
   | .Call _ _ args | .CallLambda _ args | .TupleCtor _ args | .ArrayLiteral args =>
     args.any (expHasMixedIntBvArith env bound)
@@ -484,6 +485,7 @@ partial def expContainsGhostPervasiveCall : Exp → Bool
       | .Quant _ _ triggers =>
         triggers.any (fun group => group.any expContainsGhostPervasiveCall)
       | .Lambda _ => false
+      | .Choose _ pred => expContainsGhostPervasiveCall pred
     bindHas || expContainsGhostPervasiveCall body
   | .ArrayLiteral elems => elems.any expContainsGhostPervasiveCall
   | .MatchBlock (scrut, _) body =>

@@ -151,6 +151,7 @@ private partial def refsOfExp : Exp → List String
       | .Quant _ vars trigs =>
         vars.flatMap (fun v => refsOfTyp v.2) ++ trigs.flatMap (fun g => g.flatMap refsOfExp)
       | .Lambda vars => vars.flatMap (fun v => refsOfTyp v.2)
+      | .Choose vars pred => vars.flatMap (fun v => refsOfTyp v.2) ++ refsOfExp pred
     (bindRefs ++ refsOfExp body).eraseDups
   | .ArrayLiteral elems => ("Sequence" :: elems.flatMap refsOfExp).eraseDups
   | .MatchBlock (scrut, ty) body => (refsOfExp scrut ++ refsOfTyp ty ++ refsOfExp body).eraseDups

@@ -58,6 +58,7 @@ partial def expCallRefs : Exp → List String
       | .Let _ _ rhs => expCallRefs rhs
       | .Quant _ _ trigs => trigs.flatMap (fun g => g.flatMap expCallRefs)
       | .Lambda _ => []
+      | .Choose _ pred => expCallRefs pred
     bindRefs ++ expCallRefs body
   | .ArrayLiteral elems => elems.flatMap expCallRefs
   | .MatchBlock (scrut, _) body => expCallRefs scrut ++ expCallRefs body

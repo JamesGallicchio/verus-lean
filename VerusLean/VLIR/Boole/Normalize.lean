@@ -37,6 +37,7 @@ private partial def expVarRefs : Exp → List String :=
   | .Bind (.Quant _ _ trigs) body =>
     merge ((trigs.map (fun g => merge <| g.map expVarRefs)) ++ [expVarRefs body])
   | .Bind (.Lambda _) body => expVarRefs body
+  | .Bind (.Choose _ pred) body => (expVarRefs pred ++ expVarRefs body).eraseDups
   | .ArrayLiteral elems => merge (elems.map expVarRefs)
   | .MatchBlock (scrut, _) body => (expVarRefs scrut ++ expVarRefs body).eraseDups
 
@@ -97,6 +98,16 @@ partial def substExp (name : String) (rhs : Exp) : Exp → Exp
         let rhsRefs := expVarRefs rhs
         let (vars', _, body') := renameBinderPack vars [] body rhsRefs [name]
         .Bind (.Lambda vars') (substExp name rhs body')
+    | .Choose vars pred =>
+      if vars.any (fun (v, _) => v == name) then .Bind (.Choose vars pred) body
+      else
+        let rhsRefs := expVarRefs rhs
+        -- Substitute into both `pred` (which has `vars` in scope) and the
+        -- choose body.  Treat them like the lambda case: rename binders that
+        -- shadow free vars of `rhs`, then substitute uniformly.
+        let (vars', _, pred') := renameBinderPack vars [] pred rhsRefs [name]
+        let (_, _, body') := renameBinderPack vars [] body rhsRefs [name]
+        .Bind (.Choose vars' (substExp name rhs pred')) (substExp name rhs body')
   | .ArrayLiteral elems => .ArrayLiteral (elems.map (substExp name rhs))
   | .MatchBlock scrut body =>
     let (e, t) := scrut
@@ -372,6 +383,8 @@ partial def expMentionsVar (target : String) : Exp → Bool
   | .Bind (.Let _ _ e) body => expMentionsVar target e || expMentionsVar target body
   | .Bind (.Quant _ _ _) body => expMentionsVar target body
   | .Bind (.Lambda _) body => expMentionsVar target body
+  | .Bind (.Choose _ pred) body =>
+    expMentionsVar target pred || expMentionsVar target body
   | .ArrayLiteral elems => elems.any (expMentionsVar target)
   | .MatchBlock (scrut, _) body => expMentionsVar target scrut || expMentionsVar target body
   | .Const _ _ => false

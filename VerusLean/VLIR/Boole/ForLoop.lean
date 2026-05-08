@@ -136,6 +136,8 @@ where
     | .Bind (.Quant _ _ trigs) body =>
       ((trigs.flatMap (fun g => g.flatMap expVarRefsLocal)) ++ expVarRefsLocal body).eraseDups
     | .Bind (.Lambda _) body => expVarRefsLocal body
+    | .Bind (.Choose _ pred) body =>
+      (expVarRefsLocal pred ++ expVarRefsLocal body).eraseDups
     | .ArrayLiteral elems => (elems.flatMap expVarRefsLocal).eraseDups
     | .MatchBlock (scrut, _) body => (expVarRefsLocal scrut ++ expVarRefsLocal body).eraseDups
 
@@ -294,6 +296,8 @@ private partial def expVarRefs : Exp → List String
   | .Bind (.Quant _ _ trigs) body =>
     ((trigs.flatMap (fun g => g.flatMap expVarRefs)) ++ expVarRefs body).eraseDups
   | .Bind (.Lambda _) body => expVarRefs body
+  | .Bind (.Choose _ pred) body =>
+    (expVarRefs pred ++ expVarRefs body).eraseDups
   | .ArrayLiteral elems => (elems.flatMap expVarRefs).eraseDups
   | .MatchBlock (scrut, _) body => (expVarRefs scrut ++ expVarRefs body).eraseDups
 

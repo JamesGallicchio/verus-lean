@@ -327,8 +327,10 @@ inductive Bind where
   | Let (v : String) (ty : Typ) (e : Exp)
   | Quant (q : Quant) (vars : List (String × Typ)) (triggers : List (List Exp))
   | Lambda (vars : List (String × Typ))
-  -- CC: Ignore choose for now
-  -- | Choose ()
+  /-- `choose|x : T, y : U, …| pred(x, y, …)` — yields some assignment of
+      values to the binders satisfying `pred`.  Triggers are erased on the
+      Verus side (mirrors `Quant`'s policy when none are user-written). -/
+  | Choose (vars : List (String × Typ)) (pred : Exp)
 deriving Repr, Inhabited, Hashable, BEq
 
 /--
@@ -620,6 +622,7 @@ def Bind.idents : Bind → List (String × Typ)
   | .Let v ty _ => [(v, ty)]
   | .Quant _ vars _ => vars
   | .Lambda vars => vars
+  | .Choose vars _ => vars
 
 mutual
 
