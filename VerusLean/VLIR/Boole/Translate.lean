@@ -19,6 +19,7 @@ import VerusLean.VLIR.Boole.Emit
 import VerusLean.VLIR.Boole.EnvBuild
 import VerusLean.VLIR.Boole.ForLoop
 import VerusLean.VLIR.Boole.Inference
+import VerusLean.VLIR.Boole.IntPromotion
 import VerusLean.VLIR.Boole.Locals
 import VerusLean.VLIR.Boole.Names
 import VerusLean.VLIR.Boole.Normalize
@@ -39,6 +40,7 @@ open Strata
 open Strata.BooleDDM
 open VerusLean.Boole.Cast
 open VerusLean.Boole.Coercions
+open VerusLean.Boole.Context
 open VerusLean.Boole.Emit
 open VerusLean.Boole.EnvBuild
 open VerusLean.Boole.ForLoop
@@ -129,6 +131,7 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
     pure (fvarTy idx)
   | .UInt w | .SInt w =>
     if isSupportedBvWidth w then pure (bvTy w) else pure intTy
+  | .USize | .ISize => pure (bvTy usizeBitWidth)
   | .Char => pure intTy
   | .StrSlice => pure strTy
   | .Array t _len? => do
@@ -530,6 +533,15 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     let x ←
       match op with
       | .Clip (.U w) _ =>
+        -- When the surrounding context already expects int (e.g. a
+        -- `Sequence.select` index, or a mod whose `arithRunsInInt`
+        -- fired), the Verus-inserted `Clip USize` overflow check is
+        -- redundant — int doesn't overflow.  Pass the inner through
+        -- directly with `expected? = some .Int` so loop-counter
+        -- arithmetic stays purely in int.
+        if expected? == some Typ.Int then
+          expToBoole env bound (some Typ.Int) e
+        else
         let targetW := w.toNat
         let innerInfo? := inferBitInfo env bound e
         let isWidening := match innerInfo? with
@@ -543,7 +555,24 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
           coerceBvBv innerInfo? (some (targetW, false)) x0
         else
           pure x0
+      | .Clip .USize _ =>
+        if expected? == some Typ.Int then
+          expToBoole env bound (some Typ.Int) e
+        else
+        let targetW := usizeBitWidth
+        let innerInfo? := inferBitInfo env bound e
+        let isWidening := match innerInfo? with
+          | some (iw, _) => decide (iw < targetW) | none => false
+        let hint? := if isWidening then
+          innerInfo?.map (fun (iw, s) => if s then Typ.SInt iw else Typ.UInt iw)
+        else
+          some .USize
+        let x0 ← expToBoole env bound hint? e
+        coerceBvBv innerInfo? (some (targetW, false)) x0
       | .Clip (.I w) _ =>
+        if expected? == some Typ.Int then
+          expToBoole env bound (some Typ.Int) e
+        else
         let targetW := w.toNat
         let innerInfo? := inferBitInfo env bound e
         let isWidening := match innerInfo? with
@@ -557,9 +586,32 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
           coerceBvBv innerInfo? (some (targetW, true)) x0
         else
           pure x0
+      | .Clip .ISize _ =>
+        if expected? == some Typ.Int then
+          expToBoole env bound (some Typ.Int) e
+        else
+        let targetW := usizeBitWidth
+        let innerInfo? := inferBitInfo env bound e
+        let isWidening := match innerInfo? with
+          | some (iw, _) => decide (iw < targetW) | none => false
+        let hint? := if isWidening then
+          innerInfo?.map (fun (iw, s) => if s then Typ.SInt iw else Typ.UInt iw)
+        else
+          some .ISize
+        let x0 ← expToBoole env bound hint? e
+        coerceBvBv innerInfo? (some (targetW, true)) x0
       | .Clip .Nat _ =>
         expToBoole env bound (some .Nat) e
       | .Box t => do
+        -- When the surrounding context expects int, the Box's type
+        -- assertion (typically `USize` for indices into `index_set`)
+        -- is just a type-erasure artifact and would force a wasteful
+        -- `bv64_to_int_u(int_to_bv64_u(...))` round-trip on an
+        -- already-int operand (loop counters, post our `i : int`
+        -- choice).  Skip the Box's coercion in that case.
+        if expected? == some Typ.Int then
+          expToBoole env bound (some Typ.Int) e
+        else
         let inner ← expToBoole env bound (some t) e
         let srcKind? := numKindOfTyp? t
         let tgtKind? := expected?.bind numKindOfTyp?
@@ -690,11 +742,15 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | [arg] => expToBoole env bound expected? arg
       | _ => mkFallback
     else if isArrayIndexGetName fname then
+      -- `Sequence.select` is indexed by `int`, so we ask the index
+      -- translator for an int directly rather than translating with
+      -- `expected = none` and post-coercing — that path doesn't fold
+      -- a bv-typed `Const` literal into `intConst`, leaving an
+      -- avoidable `bv64_to_int_u(bv{64}(0))` round-trip in output.
       match argsFiltered with
       | [arrayArg, indexArg] =>
         let arrayExpr ← expToBoole env bound none arrayArg
-        let rawIdx ← expToBoole env bound none indexArg
-        let intIdx ← coerceNumeric (inferNumKind env bound indexArg) (some .int) rawIdx
+        let intIdx ← expToBoole env bound (some .Int) indexArg
         pure (Bld.seqSelect arrayExpr intIdx)
       | _ => mkFallback
     else if isArrayFillForCopyTypesName fname then
@@ -742,11 +798,13 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         coerceNumeric (some .int) (expected?.bind numKindOfTyp?) intLen
       | _ => mkFallback
     else if isSliceIndexGetName fname then
+      -- See `isArrayIndexGetName` arm: ask for int directly so a
+      -- bv-typed literal index folds to `intConst` instead of going
+      -- through a redundant `bv64_to_int_u(bv{64}(0))` cast.
       match argsFiltered with
       | [sliceArg, indexArg] =>
         let sliceExpr ← expToBoole env bound none sliceArg
-        let rawIdx ← expToBoole env bound none indexArg
-        let intIdx ← coerceNumeric (inferNumKind env bound indexArg) (some .int) rawIdx
+        let intIdx ← expToBoole env bound (some .Int) indexArg
         pure (Bld.seqSelect sliceExpr intIdx)
       | _ => mkFallback
     else if isViewName fname then
@@ -788,13 +846,14 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | _ => mkFallback
     else if isVecIndexSpecName fname || isVecIndexExecName fname then
       -- `v[i]` → `Sequence.select(v, i_as_int)`. Strata's
-      -- `Sequence.select` is indexed by `int`, so the usize-typed `i`
-      -- is first coerced from bv to int.
+      -- `Sequence.select` is indexed by `int`, so we ask the index
+      -- translator for int directly — see the `isArrayIndexGetName`
+      -- arm for the rationale (folding `bv{64}(K)` literals to
+      -- `intConst K` instead of leaving a `bv64_to_int_u` cast).
       match argsFiltered with
       | [vArg, iArg] =>
         let seqExpr ← expToBoole env bound none (unwrapViewCall vArg)
-        let rawIdx ← expToBoole env bound none iArg
-        let intIdx ← coerceNumeric (inferNumKind env bound iArg) (some .int) rawIdx
+        let intIdx ← expToBoole env bound (some .Int) iArg
         let selectIdx ← resolveFreeVar "Sequence.select"
         return Bld.appN (Bld.fvar selectIdx) [seqExpr, intIdx]
       | _ => mkFallback
@@ -1087,8 +1146,13 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           let some containerTy := env.get? baseName
             | throw s!"missing container type for index_set target {baseName}"
           let containerExpr ← expToBoole env [] (some containerTy) (unwrapViewCall containerArg)
-          let rawIdx ← expToBoole env [] none indexArg
-          let intIdx ← coerceNumeric (inferNumKind env [] indexArg) (some .int) rawIdx
+          -- Sequence.update / Sequence.update-on-array expects an int
+          -- index.  Forcing `expected? = some .Int` lets `expToBoole`'s
+          -- Box / Var / Clip arms do the right coercion in one pass —
+          -- the previous approach (translate with `none`, then post-coerce
+          -- via `inferNumKind`) double-counted the type and round-tripped
+          -- already-int loop counters through `bv64_to_int_u(int_to_bv64_u(...))`.
+          let intIdx ← expToBoole env [] (some .Int) indexArg
           let valueExpr ← expToBoole env [] none valueArg
           let updated ←
             match arrayElemTyp? containerTy with
@@ -1360,17 +1424,33 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
   match recoverForLoop? stms with
   | none => pure none
   | some loop => do
-    let loopVarTy ← typToBooleType loop.loopVarTy
+    -- Decide whether the for-loop binder should be retyped as `Int`.
+    -- The `IntPromotion` pass populates `BuildCtx.promotedLocals` at
+    -- procedure entry with the names it judged safe to promote based
+    -- on actual use-sites.  A binder ends up there iff every use is in
+    -- a sequence-index / length-comparison / int-arith position and at
+    -- least one use is a qualifying (sequence-index or length-compare)
+    -- one.  Bv-specific uses inside the body get an `int_to_bv*_u`
+    -- cast on the other end via `coerceNumeric`.
+    let promote ← isPromotedLocal loop.loopVarName
+    let loopBinderTy : Typ :=
+      if promote then .Int else loop.loopVarTy
+    let loopVarTy ← typToBooleType loopBinderTy
     let loopVarSan := sanitizeVarName loop.loopVarName
-    let startExpr ← expToBooleFlat env (some loop.loopVarTy) loop.startExp
-    let endE ← expToBooleFlat env (some loop.loopVarTy) loop.endExp
-    let limitExpr ← match bitWidthOfTyp loop.loopVarTy with
+    let startExpr ← expToBooleFlat env (some loopBinderTy) loop.startExp
+    let endE ← expToBooleFlat env (some loopBinderTy) loop.endExp
+    let limitExpr ← match bitWidthOfTyp loopBinderTy with
       | some w => pure (bvSub w endE (bitvecConstNat w 1))
       | none => pure (intSub endE (intConst 1))
+    -- Make the binder's int type visible to body translation: `Var i`
+    -- look-ups in `inferBitInfo` / `inferComparableTyp?` consult `env`,
+    -- so without the entry the body can't drive `bv*-to-int` cast
+    -- decisions correctly.
+    let envWithBinder := extendEnv env [(loop.loopVarName, loopBinderTy)]
     let (invExprs, measureExpr?, bodyStms) ← withScope do
       pushBoundVar loopVarSan
       let invExprs ← loop.invariants.toArray.mapM (fun inv =>
-        expToBooleFlat env (some .Bool) inv.body)
+        expToBooleFlat envWithBinder (some .Bool) inv.body)
       -- Lower the first source `decreases` term into the for-loop's
       -- measure slot.  Lexicographic decreases (multiple terms) collapse
       -- to the head — combining them is future work.  Skip clauses whose
@@ -1385,12 +1465,12 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
         | some e =>
           if expContainsGhostPervasiveCall e then pure none
           else do
-            let ce0 ← expToBooleFlat env none e
-            let srcKind? := inferNumKind env [] e
+            let ce0 ← expToBooleFlat envWithBinder none e
+            let srcKind? := inferNumKind envWithBinder [] e
             let ce ← coerceNumeric srcKind? (some .int) ce0
             pure (some ce)
         | none => pure none
-      let bodyStms ← stmToBoole env projLayouts mutArgMap retVar? procName (Stm.Block loop.userBody)
+      let bodyStms ← stmToBoole envWithBinder projLayouts mutArgMap retVar? procName (Stm.Block loop.userBody)
       pure (invExprs, measureExpr?, bodyStms)
     let loopStmt := forToStmt loopVarSan loopVarTy startExpr limitExpr
       measureExpr? invExprs bodyStms.toArray
@@ -1632,12 +1712,23 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let localsAll := match bodyStm? with
     | some body => filterOutForLoopBinders body localsAll
     | none => localsAll
+  -- Decide which `usize`/`isize` locals + for-loop binders to retype as
+  -- `Int` (see `IntPromotion`).  Apply the rewrite to both the body and
+  -- the locals list before translation; the for-loop arm reads the same
+  -- set from BuildCtx.  ProofFn variant — no by-value mut shadowing
+  -- happens here, so the body to inspect is `bodyStm?`.
+  let promoted : Std.HashSet String :=
+    match bodyStm? with
+    | some body => IntPromotion.inferIntPromotableLocals localsAll body
+    | none => ∅
+  let localsAll := IntPromotion.rewriteLocalsForPromoted promoted localsAll
+  let bodyStm? := bodyStm?.map (IntPromotion.rewriteBodyForPromoted promoted)
   let outputs := retDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
   let outputsAnn := ann outputDecls?
   let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
-  let (specElts, body, decrAnn) ← withScope do
+  let (specElts, body, decrAnn) ← withPromotedLocals promoted <| withScope do
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires f.ensures []
@@ -1792,13 +1883,22 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   -- the body's references.
   let localsAll := localsAll ++ byValMutDecls.map (fun (_, localName, ty) =>
     { name := localName, ty := ty, origin := .implicitSet : LocalDeclInfo })
+  -- Decide which `usize`/`isize` locals + for-loop binders are safe to
+  -- retype as `Int` (used purely as sequence indices / length comparands /
+  -- int arithmetic, never as bv operands or bv-typed call arguments).
+  -- Then rewrite the body's `Assign.lhsTy` and the locals' types in one
+  -- shot so the rest of the translator picks `expected = some Int`
+  -- automatically; the for-loop arm reads the same set from BuildCtx.
+  let promoted := IntPromotion.inferIntPromotableLocals localsAll rewrittenBody
+  let localsAll := IntPromotion.rewriteLocalsForPromoted promoted localsAll
+  let rewrittenBody := IntPromotion.rewriteBodyForPromoted promoted rewrittenBody
   let outputs := retDecls ++ mutOutputDecls
   let (inputBindings, inputNamesSan) ← mkMonoInputs f.inputs
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
   let outputsAnn := ann outputDecls?
   let isDeclOnly := match f.body with | .Block [] => true | _ => false
   let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
-  let (specElts, body, decrAnn) ← withScope do
+  let (specElts, body, decrAnn) ← withPromotedLocals promoted <| withScope do
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires rewrittenEnsures []

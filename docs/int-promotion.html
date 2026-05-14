@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>VLIR → Boole: usize/isize Int Promotion</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 920px;
+    margin: 2em auto;
+    padding: 0 1.5em;
+    line-height: 1.55;
+    color: #222;
+  }
+  h1 { border-bottom: 2px solid #444; padding-bottom: 0.3em; }
+  h2 { color: #114; margin-top: 2em; border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }
+  h3 { color: #335; margin-top: 1.5em; }
+  h4 { color: #557; margin-top: 1.2em; margin-bottom: 0.3em; }
+  code, pre {
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 0.9em;
+  }
+  code {
+    background: #f3f3f3;
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+  pre {
+    background: #f7f7f7;
+    padding: 0.8em 1em;
+    border-radius: 4px;
+    border-left: 3px solid #888;
+    overflow-x: auto;
+    line-height: 1.4;
+  }
+  pre code { background: none; padding: 0; }
+  table {
+    border-collapse: collapse;
+    margin: 1em 0;
+    width: 100%;
+  }
+  th, td {
+    border: 1px solid #ccc;
+    padding: 0.55em 0.7em;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #eef; font-weight: 600; }
+  tr:nth-child(even) td { background: #fafafa; }
+  .ok { color: #060; font-weight: 600; }
+  .reject { color: #a00; font-weight: 600; }
+  .neutral { color: #555; }
+  .callout {
+    background: #fffbe6;
+    border-left: 4px solid #c9a000;
+    padding: 0.7em 1em;
+    margin: 1em 0;
+    border-radius: 4px;
+  }
+  .filepath {
+    color: #336;
+    font-style: italic;
+  }
+  ul, ol { padding-left: 1.5em; }
+  li { margin: 0.2em 0; }
+  .small { font-size: 0.88em; color: #555; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 2em 0; }
+</style>
+</head>
+<body>
+
+<h1>VLIR → Boole: <code>usize</code>/<code>isize</code> Int Promotion</h1>
+
+<p>
+This document explains how Rust <code>usize</code> and <code>isize</code> values are
+encoded when the VLIR pipeline lowers them to Boole. There are two layers, and they
+follow different rules:
+</p>
+
+<ol>
+  <li><strong>Sequence-index slots</strong> are <em>always</em> <code>int</code>-typed at the call site,
+      regardless of the source variable's declared type.</li>
+  <li><strong>The variable's declared type</strong> is decided by a per-procedure pass
+      called <strong>IntPromotion</strong>, which only retypes a local to <code>Int</code> when
+      it has sequence-index/length evidence and no bv-forcing use.</li>
+</ol>
+
+<p>
+Both layers exist because they have different cost/risk profiles. Layer 1 does not
+retarget the source variable — at worst it inserts an explicit cast helper at the
+Sequence boundary. Layer 2 is more invasive — it changes the variable's lowered
+contract, so it has to be conservative.
+</p>
+
+<hr>
+
+<h2>Layer 1: Sequence-index slots are always <code>int</code></h2>
+
+<p>
+Strata's <code>Sequence.select</code>, <code>Sequence.update</code>,
+<code>Sequence.subrange</code>, etc. are indexed by mathematical <code>int</code>. So
+the translator asks <code>expToBoole</code> to produce an <code>int</code>-typed
+expression at every index slot, by passing <code>expected = some .Int</code> directly
+(rather than translating bv-typed first and then post-coercing).
+</p>
+
+<p>The four index-lowering arms in <span class="filepath">VerusLean/VLIR/Boole/Translate.lean</span>:</p>
+
+<ul>
+  <li><code>isArrayIndexGetName</code> — Rust <code>[T; N]</code> read</li>
+  <li><code>isSliceIndexGetName</code> — Rust <code>&amp;[T]</code> read</li>
+  <li><code>isVecIndexSpecName</code> / <code>isVecIndexExecName</code> — <code>Vec&lt;T&gt;</code> read</li>
+  <li><code>isIndexSetName</code> — <code>container[i] = v</code> write side (<code>Std_specs_Core_index_set</code>)</li>
+</ul>
+
+<p>
+All four pass <code>expected = some .Int</code> to the index translator. The resulting
+expression at the index slot is always <code>int</code>-typed, but the way that
+expression is built depends on the source shape:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Source shape at the index position</th><th>Generated Boole</th><th>Why</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>0_usize</code>, <code>5_u64</code>, … (bv-typed literal)</td>
+      <td><code>0</code>, <code>5</code></td>
+      <td>The <code>Const</code> arm respects <code>expected = some .Int</code> and emits a literal <code>intConst</code>.</td>
+    </tr>
+    <tr>
+      <td><code>k</code> where <code>k</code> was promoted by IntPromotion (env says <code>int</code>)</td>
+      <td><code>k</code></td>
+      <td>The variable's declared type is already <code>int</code>; no coercion needed.</td>
+    </tr>
+    <tr>
+      <td><code>k</code> where <code>k</code> stays bv (env says <code>bv64</code>)</td>
+      <td><code>bv64_to_int_u(k)</code></td>
+      <td><code>coerceNumeric</code> wraps the bv value with an uninterpreted cast.</td>
+    </tr>
+    <tr>
+      <td><code>i + 1</code> on a promoted <code>i</code></td>
+      <td><code>i + 1</code></td>
+      <td>Pure int arithmetic flows through; no cast.</td>
+    </tr>
+    <tr>
+      <td><code>i + 1</code> on an un-promoted bv <code>i</code></td>
+      <td><code>bv64_to_int_u(i + bv{64}(1))</code></td>
+      <td>Arithmetic stays bv, then the result is coerced to int at the slot.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+<strong>Faithfulness vs. solver visibility.</strong>
+The <code>bv64_to_int_u</code> cast makes the required domain crossing explicit
+without changing the source variable's lowered type. The cost is that the cast is
+opaque to the SMT solver: <code>0 ≤ k &lt; len(s)</code> on the bv side
+can't be related to <code>0 ≤ bv64_to_int_u(k) &lt; Sequence.length(s)</code> on the
+int side without explicit axioms. Eliminating those casts — by getting the variable
+itself onto the int side — is exactly the job of Layer 2.
+</div>
+
+<hr>
+
+<h2>Layer 2: IntPromotion (variable declaration retype)</h2>
+
+<p>
+The pass lives in <span class="filepath">VerusLean/VLIR/Boole/IntPromotion.lean</span>
+and runs once per procedure. It returns a <code>HashSet String</code> of names whose
+declared type should be rewritten from <code>USize</code>/<code>ISize</code> to
+<code>Int</code>. The translator then rewrites every matching
+<code>LocalDeclInfo.ty</code> and every <code>Assign.lhsTy</code> in the body before
+the rest of the lowering runs.
+</p>
+
+<h3>Candidate set</h3>
+
+<p>A name is eligible for consideration iff it is:</p>
+
+<ul>
+  <li>A <code>USize</code>- or <code>ISize</code>-typed local in <code>f.locals</code>
+      (modulo <code>Decorated</code> wrappers like <code>Ref</code>, <code>MutRef</code>,
+      <code>Box</code>, <code>Ghost</code>, <code>Tracked</code>).</li>
+  <li>A <code>USize</code>- or <code>ISize</code>-typed for-loop binder discovered
+      through <code>recoverForLoop?</code>.</li>
+</ul>
+
+<p>Never candidates:</p>
+
+<ul>
+  <li>Procedure inputs and <code>&amp;mut</code> outputs (they cross call boundaries).</li>
+  <li>Struct/enum fields (they're part of an externally-visible datatype contract).</li>
+  <li>Fixed-width <code>UInt w</code> / <code>SInt w</code> at any width, including
+      64-bit — we only promote source <code>usize</code>/<code>isize</code>, not arbitrary
+      bitvector locals that happen to share the same target width.</li>
+</ul>
+
+<h3>Promotion rule</h3>
+
+<p>A candidate <code>k</code> is promoted iff <strong>all three</strong> conditions hold:</p>
+
+<h4>1 · At least one <span class="ok">qualifying</span> use</h4>
+
+<table>
+  <thead><tr><th>Use site</th><th>Examples</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Index slot of an indexer call</td>
+      <td>
+        <code>Vec_index_exec(v, k)</code>, <code>Vec_index_spec(v, k)</code>,
+        <code>Array_array_index_get(a, k)</code>,
+        <code>Slice_slice_index_get(s, k)</code>,
+        <code>Std_specs_Core_index_set(c, k, value)</code> (the <em>index</em> arg only).
+      </td>
+    </tr>
+    <tr>
+      <td>Index / range slot of a <code>Seq_*</code> op</td>
+      <td>
+        <code>Seq_index(s, k)</code>, <code>Seq_update(s, k, v)</code>,
+        <code>Seq_take(s, k)</code>, <code>Seq_skip(s, k)</code>,
+        <code>Seq_subrange(s, lo, hi)</code>, <code>Seq_lib_remove(s, k)</code>.
+      </td>
+    </tr>
+    <tr>
+      <td>Comparison against a length call</td>
+      <td>
+        <code>k &lt; blocks.len()</code>, <code>k == s.view().len()</code>,
+        <code>k &lt;= Sequence.length(s)</code>.
+      </td>
+    </tr>
+    <tr>
+      <td>For-loop bound is a length call</td>
+      <td>
+        <code>for k in 0..blocks.len()</code> qualifies the binder <code>k</code>.
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+<h4>2 · No <span class="reject">rejecting</span> use</h4>
+
+<table>
+  <thead><tr><th>Use site</th><th>Examples</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Operand of a bitwise op</td>
+      <td><code>k &amp; 0xff</code>, <code>k | mask</code>, <code>k ^ x</code>, <code>k &lt;&lt; 3</code>, <code>k &gt;&gt; 1</code>, <code>!k</code></td>
+    </tr>
+    <tr>
+      <td>Explicit bv↔bv or bv↔int cast</td>
+      <td>any <code>bv*_to_*</code> / <code>int_to_bv*_*</code> wrapping <code>k</code></td>
+    </tr>
+    <tr>
+      <td>Argument to an opaque <code>Stm.Call</code></td>
+      <td>
+        <code>some_user_fn(k)</code> — we can't see the callee's parameter type, so we conservatively reject.
+        <em>Exception:</em> the <em>index slot</em> of <code>Std_specs_Core_index_set</code> is recognized specially.
+      </td>
+    </tr>
+    <tr>
+      <td>Value slot of a value-storing <code>Seq_*</code> op</td>
+      <td>The second arg of <code>Seq_push(s, k)</code>, <code>Seq_lib_contains(s, k)</code> — <code>k</code> is being stored or matched, not used as an index.</td>
+    </tr>
+    <tr>
+      <td>Field of a struct/enum/tuple ctor</td>
+      <td>
+        <code>MyStruct { count: k, .. }</code>, <code>(k, other)</code>,
+        <code>MyEnum::Variant { idx: k }</code>.
+      </td>
+    </tr>
+    <tr>
+      <td>RHS assigned into a non-candidate bv-typed target</td>
+      <td><code>some_bv64_var := k</code> — the target forces the RHS to remain bv-compatible.</td>
+    </tr>
+    <tr>
+      <td>Inside an <code>AssertBitVector</code> block</td>
+      <td><code>assert by bit_vector { k &gt; 0 &amp;&amp; k &lt; N }</code> — bv-only by definition.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h4>3 · Fixpoint closure on assignment chains</h4>
+
+<p>
+For every <code>k := rhs</code> seen during the walk, edges are recorded from every candidate
+<code>j₁, …, jₙ</code> referenced in <code>rhs</code> to <code>k</code>. Then
+<code>propagateOnce</code> is iterated until stable:
+</p>
+
+<ul>
+  <li><strong>Forward</strong>: if any <code>jᵢ</code> is rejected, reject <code>k</code>
+      (a rejected RHS taints the LHS).</li>
+  <li><strong>Backward</strong>: if <code>k</code> is rejected, reject every <code>jᵢ</code>
+      (a rejected LHS means the RHS was used in a bv-forced context).</li>
+</ul>
+
+<p>
+Both directions matter. Forward propagation alone catches
+"<code>j</code> rejected → <code>k := j</code> → reject <code>k</code>". Without backward
+propagation, a counter <code>k</code> that flows into a bv-forced context can stay
+promoted while a sibling <code>j</code> that fed <code>k</code> also stays promoted, creating
+inconsistent emitted casts around the assignment chain. Backward propagation closes
+that asymmetry.
+</p>
+
+<h3>Transparent wrappers</h3>
+
+<p>
+The classifier sees through three Verus-inserted scaffolding wrappers and recurses on the
+payload with the same surrounding context:
+</p>
+
+<ul>
+  <li><code>Unary[Box _]</code> — Verus type-erasure</li>
+  <li><code>Unary[Unbox _]</code> — inverse erasure</li>
+  <li><code>Unary[Clip _ _]</code> — Verus overflow-check artifact</li>
+</ul>
+
+<p>
+The same transparency is applied in <code>expToBoole</code>'s Box/Clip arms when
+<code>expected? = some Int</code>, so the wrappers don't drop the int context and
+don't generate avoidable cast round-trips.
+</p>
+
+<h3>Binder shadowing</h3>
+
+<p>
+The walker tracks a <code>shadowed : HashSet String</code> set containing every
+<code>Bind</code> binder currently in scope (from <code>Let</code>,
+<code>Quant</code>, <code>Lambda</code>, <code>Choose</code>). A <code>Var k</code>
+reference inside such a binder is attributed to the inner binder, not the outer
+candidate. So if a procedure has
+</p>
+
+<pre><code>let mut k: usize = 0;
+…
+assert(forall|k: int| k &gt;= 0);    // inner k shadows outer
+</code></pre>
+
+<p>
+the inner <code>k</code> in the quantifier body doesn't count toward the outer
+candidate's use classification.
+</p>
+
+<hr>
+
+<h2>Worked examples</h2>
+
+<table>
+  <thead>
+    <tr><th>Source</th><th>Verdict</th><th>Why</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><pre><code>let mut k: usize = 0;
+while k &lt; blocks.len() {
+    process(blocks[k]);
+    k += 1;
+}</code></pre></td>
+      <td class="ok">Promoted</td>
+      <td>Length compare ✓, index use ✓. The increment <code>k += 1</code> is safe int arithmetic.</td>
+    </tr>
+    <tr>
+      <td><pre><code>for k in 0..blocks.len() {
+    process(blocks[k]);
+}</code></pre></td>
+      <td class="ok">Promoted</td>
+      <td>For-loop bound is a length call (qualifies the binder), plus the body's <code>blocks[k]</code> is also a qualifying use.</td>
+    </tr>
+    <tr>
+      <td><pre><code>let mut x: usize = 0;
+x = x ^ 0xff;
+…</code></pre></td>
+      <td class="reject">Not promoted</td>
+      <td>Bitwise XOR rejects.</td>
+    </tr>
+    <tr>
+      <td><pre><code>let mut k: usize = 0;
+while k &lt; 100 { … }       // no seq use anywhere</code></pre></td>
+      <td class="reject">Not promoted</td>
+      <td>No qualifying use. <code>k &lt; 100</code> is a plain int comparison, not a length-compare.</td>
+    </tr>
+    <tr>
+      <td><pre><code>let mut k: usize = arr.len();
+foo(k);                  // opaque user fn</code></pre></td>
+      <td class="reject">Not promoted</td>
+      <td>Opaque call rejects (parameter type unknown).</td>
+    </tr>
+    <tr>
+      <td><pre><code>let mut i: usize = …;
+let mut j: usize = i * 4;
+process(blocks[j + 1]);
+i = i ^ 1;               // bitwise!</code></pre></td>
+      <td class="reject">Both rejected</td>
+      <td><code>i</code> rejected by the bitwise op. <code>j</code> rejected by forward propagation (RHS depends on <code>i</code>).</td>
+    </tr>
+    <tr>
+      <td><pre><code>for i in 0..n {
+    res[i] = some_bv64_var;
+}</code></pre></td>
+      <td class="ok">Promoted</td>
+      <td>Index slot of <code>index_set</code> is qualifying. The value <code>some_bv64_var</code> is rejected (not a candidate / non-index), but that doesn't affect <code>i</code>.</td>
+    </tr>
+    <tr>
+      <td><pre><code>let mut k: usize = …;
+state.bag.push(k);       // Seq_push value slot</code></pre></td>
+      <td class="reject">Not promoted</td>
+      <td><code>Seq_push</code>'s value slot rejects.</td>
+    </tr>
+    <tr>
+      <td><pre><code>let mut k: usize = 0;
+assert(forall|k: int| k &gt;= 0);
+while k &lt; blocks.len() {
+    process(blocks[k]);
+    k += 1;
+}</code></pre></td>
+      <td class="ok">Promoted</td>
+      <td>The inner <code>k</code> in the quantifier shadows the outer; it doesn't count toward the outer's classification. The outer <code>k</code>'s uses are length-compare and index, both qualifying.</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>What is <em>deliberately</em> not promoted</h2>
+
+<p>These cases are intentional design choices, not gaps:</p>
+
+<ul>
+  <li><strong>Variables used only in pure int arithmetic</strong> (no sequence touch-point).
+      Per the working rule, a candidate must have at least one sequence-index or
+      length-comparison use to be promoted. A pure counter <code>while k &lt; N { k += 1 }</code>
+      where <code>N</code> is just a literal stays bv. The reasoning: changing the
+      declared type of a variable that has no sequence interaction is churn without
+      benefit.</li>
+  <li><strong>Variables passed to user-procedure calls</strong> — we can't see the
+      callee's parameter types, so promoting would risk a type mismatch at the call
+      boundary. Future work: a per-callee whitelist for known-int-typed parameters.</li>
+  <li><strong>Variables stored into struct/enum/tuple fields</strong> — the consuming
+      side likely expects the source type.</li>
+  <li><strong>Procedure inputs and <code>&amp;mut</code> outputs</strong> — these are
+      part of the function's external contract and must preserve their declared type.</li>
+</ul>
+
+<hr>
+
+<h2>Cheat sheet: the two layers contrasted</h2>
+
+<table>
+  <thead>
+    <tr><th></th><th>Layer 1: index slot</th><th>Layer 2: variable declaration</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Scope</td>
+      <td>Per-call-site</td>
+      <td>Per-procedure</td>
+    </tr>
+    <tr>
+      <td>Decision</td>
+      <td>Always <code>int</code></td>
+      <td>Only when there is a qualifying use and no rejecting use</td>
+    </tr>
+    <tr>
+      <td>Mechanism</td>
+      <td><code>expToBoole _ _ (some .Int) indexArg</code></td>
+      <td>IntPromotion pass + <code>rewriteLocalsForPromoted</code> + <code>rewriteBodyForPromoted</code></td>
+    </tr>
+    <tr>
+      <td>Cost if wrong</td>
+      <td>No variable retargeting — at worst inserts an opaque cast at the boundary</td>
+      <td>Would type-error or change call-site semantics</td>
+    </tr>
+    <tr>
+      <td>What you see in output</td>
+      <td><code>Sequence.select(s, X)</code> where <code>X</code> is always <code>int</code></td>
+      <td><code>var k : int;</code> for promoted vars, <code>var k : bv64;</code> otherwise</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>Implementation pointers</h2>
+
+<ul>
+  <li><span class="filepath">VerusLean/VLIR/Boole/IntPromotion.lean</span> — the
+      inference module. Public entry points:
+    <ul>
+      <li><code>inferIntPromotableLocals (locals : List LocalDeclInfo) (body : Stm) : HashSet String</code></li>
+      <li><code>rewriteLocalsForPromoted (promoted : HashSet String) (locals : List LocalDeclInfo) : List LocalDeclInfo</code></li>
+      <li><code>rewriteBodyForPromoted (promoted : HashSet String) (body : Stm) : Stm</code></li>
+    </ul>
+  </li>
+  <li><span class="filepath">VerusLean/VLIR/Boole/Context.lean</span> — adds the
+      per-procedure <code>promotedLocals</code> field and the <code>withPromotedLocals</code>
+      bracket that procedure lowering uses to hand the set off to
+      <code>tryForLoopRecovery</code>.</li>
+  <li><span class="filepath">VerusLean/VLIR/Boole/Translate.lean</span> —
+    <ul>
+      <li><code>typToBooleType</code>: <code>USize | ISize → bvTy 64</code>.</li>
+      <li><code>expToBoole</code>'s <code>Clip .USize</code>, <code>Clip .ISize</code>, and
+          <code>Box</code> arms short-circuit when <code>expected? = some Int</code>;
+          <code>Unbox</code> preserves the same expected type when translating its
+          payload.</li>
+      <li>The four sequence-index arms unified to pass
+          <code>expected = some .Int</code> directly.</li>
+      <li><code>tryForLoopRecovery</code> consults <code>BuildCtx.promotedLocals</code>
+          to decide whether to retype the for-loop binder.</li>
+      <li><code>proofFnToBoole</code> and <code>execFnToBoole</code> compute
+          <code>promoted</code>, rewrite locals + body, then call
+          <code>withPromotedLocals</code> around the body translation.</li>
+    </ul>
+  </li>
+  <li><span class="filepath">VerusLean/VLIR/Defs.lean</span> — adds
+      <code>USize</code> / <code>ISize</code> as new <code>Typ</code> and
+      <code>IntRange</code> variants (distinct from <code>UInt 64</code> / <code>SInt 64</code>).</li>
+  <li><span class="filepath">VerusLean/VLIR/Parser.lean</span> — Verus' JSON
+      <code>"USize"</code> / <code>"ISize"</code> now parse to <code>.USize</code> /
+      <code>.ISize</code> (was previously <code>.UInt 64</code> / <code>.SInt 64</code>).</li>
+</ul>
+
+<p class="small">
+See also <span class="filepath">tests/differential_status.md</span>
+§ <code>[TRANS-loop-counter-int]</code> for the historical motivation
+and validation evidence (SHA-256 indexed-compress test, 24/24 obligations).
+</p>
+
+</body>
+</html>

@@ -357,8 +357,8 @@ partial def Typ.fromJson (j : Json) : m Typ := do
   | .ok "Int" => return .Int
   | .ok "Nat" => return .Nat
   | .ok "Char" => return .Char
-  | .ok "USize" => return .UInt archWordBitWidth
-  | .ok "ISize" => return .SInt archWordBitWidth
+  | .ok "USize" => return .USize
+  | .ok "ISize" => return .ISize
   | .ok _ => throw s!"unsupported primitive type string: {j}"
   | .error _ =>
     match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam", "Projection", "FnDef", "Float"] with
@@ -394,7 +394,8 @@ partial def Typ.fromJson (j : Json) : m Typ := do
       | .ok "Int" => return .Int
       | .ok "Nat" => return .Nat
       | .ok "Char" => return .Char
-      | .ok "USize" => return .UInt archWordBitWidth
+      | .ok "USize" => return .USize
+      | .ok "ISize" => return .ISize
       | .ok _ => throw s!"unsupported Int object string: {obj}"
       | .error _ =>
         -- Now check if it is a fixed-width integer
@@ -1285,6 +1286,8 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
         match ty with
         | .UInt w => pure <| .Unary (.Clip (.U (UInt32.ofNat w)) true) e
         | .SInt w => pure <| .Unary (.Clip (.I (UInt32.ofNat w)) true) e
+        | .USize => pure <| .Unary (.Clip .USize true) e
+        | .ISize => pure <| .Unary (.Clip .ISize true) e
         | _ => pure e
       | .error _ => pure e
     | _ => pure e

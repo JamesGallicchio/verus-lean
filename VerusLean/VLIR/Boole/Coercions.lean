@@ -24,12 +24,15 @@ def isSupportedBvWidth (w : Nat) : Bool :=
 
 def bitWidthOfTyp : Typ → Option Nat
   | .UInt w | .SInt w => if isSupportedBvWidth w then some w else none
+  | .USize | .ISize => some usizeBitWidth
   | .Decorated _ ty => bitWidthOfTyp ty
   | _ => none
 
 def bitInfoOfTyp : Typ → Option (Nat × Bool)
   | .UInt w => if isSupportedBvWidth w then some (w, false) else none
   | .SInt w => if isSupportedBvWidth w then some (w, true) else none
+  | .USize => some (usizeBitWidth, false)
+  | .ISize => some (usizeBitWidth, true)
   | .Decorated _ ty => bitInfoOfTyp ty
   | _ => none
 
@@ -58,6 +61,8 @@ def numKindOfTyp? : Typ → Option NumKind
   | .Nat => some .nat
   | .UInt w => if isSupportedBvWidth w then some (.bv w false) else none
   | .SInt w => if isSupportedBvWidth w then some (.bv w true) else none
+  | .USize => some (.bv usizeBitWidth false)
+  | .ISize => some (.bv usizeBitWidth true)
   | .Decorated _ ty => numKindOfTyp? ty
   | _ => none
 

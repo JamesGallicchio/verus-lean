@@ -101,6 +101,8 @@ inductive Typ where
   | Nat                   /- Mathematical natural numbers     -/
   | UInt (width : Nat)    /- Unsigned fixed-width integers    -/
   | SInt (width : Nat)    /- Signed fixed-width integers      -/
+  | USize                 /- Rust `usize`; target width is platform-sized. -/
+  | ISize                 /- Rust `isize`; target width is platform-sized. -/
   | Char
   | StrSlice
   | Array (t : Typ) (len : Option Nat)

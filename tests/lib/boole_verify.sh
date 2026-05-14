@@ -146,6 +146,24 @@ known_translator_bug_pattern_for_wrapper() {
     # elaboration time. Same family as the missed-coercion shape called out in
     # the per-bug list at the top of `classify_boole_verify_log`.
     */vlir-tests/LoopSimpleWithSpec.lean) echo 'Expression has type int when nat expected' ;;
+    # guide/datatypes and matching both flip pass/fail run-to-run because Verus'
+    # Lean exporter (vir/src/sst_to_lean.rs::lctx.dts: HashSet<Dt>) iterates
+    # non-deterministically. When a candidate datatype lands at position 0,
+    # Strata's Boole.toCoreProgram lowering references its ctors / testers as
+    # free variables on auto-generated call-elim obligations. Filed against
+    # Strata as [VERIFY-datatype-tester-ordering]; no translator workaround
+    # possible.
+    #
+    # Each pattern is an alternation over every line of the diagnostic so the
+    # script's `grep -Ev <pattern>` residual-error check (which requires every
+    # `error:` line to match) accepts the whole multi-line message. The Type
+    # checking error line is the wrapper-scoped catch-all; the Free Variables
+    # line is the bug-specific signature that must appear for the whitelist to
+    # actually trigger.
+    */verus-examples/guide__datatypes.lean)
+      echo 'Type checking error\.|No free variables are allowed here|Free Variables: \[shape\.\.isshape_' ;;
+    */vlir-tests/matching.lean)
+      echo 'Type checking error\.|No free variables are allowed here|Free Variables: \[life_' ;;
     *) echo "" ;;
   esac
 }

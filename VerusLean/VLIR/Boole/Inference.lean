@@ -162,6 +162,7 @@ partial def seqEmptyTokenName : Typ → String
   | .UInt 16 | .SInt 16 => "Sequence.empty_bv16"
   | .UInt 32 | .SInt 32 => "Sequence.empty_bv32"
   | .UInt 64 | .SInt 64 => "Sequence.empty_bv64"
+  | .USize | .ISize => "Sequence.empty_bv64"
   | .Int | .Nat => "Sequence.empty_int"
   | _ => "Sequence.empty"
 
@@ -328,6 +329,8 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
   | .Unary (.Clip (.I w) _) _ =>
     let w := w.toNat
     if isSupportedBvWidth w then some (w, true) else none
+  | .Unary (.Clip .USize _) _ => some (usizeBitWidth, false)
+  | .Unary (.Clip .ISize _) _ => some (usizeBitWidth, true)
   | .Binary (.Bitwise (.Shl w _) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Binary (.Bitwise (.Shr w) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Unary _ e => inferBitInfo env bound e
@@ -362,7 +365,7 @@ partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Opti
     match range with
     | .Int => some .Int  | .Nat => some .Nat
     | .U w => some (.UInt w.toNat)  | .I w => some (.SInt w.toNat)
-    | .USize => some (.UInt usizeBitWidth)  | .ISize => some (.SInt usizeBitWidth)
+    | .USize => some .USize  | .ISize => some .ISize
     | .Char => some .Char
   | .If _ t f => inferComparableTyp? env bound t <|> inferComparableTyp? env bound f
   | .Bind (.Let _ _ _) body => inferComparableTyp? env bound body
@@ -413,6 +416,14 @@ partial def arithFootprint (env : VarEnv) (bound : BoundEnv) : Exp → ArithFoot
     (arithFootprint env bound lhs).merge (arithFootprint env bound rhs)
   | .Unary (.Box t) _ | .Unary (.Unbox t) _ =>
     ArithFootprint.ofNumKind (numKindOfTyp? t)
+  -- Verus inserts `Unary (Clip <range> _)` around arithmetic to enforce
+  -- range constraints (e.g. usize-no-underflow on `i - 15`).  For
+  -- footprint purposes the Clip is transparent: the contained arithmetic
+  -- is what actually mixes int and bv operands, and we want that mix to
+  -- reach the outer expression so `arithRunsInInt` fires correctly.
+  -- Without this recursion, Clip USize on a mixed-arith subtree looks
+  -- pure-bv via `inferBitInfo`'s Clip case, hiding the mix.
+  | .Unary (.Clip _ _) e => arithFootprint env bound e
   | .Const _ t =>
     match numKindOfTyp? t with
     | some (.bv ..) => { hasBv := true }

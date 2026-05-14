@@ -203,10 +203,10 @@ to repeat them.
 - `vlir-tests:crypto_noref` (verify SKIP (Sequence): translation uses `Sequence.empty`/`Sequence.build`; blocked by Strata's Sequence frontend; also affected by `[VERIFY-lambda-encoding]` for lambdas in `Seq::new`-style spec functions)
 - `vlir-tests:datatypes` (current difference is only that Strata still type-fails later in the pipeline)
 - `vlir-tests:demo_for` (verify SKIP (Sequence): Boole output recovers the source-level `for` loop shape; blocked by Strata's Sequence frontend/indexing support)
-- `vlir-tests:demo_while_loop_isolation` (`Vec<u64>` find-max with explicit `loop_isolation` enabled; `[TRANS-coercion-uninterpreted]` in `bv64_to_int_u(i)` indexing through `Sequence.length`/`Sequence.select`; structurally identical to `demo_while`)
-- `vlir-tests:demo_while` (`Vec<u64>` find-max with `#[verifier::loop_isolation(false)]`; `[TRANS-coercion-uninterpreted]` in `bv64_to_int_u(i)` indexing through `Sequence.length`/`Sequence.select`)
+- `vlir-tests:demo_while_loop_isolation` (`Vec<u64>` find-max with explicit `loop_isolation` enabled; loop-index uses now lower through `[TRANS-loop-counter-int]`, so indexing is expressed directly over `Sequence.length`/`Sequence.select`; structurally identical to `demo_while`)
+- `vlir-tests:demo_while` (`Vec<u64>` find-max with `#[verifier::loop_isolation(false)]`; loop-index uses now lower through `[TRANS-loop-counter-int]`, so indexing is expressed directly over `Sequence.length`/`Sequence.select`)
 - `vlir-tests:demo` (verify SKIP (Sequence): Boole output is source-close and elaborates cleanly; blocked by Strata's Sequence frontend/indexing support)
-- `vlir-tests:FindMax` (`Vec<i32>` find-max via `Sequence bv32`; `[TRANS-coercion-uninterpreted]` for `bv64_to_int_u` in indexing and `>=s` signed comparisons; cvc5 default returns unknown on at least one VC even when the translation is well-formed)
+- `vlir-tests:FindMax` (`Vec<i32>` find-max via `Sequence bv32`; loop-index uses now lower through `[TRANS-loop-counter-int]`; value comparisons remain signed bv32 comparisons such as `>=s`)
 - `vlir-tests:integer_ring` (Strata type error on intentionally-failing `type_fail`; cvc5 also times out on `wide_mul` ensures — non-linear bv64 multiplication beyond solver default budget)
 - `vlir-tests:LoopSimple` (`i32` summation loop; `[TRANS-coercion-uninterpreted]` in `decreases bv32_to_int_s(n - i)`; signed comparisons `<s`/`<=s` use `bvslt`/`bvsle` Boole AST nodes that lack dispatch arms in Strata Verify (per the strata-bv-lowering issue draft); intentionally fails as a stable verify-mismatch baseline)
 - `vlir-tests:mutual_recursion` (Boole output elaborates as a `rec function is_odd ... function is_even ...` block and is source-close; raw Core path still hits `[CORE-decreases]`'s `@[cases]`-on-`int` requirement for spec-fn recursion)
@@ -663,6 +663,16 @@ to repeat them.
 - Affects: `verus-examples:guide/datatypes` (run-to-run flake),
   any future test with ≥4 datatypes where one has match-cased
   testers.
+- **Script-side workaround**: `tests/lib/boole_verify.sh` now
+  classifies the matching errors (`Free Variables:
+  [shape..isshape_…]` on `guide__datatypes.lean`, `Free Variables:
+  [life_…]` on `vlir-tests/matching.lean`) as `known_translator_bug`
+  rather than as a regression, so `tests/check_working_tests.sh`
+  reports a consistent count regardless of which side of the dice
+  roll the current run landed on.  The underlying bug is unchanged.
+- Affects (run-to-run flake, same root cause): also
+  `vlir-tests:matching` (`Life` enum referenced from a procedure
+  body; same ≥4-datatype condition as `guide/datatypes`).
 
 ### `[TRANS-nat-quantifier-arith]` `nat` binders in quantifier arithmetic context
 - Verus source: `requires forall|x: nat, y: nat| f(x + 1, 2 * y)
@@ -714,6 +724,92 @@ to repeat them.
   gaps, `test_vstd` on `Unknown variable Map_new` — but the
   `Sequence.empty` typed-dispatch issue itself is resolved across
   all reachable contexts.
+
+### `[TRANS-loop-counter-int]` `usize`/`isize` counters use `int` when used as sequence indices
+- **Background**: Verus types `for i in 0..N { … }` (and `let mut k:
+  usize = 0; while k < blocks.len() { … }`) with `i, k : usize`, which
+  the canonical type lowering maps to `bv64`.  When the body uses the
+  counter as a sequence index (`s[i]`) or compares it against
+  `Sequence.length(_)`, the translator emits `bv64_to_int_u(_)` casts
+  on every use.  The cast is uninterpreted from the solver's point of
+  view, so the SHA-256 compress loop's invariants did not discharge:
+  cvc5 could not relate `bv64_to_int_u(i)` to `i`'s known range or the
+  sequence's length.
+- **2026-05-08 fix — `IntPromotion` pass.**  A new module
+  `VerusLean/VLIR/Boole/IntPromotion.lean` runs once per procedure
+  body and decides which `usize`/`isize` locals (and recovered
+  for-loop binders) can safely be retyped as `Int`.  The rule:
+    - **Candidates**: every `usize`/`isize` local in `f.locals`, plus
+      every `usize`/`isize` for-loop binder discovered through
+      `recoverForLoop?`.  Procedure inputs and `&mut` outputs are not
+      candidates (they cross call boundaries).
+    - **Promote** iff every use site is in a position the classifier
+      considers safe (sequence-index slot of a `Vec`/`Array`/`Slice`
+      indexer or `Std_specs_Core_index_set` call, true index/count
+      slot of `Seq_*` ops, length comparison, pure int arithmetic,
+      for-loop bound, `Unary[Box _]` / `Unary[Unbox _]` /
+      `Unary[Clip _ _]` wrapper) **and** at
+      least one use is *qualifying* (sequence-index or length
+      comparison).  The for-loop bound being a length call qualifies
+      the binder.
+    - **Reject** if any use is in a bitwise op, an explicit
+      `bv*_to_*` / `int_to_bv*_*` cast, an opaque `Stm.Call` arg slot,
+      a struct/enum/tuple ctor field, an assignment into a bv-typed
+      non-candidate target, or an assignment dependency connected to a
+      rejected candidate (propagated to fixpoint in both directions).
+  The result is a `HashSet String` of names to promote.  Once
+  computed, the procedure-lowering site rewrites `Assign.lhsTy` on
+  every assignment to a promoted name to `Int`, retypes the
+  corresponding `LocalDeclInfo`, and stashes the set in
+  `BuildCtx.promotedLocals`; `tryForLoopRecovery` reads the set there
+  to decide whether to retype the loop binder.  The expression walker is
+  scope-aware, so quantifier/lambda/choose/let binders shadow same-named
+  locals during inference.  The rest of the translator picks up
+  `expected = some Int` automatically through the env and the
+  assignment's lhsTy.
+- **Companion changes that landed alongside.**
+  - `Unary[Box _]` and `Unary[Clip _ _]` in `expToBoole`, plus the
+    existing `Unary[Unbox _]` pass-through behavior, preserve
+    `expected? = some Int`, so Verus' overflow-check + type-erasure
+    wrappers don't drop the int context.
+  - `arithFootprint` treats `Clip` as transparent so a Clip-wrapped
+    int subtree no longer trips `inferBitInfo` into deciding the
+    expression is bv.
+  - The four sequence-index lowering arms in `expToBoole`
+    (`isArrayIndexGetName`, `isSliceIndexGetName`,
+    `isVecIndexSpecName` / `isVecIndexExecName`, plus the `index_set`
+    write side) all now pass `expected = some .Int` to the index
+    translator directly, instead of translating with `expected = none`
+    and post-coercing.  The post-coerce path didn't fold a bv-typed
+    `Const` literal into `intConst`, so an old `state[0]` was emitting
+    `Sequence.select(state_out, bv64_to_int_u(bv{64}(0)))` even though
+    the matching write side already printed `Sequence.update(…, 0,
+    …)`.  After unification both sides print as `Sequence.select(…,
+    0)` / `Sequence.update(…, 0, …)`.
+- **Validation**: `tests/VerusFiles/sha256_compact_indexed.rs` is now
+  fully green: 24/24 obligations pass, including the two `compress`
+  while-loop invariants (`entry_invariant_0_0`,
+  `arbitrary_iter_maintain_invariant_0_0`) that were previously
+  unknown.  Generated Boole prints `var k : int; while (k <
+  Sequence.length(blocks)) { … }`, `for i : int := 0 to N - 1 { …
+  Sequence.select(s, i) … }`, with no `bv64_to_int_u` casts at the
+  index positions.  The working-suite regression case intentionally
+  stays on this source-close while-loop variant, rather than replacing
+  the SHA code with a state-threaded rewrite, so the test continues to
+  check translation faithfulness for the original control-flow and
+  mutation shape.  Full `tests/check_working_tests.sh` runs on this
+  checkout report the same 9 existing non-green verification failures
+  and no SHA regression; the pass / known-translator-bug split varies
+  between runs because of `[VERIFY-datatype-tester-ordering]`.
+- **Scope notes**.
+  - This is *not* a global "treat all `usize` as `int`" change.
+    `usize` outside a candidate slot, and any local with a bitwise op
+    or bv-typed callee in its use sites, stays bv-typed.
+  - The pass is conservative on opaque Stm.Call args (rejects every
+    candidate appearing in a generic procedure call), with a
+    deliberate exception for `Std_specs_Core_index_set`'s index slot.
+    Extending the per-callee whitelist (e.g. for known-int procedure
+    parameters) is future work.
 
 ### `[MODEL-unit]` Missing Strata `Unit` (Core-only)
 - Raw Core still leaks `Tuple_ctor_0(): Unit` in places where the Verus source

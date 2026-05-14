@@ -78,8 +78,8 @@ def vecKnownSignatures : List (String × (List Typ × Typ)) :=
   let t := Typ.TypParam "T"
   let seqT := seqTyp t
   let vecT := vecTyp t
-  [ ("Vec_len",   ([vecT], .UInt usizeBitWidth))
-  , ("Vec_index", ([vecT, .UInt usizeBitWidth], t))
+  [ ("Vec_len",   ([vecT], .USize))
+  , ("Vec_index", ([vecT, .USize], t))
   , ("Vec_view",  ([vecT], seqT))
   ]
 
@@ -94,7 +94,8 @@ def needsVecPrelude (referencedNames : List String) : Bool :=
   vecTriggerNames.any (fun n => referencedNames.contains n)
 
 private def refsOfTyp : Typ → List String
-  | .Empty | .Unit | .Bool | .Int | .Nat | .UInt _ | .SInt _ | .Char | .StrSlice => []
+  | .Empty | .Unit | .Bool | .Int | .Nat | .UInt _ | .SInt _ | .USize | .ISize
+  | .Char | .StrSlice => []
   | .Array t _ => refsOfTyp t
   | .Tuple t1 t2 => (refsOfTyp t1 ++ refsOfTyp t2).eraseDups
   | .TypParam _ => []

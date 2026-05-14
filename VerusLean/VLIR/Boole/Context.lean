@@ -6,6 +6,7 @@
   mapping for the translator so it is not coupled to Strata's CST formatting
   context.
 -/
+import Std.Data.HashSet
 import Strata.Languages.Boole.Boole
 
 namespace VerusLean.Boole.Context
@@ -50,6 +51,12 @@ structure BuildCtx where
       be unique per-translation. Using a monotonic counter avoids the
       collision risk of deriving labels from AST structural hashes. -/
   loopLabelCounter : Nat := 0
+  /-- Names of `usize` / `isize` locals (and for-loop binders) that the
+      `IntPromotion` pass decided are safe to retype to `Int` for the
+      currently-translated procedure.  Scoped around procedure lowering
+      with `withPromotedLocals`.  Consulted by `tryForLoopRecovery` to
+      decide whether to lower the binder type as `Int`. -/
+  promotedLocals : Std.HashSet String := ∅
 
 abbrev BuildM := StateT BuildCtx (Except String)
 
@@ -110,5 +117,24 @@ def freshLoopLabelId : BuildM Nat := do
   let n := ctx.loopLabelCounter
   set { ctx with loopLabelCounter := n + 1 }
   pure n
+
+/-- Set the per-procedure promoted-locals set.  Private — callers use
+    `withPromotedLocals` for proper save/restore semantics. -/
+private def setPromotedLocals (promoted : Std.HashSet String) : BuildM Unit :=
+  modify (fun ctx => { ctx with promotedLocals := promoted })
+
+/-- Run an action with the given per-procedure promoted-locals set. -/
+def withPromotedLocals (promoted : Std.HashSet String) (action : BuildM α) : BuildM α := do
+  let old := (← get).promotedLocals
+  setPromotedLocals promoted
+  let result ← action
+  modify (fun ctx => { ctx with promotedLocals := old })
+  pure result
+
+/-- True if `name` was promoted to `Int` for the currently-translated
+    procedure. -/
+def isPromotedLocal (name : String) : BuildM Bool := do
+  let ctx ← get
+  return ctx.promotedLocals.contains name
 
 end VerusLean.Boole.Context
