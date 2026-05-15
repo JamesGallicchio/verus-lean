@@ -47,11 +47,14 @@ classify_boole_verify_log() {
     # `docs/boole-translation-todo.md`. Classified here as a Strata gap
     # rather than a translator bug.
     #
-    # `Recursive function .* requires a @\[cases\] parameter` is Strata's
-    # refusal to verify rec functions without an ADT @[cases] annotation.
-    # Verus programs often recurse on `int`, which has no constructors, so
-    # they hit this wall in Boole even though Core has the same behavior.
-    if grep -qE "Unsupported expression|Unsupported typed operator|unexpected token '\('; expected '\)'|Undeclared type or category Tuple|Unknown bound variable with index|Recursive function .* requires a @\[cases\] parameter" "$log"; then
+    # `[rR]ecursive function .* requires .* @\[cases\]` is Strata's refusal
+    # to verify rec functions without an ADT @[cases] annotation.  Verus
+    # programs often recurse on `int`, which has no constructors, so they
+    # hit this wall in Boole even though Core has the same behavior.  The
+    # `.*` between "requires" and "@[cases]" tolerates Strata's newer
+    # wording that adds `a 'decreases' clause or` before `@[cases]`
+    # (kondylidou/pr/benchmarks after #1092 termination-checking landed).
+    if grep -qE "Unsupported expression|Unsupported typed operator|unexpected token '\('; expected '\)'|Undeclared type or category Tuple|Unknown bound variable with index|[rR]ecursive function .* requires .*@\[cases\]" "$log"; then
       echo "skip_gap"
       return 0
     fi

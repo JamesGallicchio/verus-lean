@@ -1,6 +1,6 @@
 // SHA-256 inner compression function — variant of `sha256_compact.rs`
-// that rewrites `compress` to use an indexed `while` loop instead of the
-// upstream `for block in blocks.iter()` form.
+// that rewrites `compress` to use an indexed `for k in 0..blocks.len()`
+// loop instead of the upstream `for block in blocks.iter()` form.
 //
 // Why this variant exists:
 //   The upstream-faithful version (sha256_compact.rs) lowers
@@ -10,17 +10,22 @@
 //   `Pervasive_ghost_decrease`, `Pervasive_ghost_invariant`,
 //   `Std_specs_Slice_spec_slice_iter`, `Option_option..isOption_option_Some`),
 //   plus undeclared loop locals (`VERUS_iter`, `VERUS_exec_iter`,
-//   `VERUS_ghost_iter`, ...). Indexed `while` lowers cleanly with the
-//   existing array-as-Map model, so this variant exercises everything
-//   except the iterator-protocol gap.
+//   `VERUS_ghost_iter`, ...). Indexed `for k in 0..blocks.len()` lowers
+//   cleanly through the for-range recovery path with the existing
+//   array-as-Map model, so this variant exercises everything except the
+//   iterator-protocol gap.
 //
 // Difference from sha256_compact.rs:
 //   - `compress` body is rewritten from
 //         for block in blocks.iter() {
 //             compress_u32(state, to_u32s(block));
 //         }
-//     to an indexed `while k < blocks.len()` with a usize counter, an
-//     `invariant k <= blocks.len()` clause, and a `decreases` measure.
+//     to the equivalent indexed form
+//         for k in 0..blocks.len() {
+//             compress_u32(state, to_u32s(&blocks[k]));
+//         }
+//     The two are semantically equivalent ("for every block index k, …");
+//     the indexed form sidesteps the iterator-protocol scaffolding gap.
 
 #[allow(unused_imports)]
 use verus_builtin::*;
@@ -119,14 +124,8 @@ fn compress_u32(state: &mut [u32; 8], mut block: [u32; 16]) {
 }
 
 pub fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
-    let mut k: usize = 0;
-    while k < blocks.len()
-        invariant
-            k <= blocks.len(),
-        decreases blocks.len() - k,
-    {
+    for k in 0..blocks.len() {
         compress_u32(state, to_u32s(&blocks[k]));
-        k += 1;
     }
 }
 

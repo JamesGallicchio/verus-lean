@@ -288,11 +288,43 @@ private def seqEmptyExpr (elemTy : Typ) : BuildM BExpr := do
 private def seqBuildExpr (seq elem : BExpr) : BuildM BExpr := do
   pure (Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.build")) [seq, elem])
 
-private def seqLiteralExpr (elemTy : Typ) (elems : List BExpr) : BuildM BExpr := do
-  elems.foldlM (fun acc elem => seqBuildExpr acc elem) (← seqEmptyExpr elemTy)
+/-- Map the underlying element type to its dedicated typed-literal AST
+    constructor.  The Boole grammar declares `Sequence.of_<T>[v0, v1, …]`
+    as `fn seq_of_<T> (vs : CommaSepBy Expr) : Sequence <T>`, so emission
+    must produce the specific `BooleDDM.Expr.seq_of_<T>` AST node (which
+    pretty-prints with brackets) — emitting a generic `appN` to
+    `Sequence.of_bv32` would print as `Sequence.of_bv32(…)`, which the
+    DDM frontend does not recognize.  Returns `none` for element types
+    that have no typed token (polymorphic, structs, etc.). -/
+private partial def seqLiteralCtor? : Typ → Option (Array BExpr → BExpr)
+  | .Decorated _ inner    => seqLiteralCtor? inner
+  | .UInt 8  | .SInt 8    => some (fun vs => .seq_of_bv8  default (ann vs))
+  | .UInt 16 | .SInt 16   => some (fun vs => .seq_of_bv16 default (ann vs))
+  | .UInt 32 | .SInt 32   => some (fun vs => .seq_of_bv32 default (ann vs))
+  | .UInt 64 | .SInt 64   => some (fun vs => .seq_of_bv64 default (ann vs))
+  | .USize | .ISize       => some (fun vs => .seq_of_bv64 default (ann vs))
+  | .Int | .Nat           => some (fun vs => .seq_of_int  default (ann vs))
+  | _ => none
 
-private def seqRepeatExpr (elemTy : Typ) (len : Nat) (elem : BExpr) : BuildM BExpr := do
-  (List.range len).foldlM (fun acc _ => seqBuildExpr acc elem) (← seqEmptyExpr elemTy)
+/-- Emit a sequence literal.  When the element type has a typed
+    `Sequence.of_<T>[…]` AST node (per `seqLiteralCtor?`), emit the
+    compact literal form — Strata folds it back to the same build-chain
+    internally, so verification semantics are unchanged, but the surface
+    output is far more readable (especially for long constant tables like
+    SHA-256's K32).  For non-bv/int element types (polymorphic, struct,
+    decorated, …) fall back to the explicit `Sequence.build` chain. -/
+private def seqLiteralExpr (elemTy : Typ) (elems : List BExpr) : BuildM BExpr := do
+  match seqLiteralCtor? elemTy with
+  | some ctor => pure (ctor elems.toArray)
+  | none =>
+    elems.foldlM (fun acc elem => seqBuildExpr acc elem) (← seqEmptyExpr elemTy)
+
+/-- Emit `[elem; len]` as a sequence literal of `len` copies.  Threads the
+    repeated element through `seqLiteralExpr` so bv/int element types pick
+    up the compact `Sequence.of_<T>[elem, elem, …]` form; polymorphic
+    element types still fall back to the explicit `Sequence.build` chain. -/
+private def seqRepeatExpr (elemTy : Typ) (len : Nat) (elem : BExpr) : BuildM BExpr :=
+  seqLiteralExpr elemTy (List.replicate len elem)
 
 private def arrayFillOrRepeatExpr (expected? : Option Typ) (elem : BExpr) : BuildM BExpr := do
   match expected?.bind arrayLen? with
@@ -1224,12 +1256,8 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           if isSeqTyp lhsTy then firstStructParamFromExpected? (some lhsTy)
           else vecElemTyp? lhsTy
         if let some elemTy := elemTy? then
-          let seqEmptyIdx ← resolveFreeVar (seqEmptyTokenName elemTy)
-          let seqBuildIdx ← resolveFreeVar "Sequence.build"
-          let emptySeq := Bld.fvar seqEmptyIdx
           let elems' ← elems.mapM (expToBoole env [] (some elemTy))
-          let rhs' :=
-            elems'.foldl (fun acc elem => Bld.appN (Bld.fvar seqBuildIdx) [acc, elem]) emptySeq
+          let rhs' ← seqLiteralExpr elemTy elems'
           let lhsTy' ← typToBooleType lhsTy
           return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
     let rhsCore := peelCallWrappers rhs
@@ -1675,8 +1703,12 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
   match body? with
   | some body =>
     if f.isRecursive then
+      -- The `decreases` slot was added to `recfn_decl` upstream; Verus'
+      -- function-level decreases is dropped (per `[CORE-decreases]`), so
+      -- emit `none` and let Strata's own termination checker run.
       let recDecl :=
-        BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy (ann specElts) body
+        BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy
+          (ann specElts) (ann none) body
       pure (.command_recfndefs default (ann #[recDecl]))
     else
       pure (.command_fndef default name typeArgs inputBindings outputTy (ann specElts) body (ann none))
@@ -2121,7 +2153,8 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
             | none => []
           let elts ← synthVariantRequires variantReqs
           pure (body, elts)
-        pure (BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy (ann specElts) body)
+        pure (BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy
+          (ann specElts) (ann none) body)
       pure [BooleDDM.Command.command_recfndefs default (ann recDecls)]
     -- Translate non-spec declarations normally
     let otherCmds ← others.foldlM (fun acc d => do

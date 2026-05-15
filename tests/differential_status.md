@@ -725,6 +725,44 @@ to repeat them.
   `Sequence.empty` typed-dispatch issue itself is resolved across
   all reachable contexts.
 
+### `[SURFACE-sequence-literal]` typed `Sequence.of_<T>[…]` literal emission
+- **2026-05-14 — adopt upstream `seq_of_*` syntax** (Strata
+  `kondylidou/pr/benchmarks` commit `edd12d7f8`, "sequence
+  initilization").  Boole's grammar now exposes
+  `Sequence.of_bv8 / _bv16 / _bv32 / _bv64 / _int` typed-literal tokens
+  with the surface syntax `Sequence.of_<T>[v0, v1, …]`.  Strata's
+  `toCoreExpr` lowers each one to the same left-fold of `Sequence.build`
+  over `Sequence.empty` that the translator was emitting by hand, so
+  verification semantics are unchanged.
+- **Translator change**: `seqLiteralCtor?` in `Translate.lean` maps an
+  element type to the dedicated `BooleDDM.Expr.seq_of_<T>` AST
+  constructor (the brackets-with-comma surface form must be emitted as
+  the specific AST node — a generic `Bld.appN` to a `Sequence.of_bv32`
+  free variable prints with parens and is rejected by the DDM frontend
+  as `Unknown variable Sequence.of_bv32`).  Both `seqLiteralExpr` and
+  `seqRepeatExpr` route through it; polymorphic element types
+  (`TypParam`, `Struct`, unrecognised) fall back to the older
+  `Sequence.build` chain over `Sequence.empty_<T>`.
+- **Validation**: `sha256_compact_indexed`'s `K32` constant emits as a
+  single `Sequence.of_bv32[bv{32}(0x428a2f98), bv{32}(0x71374491), …]`
+  literal instead of a 64-deep nested `Sequence.build(Sequence.build(…
+  Sequence.empty_bv32, v0), v1)` chain.  Output size for that one
+  literal drops from ~3 KB to ~700 bytes.  The `[0u32; 16]` init in
+  `to_u32s` similarly compacts.  Obligation count goes 24 → 26 for the
+  SHA test (two additional well-formedness obligations the typed-literal
+  node generates), all passing; full
+  `tests/check_working_tests.sh` regression is unchanged (31 pass /
+  9 fail).
+- Affects (emission shape only, no verification-outcome changes):
+  every test that previously emitted a `Sequence.build(…)` chain on a
+  bv8/16/32/64/int element type.  Visible in
+  `vlir-tests:sha256_compact_indexed`, `vlir-tests:test_vstd`,
+  `verus-examples:assert_by_compute`, `multiset`,
+  `doubly_linked_xor`/`doubly_linked`, `guide/ext_equal`,
+  `guide/lib_examples`, `mergesort`, `vec_ops`, and
+  `vlir-tests:seqs` (where polymorphic element types still fall
+  back to the build chain).
+
 ### `[TRANS-loop-counter-int]` `usize`/`isize` counters use `int` when used as sequence indices
 - **Background**: Verus types `for i in 0..N { … }` (and `let mut k:
   usize = 0; while k < blocks.len() { … }`) with `i, k : usize`, which
