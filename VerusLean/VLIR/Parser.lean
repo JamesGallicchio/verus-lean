@@ -1572,17 +1572,20 @@ private def recursiveCasesIdxHintFromTermCheck
 
 def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
   let name ← pathedNameFromNameJson j
-  -- Drop vstd spec fns that carry a body — they're vstd-internal helpers
-  -- whose translations we don't want to import.  Uninterpreted vstd spec
-  -- fns (`spec_axioms: null` in the JSON) are kept so they become plain
-  -- function declarations: exec wrappers emitted from `core::*::impl&%0::*`
-  -- routinely reference them in their `ensures` clauses (e.g. `Slice_len`'s
-  -- ensures names `Slice_spec_slice_len`, lowered from
-  -- `vstd::slice::spec_slice_len`).  Without this, Strata fails with
-  -- `Unknown variable Slice_spec_slice_len` at the wrapper boundary.
-  if isVstdName name then
-    let hasBody := (Lean.Json.getObjValByPath j ["axioms", "spec_axioms", "body_exp"]).toOption.isSome
-    if hasBody then return none
+  -- vstd spec fns that carry a body are vstd-internal helpers whose
+  -- (transitively-recursive) translations we deliberately do NOT import.
+  -- But we MUST still emit the symbol as an *uninterpreted declaration* so
+  -- references resolve — e.g. `vstd::arithmetic::power2::pow2`, named from
+  -- the file's own specs and from preserved vstd lemma `ensures` (see
+  -- `ProofFn.fromJson`).  Previously these were dropped wholesale, leaving
+  -- `Unknown variable Arithmetic_Power2_pow2`.  Treat them exactly like the
+  -- already-uninterpreted vstd specs (`spec_axioms: null`): keep the
+  -- signature, force `body := none`.  Unreferenced / inlined-at-call-site /
+  -- `Pervasive_*` vstd specs are still dropped downstream by
+  -- `pruneUnreferencedVstdSpecs`, so this does not leak unused declarations.
+  let dropVstdBody :=
+    isVstdName name &&
+      (Lean.Json.getObjValByPath j ["axioms", "spec_axioms", "body_exp"]).toOption.isSome
   let args ← fnParseArgs j
   let argNames := args.map Prod.fst
 
@@ -1594,7 +1597,8 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
   -- We still emit them as declaration-only (body := none) so downstream
   -- code can reference them.
   let bodyExp? ←
-    match Lean.Json.getObjValByPath j ["axioms", "spec_axioms", "body_exp"] with
+    if dropVstdBody then pure none
+    else match Lean.Json.getObjValByPath j ["axioms", "spec_axioms", "body_exp"] with
     | .ok v => some <$> fromJsonSpanned v Exp.fromJson
     | .error _ => pure none
 
@@ -1706,11 +1710,35 @@ def ProofFn.fromJson (j : Json) : VParser ProofFn := do
       VarBinder.fromJson retObj
     | .error _ =>
       pure ("%return", .Unit)
+  -- Declaration-level contract (`decl.reqs` / `decl.enss`).  For an external
+  -- proof fn (e.g. a referenced vstd lemma) `exec_proof_check` is `null` —
+  -- there is no body to check — but the *trusted contract* is still present
+  -- under `decl` and MUST be preserved.  Dropping it (the old behaviour)
+  -- emitted the stub procedure with an empty `spec { }`, so a downstream
+  -- `call lemma_…()` injected no facts and the proof lost its axioms.
+  let declReqs : List Exp ←
+    match j.getArrByPath? ["decl", "reqs"] with
+    | .ok reqArr =>
+      let parsed ← reqArr.mapM (fromJsonSpanned · Exp.fromJson)
+      pure parsed.toList
+    | .error _ => pure []
+  let declEnss : List Exp ←
+    match j.getArrByPath? ["decl", "enss"] with
+    | .ok ensGroups =>
+      let mut acc : List Exp := []
+      for g in ensGroups do
+        match g.getArr? with
+        | .ok group =>
+          let parsed ← group.mapM (fromJsonSpanned · Exp.fromJson)
+          acc := acc ++ parsed.toList
+        | .error _ => pure ()
+      pure acc
+    | .error _ => pure []
   match Lean.Json.getObjValByPath j ["exec_proof_check"] with
   | .ok .null =>
-    return ProofFn.mk name args retName returnType [] [] none [] []
+    return ProofFn.mk name args retName returnType declReqs declEnss none [] []
   | .error _ =>
-    return ProofFn.mk name args retName returnType [] [] none [] []
+    return ProofFn.mk name args retName returnType declReqs declEnss none [] []
   | .ok _ =>
     pure ()
 

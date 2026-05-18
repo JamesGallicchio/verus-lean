@@ -344,8 +344,16 @@ run_verus_export() {
   out_json_tmp="$tmp_dir/${base}.json"
   out_json_alt_tmp="$tmp_dir/${out_base}.json"
   set +e
-  run_cmd_quiet_in_dir "$tmp_dir" "$VERUS_BIN" --export-lean-all "$file"
-  rc=$?
+  if $verbose; then
+    run_cmd_quiet_in_dir "$tmp_dir" "$VERUS_BIN" --export-lean-all "$file"
+    rc=$?
+  else
+    # Quiet mode: suppress Verus chatter but still surface its
+    # "verification results:: N verified, M errors" summary line.
+    verus_out="$( (cd "$tmp_dir" && "$VERUS_BIN" --export-lean-all "$file") 2>&1 )"
+    rc=$?
+    printf '%s\n' "$verus_out" | grep -E 'verification results::' || true
+  fi
   set -e
   if [ $rc -ne 0 ] && $verbose; then
     echo "Verus exited non-zero for $base; continuing if JSON was produced."
