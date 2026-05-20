@@ -52,12 +52,7 @@ verify_skipped_solver_timeout=0
 verify_skipped_solver_unknown=0
 verify_known_translator_bugs=0
 
-is_expected_empty_export_target() {
-  case "$1" in
-    */examples/guide/opaque.rs) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+: # `is_ignored_test` lives in tests/lib/boole_verify.sh (sourced above)
 
 # For "negative" Verus tests (containing intentionally-unverifiable
 # assertions), return a regex matching the obligation labels Strata is
@@ -65,25 +60,28 @@ is_expected_empty_export_target() {
 # obligation must pass for [verify] ✅ PASS). A pattern of `.` permits
 # any obligation to fail (suitable for files whose entire contents are
 # expect-failures, as indicated by their header comment).
+#
+# Obligation labels have the shape `<stable-prefix>_<idx>_<serial>`
+# (e.g. `assert_15_1719`, `bitvector_query`, `triangle0_terminates_0`).
+# The trailing `_<serial>` is a Provenance positional counter that
+# *renumbers* whenever upstream Strata's metadata changes (the
+# 2026-05-18 int-termination pull is one such event). Anchor patterns
+# on the stable prefix (semantic name, or `<name>_<idx>_`) and never
+# on the volatile serial, so a pin bump does not spuriously re-flag
+# these as regressions. A genuinely new failing obligation has a
+# different prefix and still surfaces.
+# Thin delegator: the canonical pattern table lives in
+# `tests/lib/boole_verify.sh::expected_boole_fail_pattern_for_wrapper`
+# (sourced into both this script and `run_tests.sh`).  We resolve the
+# `.rs` target to its `.lean` wrapper, then ask the shared helper.
+# Keeping a single source of truth ensures `run_tests.sh --verify`
+# (direct invocation) and the curated gate agree on which obligation
+# failures are documented/expected.
 expected_fail_pattern_for_target() {
-  case "$1" in
-    */tests/VerusFiles/basic_failure.rs) echo 'fail_a_post_expr' ;;
-    # `by_lean.rs`: `lean_test`'s ensures fails, and the three asserts in
-    # `assert_lean_jumble` fail. Verus reports the same failures (capped
-    # at `--multiple-errors`). Strata's obligation IDs are positional
-    # (`assert_N_M` where N is the file-wide assertion index), so this
-    # pattern is sensitive to assertion ordering in the source.
-    */tests/VerusFiles/by_lean.rs)       echo 'lean_test_ensures|assert_[456]_' ;;
-    # `matching.rs` intentionally fails on `assert(s is Soccer)` (an
-    # unconstrained enum) and `is_insect(mammal) == 6` (calls a `->`
-    # accessor with the wrong variant precondition). Verus reports the
-    # same failures.
-    */tests/VerusFiles/matching.rs)      echo 'assert_' ;;
-    # verus/examples/*.rs with `expect-failures` header comment
-    */examples/assertions.rs)            echo '.' ;;
-    */examples/debug.rs)                 echo '.' ;;
-    *) echo "" ;;
-  esac
+  local wrapper
+  wrapper="$(lean_wrapper_for_target "$1")"
+  [ -z "$wrapper" ] && { echo ""; return; }
+  expected_boole_fail_pattern_for_wrapper "$wrapper"
 }
 
 # Resolve the .lean wrapper path for a given .rs target. This mirrors
@@ -124,6 +122,14 @@ while IFS= read -r line || [ -n "$line" ]; do
   echo ""
   echo "==> Test: $target"
 
+  # Tests not suitable or valuable to run regression on (upstream-ignored,
+  # empty-export, known-hang).  See `tests/ignored_tests.txt` for the list
+  # and reason tags.  Skip silently rather than invoking Verus.
+  if is_ignored_test "$target"; then
+    echo "  [skipped] listed in tests/ignored_tests.txt"
+    continue
+  fi
+
   # Steps 1 + 2: Verus export → Boole generation (delegated to run_tests.sh).
   cmd=(./tests/run_tests.sh --boole --verbose "$target")
   run_log="$(mktemp)"
@@ -133,9 +139,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   set -e
 
   if grep -q "json missing" "$run_log"; then
-    if ! is_expected_empty_export_target "$target"; then
-      failures+=("$target")
-    fi
+    failures+=("$target")
     rm -f "$run_log"
     continue
   fi

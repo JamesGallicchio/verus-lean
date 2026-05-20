@@ -1,5 +1,16 @@
 # Stable tests that currently generate valid Boole output end-to-end.
 #
+# A few entries verify as "negative tests": they generate valid Boole
+# but have known not-faithful obligations (uninterpreted nat/bv
+# coercions, generic type-var SMT encoding, intentional type_fail/bvslt
+# baselines) tracked in differential_status.md. They are kept here for
+# generation + Boole-shape regression coverage; check_working_tests.sh's
+# expected_fail_pattern_for_target whitelists their documented failing
+# obligations (anchored on stable prefixes so Provenance serial
+# renumbering from Strata pin bumps does not spuriously re-flag them).
+# Affected: LoopSimpleWithSpec, integer_ring, bitvector_basic, external,
+# generics, quantifiers, statements.
+#
 # vlir-tests (local test files)
 tests/VerusFiles/basic_failure.rs
 tests/VerusFiles/binder_cast_regressions.rs

@@ -278,10 +278,11 @@ def forToStmt (loopVar : String) (loopTy : BType)
   .for_to_by_statement default binder start limit (ann none)
     (mkMeasure measure) (invsFromArray invs) (.block default (ann body))
 
-def exitStmt (label : Option String) : BStmt :=
-  match label with
-  | some l => .exit_statement default (ann l)
-  | none   => .exit_unlabeled_statement default
+-- Strata removed unlabeled `exit` (upstream `dc7a029ae`: ambiguous as
+-- break vs. continue, "never used").  Only labeled exits exist now; the
+-- sole caller (`.BreakOrContinue`) already rejects the unlabeled case.
+def exitStmt (label : String) : BStmt :=
+  .exit_statement default (ann label)
 
 /-- Early return: emit `exit <procName>;`. Strata's procedure translation
     wraps the body in a labeled block named after the procedure, so exiting

@@ -343,6 +343,13 @@ run_verus_export() {
   out_json_final="$out_dir/${out_base}.json"
   out_json_tmp="$tmp_dir/${base}.json"
   out_json_alt_tmp="$tmp_dir/${out_base}.json"
+  # Rust crate names disallow `-`, so Verus normalizes hyphens in the
+  # source-file stem to underscores when picking the JSON output name
+  # (e.g. `proposal-rw2022.rs` → `proposal_rw2022.json`).  Look for the
+  # underscored name as a third candidate so hyphenated sources don't
+  # spuriously classify as "json missing".
+  out_json_norm_tmp="$tmp_dir/${base//-/_}.json"
+  out_json_norm_alt_tmp="$tmp_dir/${out_base//-/_}.json"
   set +e
   if $verbose; then
     run_cmd_quiet_in_dir "$tmp_dir" "$VERUS_BIN" --export-lean-all "$file"
@@ -362,10 +369,14 @@ run_verus_export() {
     mv -f "$out_json_alt_tmp" "$out_json_final"
   elif [ -f "$out_json_tmp" ]; then
     mv -f "$out_json_tmp" "$out_json_final"
+  elif [ -f "$out_json_norm_alt_tmp" ]; then
+    mv -f "$out_json_norm_alt_tmp" "$out_json_final"
+  elif [ -f "$out_json_norm_tmp" ]; then
+    mv -f "$out_json_norm_tmp" "$out_json_final"
   else
     failures+=("$base (json missing)")
   fi
-  for shard in "$tmp_dir/${base}_"*.json "$tmp_dir/${out_base}_"*.json; do
+  for shard in "$tmp_dir/${base}_"*.json "$tmp_dir/${out_base}_"*.json "$tmp_dir/${base//-/_}_"*.json "$tmp_dir/${out_base//-/_}_"*.json; do
     [ -f "$shard" ] || continue
     mv -f "$shard" "$out_dir/"
   done

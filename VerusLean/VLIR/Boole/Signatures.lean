@@ -23,6 +23,7 @@ def knownFnSignature? (fname : String) : Option (List Typ × Typ) :=
     knownPreludeSignatures ++
     [ ("Set_contains",     ([setTyp a, a], .Bool))
     , ("Map_index",        ([mapAB, a], b))
+    , ("Arithmetic_Power2_pow2", ([.Nat], .Nat))
     ]
   (registry.find? (fun (n, _) => n == fname) |>.map Prod.snd) <|>
     (supportDeclForName? fname >>= supportDeclSignature?)

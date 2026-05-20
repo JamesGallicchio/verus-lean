@@ -261,16 +261,14 @@ private partial def exprHonorsExpectedInt : Exp → Bool
   | .Binary (.Arith _ _) _ _ => true
   | .Unary (.Box _) e => exprHonorsExpectedInt e
   | .Unary (.Unbox _) e => exprHonorsExpectedInt e
+  | .Unary (.Clip _ _) _ => true
   | .Unary .Trigger e => exprHonorsExpectedInt e
   | .Unary (.HasType _) e => exprHonorsExpectedInt e
   | .Unary .Old e => exprHonorsExpectedInt e
   | .If _ t f => exprHonorsExpectedInt t && exprHonorsExpectedInt f
   | .Bind _ body => exprHonorsExpectedInt body
   | .MatchBlock _ body => exprHonorsExpectedInt body
-  | .Call fn _ _ =>
-    let name := CallFun.name fn
-    isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name ||
-      isSliceLenSpecName name || isSliceLenExecName name || isWrappingAddName name
+  | .Call _ _ _ => true
   | _ => false
 
 private def arrayFillExpr (elem : BExpr) : BuildM BExpr := do
@@ -337,6 +335,17 @@ private def arrayFillOrRepeatExpr (expected? : Option Typ) (elem : BExpr) : Buil
     seqRepeatExpr elemTy len elem
   | none => arrayFillExpr elem
 
+private def indexedElemTyp? (env : VarEnv) (bound : BoundEnv) (container : Exp) :
+    Option Typ :=
+  (inferComparableTyp? env bound (unwrapViewCall container)).bind fun ty =>
+    seqElemTyp? ty <|> vecElemTyp? ty <|> arrayElemTyp? ty
+
+private def coerceIndexedResult (env : VarEnv) (bound : BoundEnv)
+    (expected? : Option Typ) (container : Exp) (selected : BExpr) : BuildM BExpr := do
+  let srcKind? := (indexedElemTyp? env bound container).bind numKindOfTyp?
+  let tgtKind? := expected?.bind numKindOfTyp?
+  coerceNumeric srcKind? tgtKind? selected
+
 mutual
 
 private partial def comparisonPrelude
@@ -402,12 +411,23 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     -- literal's source typ is narrower). Fall back to the Const's own
     -- VLIR typ when it pins down a bv width — this preserves
     -- source-declared widths (e.g. `1u32`) in contexts where `expected?`
-    -- couldn't propagate, such as inside a `.Binary` whose own type
-    -- inference was inconclusive (mixed-sign operands).
+    -- could not propagate. Do not fall back to source `.Nat` here: Verus
+    -- often serializes plain integer literals as nat even inside int
+    -- arithmetic, so nat lifting must be driven by the surrounding expected
+    -- type.
     let effectiveTy? :=
       expected? <|>
         (if (bitWidthOfTyp ty).isSome then some ty else none)
-    return constToBoole effectiveTy? c
+    let raw := constToBoole effectiveTy? c
+    let rawKind? :=
+      match c with
+      | .Int _ | .Char _ =>
+        match effectiveTy?.bind bitInfoOfTyp with
+        | some (w, signed) => some (.bv w signed)
+        | none => some .int
+      | _ => none
+    let targetKind? := effectiveTy?.bind numKindOfTyp?
+    coerceNumeric rawKind? targetKind? raw
   | .StructCtor dt fields => do
     let ctorIdx ← resolveFreeVar (structCtorNameOf dt)
     let ctor := Bld.fvar ctorIdx
@@ -474,19 +494,20 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     -- mixes int and bv operands. Otherwise bv overflow corrupts the
     -- post-hoc `bv*_to_int_u` wrap (`n == 2^64 - 1` ↦ `bv64_to_int_u(n
     -- + 1bv64) == 0`).
+    let expectedKind? := expected?.bind numKindOfTyp?
     let arithRunsInInt :=
       match op with
       | .Arith _ _ =>
-        expected?.bind numKindOfTyp? == some NumKind.int ||
-        expHasMixedIntBvArith env bound (.Binary op lhs rhs)
+        match expectedKind? with
+        | some .int | some .nat => true
+        | _ => expHasMixedIntBvArith env bound (.Binary op lhs rhs)
       | _ => false
     if arithRunsInInt then
       let l ← expToBoole env bound (some Typ.Int) lhs
       let r ← expToBoole env bound (some Typ.Int) rhs
       match applyBinaryOp op l r with
       | some result =>
-        let targetKind? := expected?.bind numKindOfTyp?
-        let result ← coerceNumeric (some .int) targetKind? result
+        let result ← coerceNumeric (some .int) expectedKind? result
         return result
       | none => throw s!"unsupported int-context binary op: {repr op}"
     let lhsInfo? := inferBitInfo env bound lhs
@@ -633,7 +654,26 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let x0 ← expToBoole env bound hint? e
         coerceBvBv innerInfo? (some (targetW, true)) x0
       | .Clip .Nat _ =>
-        expToBoole env bound (some .Nat) e
+        -- `x as nat` ≡ `int_to_nat(x)` on the integer value of `x`.
+        -- Translating the inner with expected `.Int` makes any mixed
+        -- arithmetic (e.g. `(bytes[i] as nat) + pow2(..)*rec`, where the
+        -- VLIR is `Clip Nat (Add bv8 nat)`) run in `int` — the existing
+        -- arith-in-int path promotes the bv leaf via `bvN_to_int`.
+        -- If the surrounding context wants `int`, keep that int value
+        -- directly instead of producing the redundant
+        -- `nat_to_int(int_to_nat(...))` round-trip; Verus has already
+        -- checked the source-side nat cast.  If the context wants `nat`,
+        -- insert the actual `int_to_nat` boundary.
+        let x ← expToBoole env bound (some Typ.Int) e
+        match expected?.bind numKindOfTyp? with
+        | some .int => pure x
+        | some (.bv w signed) => coerceNumeric (some .int) (some (.bv w signed)) x
+        | _ => coerceNumeric (some .int) (some .nat) x
+      | .Unbox t => do
+        let inner ← expToBoole env bound (some t) e
+        let srcKind? := numKindOfTyp? t
+        let tgtKind? := expected?.bind numKindOfTyp?
+        coerceNumeric srcKind? tgtKind? inner
       | .Box t => do
         -- When the surrounding context expects int, the Box's type
         -- assertion (typically `USize` for indices into `index_set`)
@@ -749,7 +789,10 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
           | none => none)
         expToBoole env bound argExpected? arg)
       let fnIdx ← resolveFreeVar fnameStr
-      return Bld.appN (Bld.fvar fnIdx) args'
+      let app := Bld.appN (Bld.fvar fnIdx) args'
+      let srcKind? := (lookupFnRetTypeFull env fnameStr).bind numKindOfTyp?
+      let tgtKind? := expected?.bind numKindOfTyp?
+      coerceNumeric srcKind? tgtKind? app
     -- `vec2seq` branch: `Vec` is translated as `Sequence`, so the
     -- surface-level `view(v)` / `.len()` / `[i]` operations collapse
     -- directly to Strata's built-in Sequence operations. This skips
@@ -783,7 +826,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | [arrayArg, indexArg] =>
         let arrayExpr ← expToBoole env bound none arrayArg
         let intIdx ← expToBoole env bound (some .Int) indexArg
-        pure (Bld.seqSelect arrayExpr intIdx)
+        coerceIndexedResult env bound expected? arrayArg (Bld.seqSelect arrayExpr intIdx)
       | _ => mkFallback
     else if isArrayFillForCopyTypesName fname then
       match argsFiltered with
@@ -837,7 +880,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | [sliceArg, indexArg] =>
         let sliceExpr ← expToBoole env bound none sliceArg
         let intIdx ← expToBoole env bound (some .Int) indexArg
-        pure (Bld.seqSelect sliceExpr intIdx)
+        coerceIndexedResult env bound expected? sliceArg (Bld.seqSelect sliceExpr intIdx)
       | _ => mkFallback
     else if isViewName fname then
       match argsFiltered with
@@ -887,13 +930,15 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let seqExpr ← expToBoole env bound none (unwrapViewCall vArg)
         let intIdx ← expToBoole env bound (some .Int) iArg
         let selectIdx ← resolveFreeVar "Sequence.select"
-        return Bld.appN (Bld.fvar selectIdx) [seqExpr, intIdx]
+        let selected := Bld.appN (Bld.fvar selectIdx) [seqExpr, intIdx]
+        coerceIndexedResult env bound expected? vArg selected
       | _ => mkFallback
     else if fnameStr == "Seq_index" then
       match argsFiltered with
       | [sArg, iArg] =>
-        mkSeqBuiltinCall "select"
+        let selected ← mkSeqBuiltinCall "select"
           [(sArg, lookupFnParamTypeFull env fnameStr 0), (iArg, some .Int)]
+        coerceIndexedResult env bound expected? sArg selected
       | _ => mkFallback
     else if fnameStr == "Seq_first" then
       match argsFiltered with
@@ -901,15 +946,17 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let s ← expToBoole env bound (lookupFnParamTypeFull env fnameStr 0) sArg
         let zero := intConst 0
         let selectIdx ← resolveFreeVar "Sequence.select"
-        return Bld.appN (Bld.fvar selectIdx) [s, zero]
+        let selected := Bld.appN (Bld.fvar selectIdx) [s, zero]
+        coerceIndexedResult env bound expected? sArg selected
       | _ => mkFallback
     else if fnameStr == "Seq_last" then
       match argsFiltered with
       | [sArg] =>
         let s ← expToBoole env bound (lookupFnParamTypeFull env fnameStr 0) sArg
         let one := intConst 1
-        return Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.select"))
+        let selected := Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.select"))
           [s, intSub (seqLength s) one]
+        coerceIndexedResult env bound expected? sArg selected
       | _ => mkFallback
     else if fnameStr == "Seq_empty" then do
       -- Pick the element type from the propagated `expected?` (a
@@ -1383,7 +1430,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     | _, _ => return [returnStmt procName]
   | .BreakOrContinue label isBreak =>
     match label with
-    | some l => return [exitStmt (some (sanitizeIdent l))]
+    | some l => return [exitStmt (sanitizeIdent l)]
     | none =>
       throw s!"unsupported unlabeled {(if isBreak then "break" else "continue")} after loop normalization"
   | .If cond b1 b2 => do
@@ -1683,7 +1730,7 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
   let (inputBindings, inputNames) ← mkMonoInputs f.inputs
   let outputTy ← typToBooleType f.returnType
   let envLocal := extendEnv env f.inputs
-  let (body?, specElts) ← withScope do
+  let (body?, specElts, decrAnn) ← withScope do
     addBoundVars inputNames
     let body? ← if emitBody then
       match f.body with
@@ -1699,16 +1746,28 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
         dedupVariantReqs <| (rootExposedProjs b).filter (fun (n, _, _) => inputNameSet.contains n)
       | none => []
     let elts ← synthVariantRequires variantReqs
-    pure (body?, elts)
+    -- Lower Verus's serialized `decreases` measure (parsed into
+    -- `SpecFn.decreases`) for recursive spec fns.  The termination-check
+    -- body is a `Block` whose first stmt is `decrease%init0 := <measure>`;
+    -- `decreasesToMeasureAnn` extracts that RHS.  Lowered inside this
+    -- input-bound scope since the measure names the params.  Falls back to
+    -- `mkMeasure none` (Strata's own checker) on unexpected shapes.
+    let decrAnn ←
+      match f.decreases with
+      | some (.Block stmts) => decreasesToMeasureAnn envLocal stmts
+      | some s => decreasesToMeasureAnn envLocal [s]
+      | none => pure (Bld.mkMeasure none)
+    pure (body?, elts, decrAnn)
   match body? with
   | some body =>
     if f.isRecursive then
-      -- The `decreases` slot was added to `recfn_decl` upstream; Verus'
-      -- function-level decreases is dropped (per `[CORE-decreases]`), so
-      -- emit `none` and let Strata's own termination checker run.
+      -- Emit Verus's `decreases` measure into Strata's `recfn_decl` slot
+      -- (was previously dropped to `none` per `[CORE-decreases]`, leaving
+      -- Strata's auto checker unable to prove sequence-recursion
+      -- termination, e.g. `bytes_seq_as_nat` recursing on `Seq::subrange`).
       let recDecl :=
         BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy
-          (ann specElts) (ann none) body
+          (ann specElts) decrAnn body
       pure (.command_recfndefs default (ann #[recDecl]))
     else
       pure (.command_fndef default name typeArgs inputBindings outputTy (ann specElts) body (ann none))
@@ -2139,7 +2198,7 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         let (inputBindings, inputNames) ← mkMonoInputs f.inputs
         let outputTy ← typToBooleType f.returnType
         let envLocal := extendEnv env f.inputs
-        let (body, specElts) ← withScope do
+        let (body, specElts, decrAnn) ← withScope do
           addBoundVars inputNames
           let body ← match f.body with
             | some b => expToBooleFlat envLocal (some f.returnType) b
@@ -2152,9 +2211,19 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
                 (rootExposedProjs b).filter (fun (n, _, _) => inputNameSet.contains n)
             | none => []
           let elts ← synthVariantRequires variantReqs
-          pure (body, elts)
+          -- Thread the source `decreases` measure into the mutual-rec
+          -- slot, mirroring `specFnToBoole`.  Previously hardcoded to
+          -- `none`, so Strata's int-valued termination checker had no
+          -- measure for mutually-recursive spec fns and rejected them
+          -- with "requires a 'decreases' clause or a '@[cases]'".
+          let decrAnn ←
+            match f.decreases with
+            | some (.Block stmts) => decreasesToMeasureAnn envLocal stmts
+            | some s => decreasesToMeasureAnn envLocal [s]
+            | none => pure (Bld.mkMeasure none)
+          pure (body, elts, decrAnn)
         pure (BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy
-          (ann specElts) (ann none) body)
+          (ann specElts) decrAnn body)
       pure [BooleDDM.Command.command_recfndefs default (ann recDecls)]
     -- Translate non-spec declarations normally
     let otherCmds ← others.foldlM (fun acc d => do

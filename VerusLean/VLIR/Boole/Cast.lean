@@ -105,7 +105,7 @@ def coerceNumeric (src? target? : Option NumKind) (e : BExpr) :
       else do
         let eInt ← applyCast (.bvToInt effSw ss) e
         applyCast (.intToBv tw ts) eInt
-    | .int, .nat => pure e
+    | .int, .nat => applyCast .intToNat e
     | .int, .int | .nat, .nat => pure e
 
 /-- Coerce between bitvector widths when both source and target are known.

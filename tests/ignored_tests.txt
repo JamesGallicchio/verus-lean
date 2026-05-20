@@ -1,0 +1,40 @@
+# Tests skipped entirely from regression — i.e., not suitable or valuable to
+# run.  Each non-comment line is a shell `case` pattern matched against the
+# test target's path; the harness's `is_ignored_test` reads this file and
+# treats matches as silent skips rather than as failures or missing-json.
+#
+# Reasons (one tag per entry, in the trailing comment):
+#   UPSTREAM-IGNORE  — Verus maintainers marked the source with
+#                      `// rust_verify/tests/example.rs ignore`.  Their own
+#                      test runner skips these; trying to translate is not
+#                      meaningful (unresolved imports, hangs, etc.).
+#   EMPTY-EXPORT     — the file has no Verus-mode declarations (or only
+#                      `broadcast use` content), so Verus succeeds but
+#                      produces no JSON by design.  Nothing to verify.
+#   HANG             — known to hang Verus or break the harness's run.
+#
+# Regenerate the upstream-ignore set:
+#   grep -rlE "rust_verify/tests/example\.rs[[:space:]]+ignore" ../verus/examples/
+#
+# The harness currently scans `tests/VerusFiles/`,
+# `tests/adopted_rust_verify_test/`, `../verus/examples/`, and
+# `../verus/examples/guide/` at `find -maxdepth 1`.  Entries below are
+# `case`-pattern globs (with a leading `*/`) so they match the absolute
+# paths the harness passes in.
+
+# --- Active entries (reachable by current scan) ---
+
+*/examples/verified_vec.rs            # UPSTREAM-IGNORE: deprecated PPtr API; `use vstd::ptr` unresolved (line 1: "intending to deprecate PPtr, should update this to raw_ptr")
+*/examples/trigger_loops.rs           # UPSTREAM-IGNORE + HANG: previously caused all-suites truncations
+*/examples/guide/opaque.rs            # EMPTY-EXPORT: pedagogical `verifier::opaque` demo; no exec/proof/spec content
+*/examples/broadcast_proof.rs         # EMPTY-EXPORT: `broadcast use`-only file; Verus reports `verified` but emits no JSON
+
+# --- Inventory of upstream-ignored subdir entries not reached by current scan ---
+# (Kept as comments so a future scan-broadening or audit-by-grep finds them.)
+# */examples/state_machines/disk_example.rs                                # UPSTREAM-IGNORE
+# */examples/state_machines/tutorial/unverified_counting_to_n.rs           # UPSTREAM-IGNORE
+# */examples/state_machines/tutorial/unverified_counting_to_2.rs           # UPSTREAM-IGNORE
+# */examples/state_machines/tutorial/unverified_rc.rs                      # UPSTREAM-IGNORE
+# */examples/state_machines/tutorial/unverified_fifo.rs                    # UPSTREAM-IGNORE
+# */examples/integer_ring/circular_by_d.rs                                 # UPSTREAM-IGNORE
+# */examples/scache/rwlock.rs                                              # UPSTREAM-IGNORE

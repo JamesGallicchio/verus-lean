@@ -331,6 +331,8 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
     if isSupportedBvWidth w then some (w, true) else none
   | .Unary (.Clip .USize _) _ => some (usizeBitWidth, false)
   | .Unary (.Clip .ISize _) _ => some (usizeBitWidth, true)
+  | .Unary (.Clip .Int _) _ => none
+  | .Unary (.Clip .Nat _) _ => none
   | .Binary (.Bitwise (.Shl w _) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Binary (.Bitwise (.Shr w) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Unary _ e => inferBitInfo env bound e
@@ -358,6 +360,9 @@ partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Opti
       lookupFnRetTypeFull env (identToBoole name)
   | .Unary (.Box t) _ => some t
   | .Unary (.Unbox t) _ => some t
+  | .Unary .Trigger e => inferComparableTyp? env bound e
+  | .Unary .Old e => inferComparableTyp? env bound e
+  | .Unary (.HasType _) e => inferComparableTyp? env bound e
   | .Unary (.Proj dt variant field _ _) _ =>
     let projField := projFieldNameOf dt variant field
     lookupFnRetTypeFull env (datatypeDestructorNameOf dt projField)
@@ -416,9 +421,11 @@ partial def arithFootprint (env : VarEnv) (bound : BoundEnv) : Exp → ArithFoot
     (arithFootprint env bound lhs).merge (arithFootprint env bound rhs)
   | .Unary (.Box t) _ | .Unary (.Unbox t) _ =>
     ArithFootprint.ofNumKind (numKindOfTyp? t)
+  | .Unary (.Clip .Int _) _ | .Unary (.Clip .Nat _) _ =>
+    { hasMathInt := true }
   -- Verus inserts `Unary (Clip <range> _)` around arithmetic to enforce
-  -- range constraints (e.g. usize-no-underflow on `i - 15`).  For
-  -- footprint purposes the Clip is transparent: the contained arithmetic
+  -- range constraints (e.g. usize-no-underflow on `i - 15`).  Fixed-width
+  -- clips are transparent for footprint purposes: the contained arithmetic
   -- is what actually mixes int and bv operands, and we want that mix to
   -- reach the outer expression so `arithRunsInInt` fires correctly.
   -- Without this recursion, Clip USize on a mixed-arith subtree looks

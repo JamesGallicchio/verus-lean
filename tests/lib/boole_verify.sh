@@ -116,20 +116,80 @@ classify_boole_verify_log() {
   return 0
 }
 
+# Single source of truth for expected-fail obligation patterns, used by
+# `classify_boole_verify_log` here AND by `check_working_tests.sh::
+# expected_fail_pattern_for_target` (which now delegates to this fn via
+# `lean_wrapper_for_target`).
+#
+# Obligation labels have the shape `<stable-prefix>_<idx>_<serial>` (e.g.
+# `assert_15_1719`, `bitvector_query`, `triangle0_terminates_0`).  The
+# trailing `_<serial>` is a Provenance positional counter that *renumbers*
+# whenever upstream Strata's metadata changes (the 2026-05-18 int-
+# termination pull is one such event).  Anchor patterns on the stable
+# prefix (semantic name, or `<name>_<idx>_`) and never on the volatile
+# serial, so a pin bump does not spuriously re-flag these as regressions.
+# A genuinely new failing obligation has a different prefix and still
+# surfaces.
 expected_boole_fail_pattern_for_wrapper() {
   case "$1" in
-    */basic_failure.lean) echo 'fail_a_post_expr' ;;
-    # See `expected_fail_pattern_for_target` in check_working_tests.sh for
-    # the rationale. Tracks `lean_test` ensures + the 3 asserts in
-    # `assert_lean_jumble`; brittle to assertion ordering in the source.
-    */by_lean.lean)       echo 'lean_test_ensures|assert_[456]_' ;;
-    */assertions.lean)    echo '.' ;;
-    */debug.lean)         echo '.' ;;
-    # `matching.rs` contains intentionally-failing negative tests:
-    # `assert(s is Soccer)` on an unconstrained `Sport`, and `is_insect_proof`
-    # calling `is_insect(l)` on a `Mammal`. Verus also reports these as
-    # assertion failures; Strata surfaces them as `assert_*` obligations.
-    */vlir-tests/matching.lean) echo 'assert_' ;;
+    # ── negative tests (intentional source-level failures) ──────────────
+    */vlir-tests/basic_failure.lean) echo 'fail_a_post_expr' ;;
+    # `by_lean.rs`: `lean_test` ensures fails + 3 asserts in
+    # `assert_lean_jumble`. Brittle to assertion ordering in source.
+    */vlir-tests/by_lean.lean)       echo 'lean_test_ensures|assert_[456]_' ;;
+    # `matching.rs` intentionally fails on `assert(s is Soccer)` (an
+    # unconstrained enum) and `is_insect(mammal) == 6` (calls a `->`
+    # accessor with the wrong variant precondition).
+    */vlir-tests/matching.lean)      echo 'assert_' ;;
+    # verus/examples/*.rs with `expect-failures` header comment
+    */verus-examples/assertions.lean) echo '.' ;;
+    */verus-examples/debug.lean)      echo '.' ;;
+
+    # ── pre-documented not-faithful translations (see differential_status
+    #    "not faithful translation"): fail on specific obligations for
+    #    known, unrelated reasons (uninterpreted nat/bv coercions, generic
+    #    type-var SMT encoding, intentional type_fail/bvslt baselines).
+    #    The Boole translation is unchanged across the int-termination
+    #    pull; the patterns below tolerate Provenance serial renumbering. ─
+
+    # `[TRANS-coercion-uninterpreted]`: `∀ i:nat :: nat_to_int(i) >= 0`
+    # universal — `nat_to_int` has no body.
+    */verus-examples/quantifiers.lean)           echo 'assert_15_' ;;
+    # `[TRANS-coercion-uninterpreted]`: `b1 == i*2` loop entry-invariant
+    # over uninterpreted `bv8_to_bv64_u`.
+    */verus-examples/statements.lean)            echo 'entry_invariant_' ;;
+    # `[TRANS-coercion-uninterpreted]`: `bitvector_query`/`compute`
+    # obligations depending on uninterpreted `bv8_to_*` coercions.
+    */verus-examples/bitvector_basic.lean)       echo 'bitvector_query|compute|assert_29_' ;;
+    # `[VERIFY-generic-typevar-ddm]`: SMT encoding error on type-var
+    # obligations; dependent asserts also fail.
+    */verus-examples/generics.lean)              echo 'assert_[56]_' ;;
+    # `[TRANS-coercion-uninterpreted]`: `s >= n` precondition becomes
+    # `s >= bv64_to_int_u(n)` with `bv64_to_int_u` uninterpreted.
+    */verus-examples/external.lean)              echo 'callElimAssert_test_requires_' ;;
+    # Intentional baseline: `type_fail` + cvc5 `wide_mul` timeout +
+    # nonlinear `*_ensures_*` cvc5 cannot discharge.
+    */vlir-tests/tests__adopted_rust_verify_test__integer_ring.lean) echo '_ensures_' ;;
+    # Intentional bvslt/bvsle verify-mismatch baseline (strata-bv-lowering
+    # issue) plus int-termination `triangle0_terminates_*` measure
+    # obligations on the same uninterpreted signed-compare path.
+    */vlir-tests/LoopSimpleWithSpec.lean) echo 'entry_invariant_|triangle0_is_monotonic_ensures_|triangle0_terminates_' ;;
+
+    # ── intended int-termination reclassification (2026-05-18 pull, see
+    #    differential_status.md [CORE-decreases]). Translation is faithful;
+    #    failing obligations are documented Strata-side limitations, not
+    #    translator defects. ───────────────────────────────────────────────
+
+    # int-recursive fns are pure UFs with no definitional axiom, so cvc5
+    # cannot prove the inductive `is_even(i) <==> i%2==0` ensures.
+    */vlir-tests/mutual_recursion.lean) echo 'even_odd_mod2_ensures_' ;;
+    # Verus proves these via a *lexicographic* measure
+    # (`decreases abs(i), 0int`); the translator collapses lex-decreases
+    # to the head term, so the same-arg `M_is_odd(i) → M_is_even(i)`
+    # edge has no strict decrease. Waits on Strata tuple-measure support.
+    */vlir-tests/recursion.lean)        echo 'M_is_odd_terminates_1' ;;
+    */verus-examples/guide__recursion.lean) echo 'M_is_odd_terminates_1' ;;
+
     *) echo "" ;;
   esac
 }
@@ -245,4 +305,34 @@ run_boole_verify() {
       return "$rc"
       ;;
   esac
+}
+
+# -----------------------------------------------------------------------------
+# Ignored tests — shared between check_working_tests.sh and regress_examples.sh
+# -----------------------------------------------------------------------------
+# Returns 0 iff the given test path matches an active (non-comment) entry in
+# `tests/ignored_tests.txt` — the single source of truth for tests that are
+# not suitable or valuable to run regression on (upstream-marked `ignore`,
+# empty-export, known-hang).  Each line in the list is a shell `case` glob
+# pattern (e.g. `*/examples/verified_vec.rs`); trailing `# comment` text is
+# stripped.  Requires `$ROOT_DIR` to be set by the caller.
+is_ignored_test() {
+  local target="$1"
+  local list="$ROOT_DIR/tests/ignored_tests.txt"
+  [ -f "$list" ] || return 1
+  local line pat
+  while IFS= read -r line; do
+    pat="${line%%#*}"
+    # Note: use [^...] (bash-specific) not [!...] for the POSIX-style
+    # negation; bash with extglob/history off can mis-parse [![:space:]]
+    # as matching whitespace (the `!` is read literally).
+    pat="${pat#"${pat%%[^[:space:]]*}"}"
+    pat="${pat%"${pat##*[^[:space:]]}"}"
+    [ -z "$pat" ] && continue
+    # shellcheck disable=SC2254  # intentional unquoted glob
+    case "$target" in
+      $pat) return 0 ;;
+    esac
+  done < "$list"
+  return 1
 }

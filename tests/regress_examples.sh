@@ -212,6 +212,14 @@ for target in "${targets[@]}"; do
   echo ""
   echo "==> $target"
 
+  # Tests not suitable or valuable to run regression on (upstream-marked
+  # `ignore`, empty-export, known-hang).  Listed in tests/ignored_tests.txt
+  # and matched by `is_ignored_test` (sourced from tests/lib/boole_verify.sh).
+  if is_ignored_test "$target"; then
+    echo "  [skipped] listed in tests/ignored_tests.txt"
+    continue
+  fi
+
   log="$(mktemp "$REGRESSION_LOGS_DIR/run.XXXXXX.log")"
   set +e
   if $verbose; then
