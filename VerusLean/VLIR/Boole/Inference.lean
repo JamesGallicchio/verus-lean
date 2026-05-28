@@ -166,6 +166,45 @@ partial def seqEmptyTokenName : Typ → String
   | .Int | .Nat => "Sequence.empty_int"
   | _ => "Sequence.empty"
 
+-- Pair: `bindContainsLambda` / `expContainsLambda`.
+-- Used by `specFnToBoole` to auto-inline spec functions whose body
+-- would otherwise need to be encoded as an SMT axiom: Strata's
+-- encoder rejects lambdas in function bodies with `Cannot encode
+-- function … its body contains a lambda expression. Consider marking
+-- the function as `inline``.  Setting the `inline` attribute makes
+-- Strata substitute the body at each call site, where the lambda
+-- typically beta-reduces under `Seq_lib_map` / `Seq_lib_filter`
+-- builtins and disappears before SMT encoding.
+
+mutual
+
+/-- True iff the bind discriminant either is a `Lambda` introduction
+    or contains an unapplied lambda in any of its sub-expressions. -/
+partial def bindContainsLambda : Bind → Bool
+  | .Let _ _ e => expContainsLambda e
+  | .Quant _ _ trigs => trigs.any (·.any expContainsLambda)
+  | .Lambda _ => true
+  | .Choose _ pred => expContainsLambda pred
+
+/-- True iff the expression syntactically contains an unapplied
+    lambda introduction (`Bind (.Lambda _) _`).  See header comment
+    above the `mutual` block for the auto-inline use case. -/
+partial def expContainsLambda : Exp → Bool
+  | .Const _ _ | .Var _ => false
+  | .Call _ _ args => args.any expContainsLambda
+  | .CallLambda body args => expContainsLambda body || args.any expContainsLambda
+  | .StructCtor _ fields => fields.any (fun (_, e) => expContainsLambda e)
+  | .EnumCtor _ _ data => data.any (fun (_, e) => expContainsLambda e)
+  | .TupleCtor _ data => data.any expContainsLambda
+  | .Unary _ e => expContainsLambda e
+  | .Binary _ a b => expContainsLambda a || expContainsLambda b
+  | .If c t f => expContainsLambda c || expContainsLambda t || expContainsLambda f
+  | .Bind bind body => bindContainsLambda bind || expContainsLambda body
+  | .ArrayLiteral elems => elems.any expContainsLambda
+  | .MatchBlock (scrut, _) body => expContainsLambda scrut || expContainsLambda body
+
+end
+
 /-- Pull out the first type parameter of an `expected?` `Struct` /
     `Decorated` type. Used to thread per-element types into sequence /
     array literal lowering when the surrounding context already knows

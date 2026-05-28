@@ -1061,9 +1061,26 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | .Forall => return forallExpr binds body'
       | .Exists => return existsExpr binds body'
     | .Lambda vars => do
+      -- When the outer context indicates an arrow type for the lambda
+      -- (e.g. the lambda is the `f` argument of
+      -- `Seq_lib_map<T,U>(s, f : int -> T -> U)`), thread the result
+      -- type into the body's expected.  This is load-bearing for
+      -- closures like `|i, x| x as nat`: Verus's VIR elides the
+      -- spec-level `as nat` cast and lowers the body to just `Var x`
+      -- with type `u64`, but Boole's types are strict (`bv64` ≠
+      -- `nat`).  Without this hint the lambda emits `fun ... : bv64
+      -- => x` returning `Sequence bv64`, and Strata rejects the call
+      -- to `seq_as_nat_52 : Sequence nat -> nat` with `Impossible to
+      -- unify ... nat with bv64`.  With the hint, the existing
+      -- `.Var` coerceNumeric path at the body inserts the right cast.
+      let bodyExpTy? : Option Typ :=
+        expected?.bind fun ty =>
+          match ty with
+          | .SpecFn _ retTy => some retTy
+          | _ => none
       let body' ← withScope do
         addBoundVars (vars.map Prod.fst).toArray
-        expToBoole env (vars.reverse ++ bound) none body
+        expToBoole env (vars.reverse ++ bound) bodyExpTy? body
       let binds ← vars.toArray.mapM (fun (v, ty) => do
         let ty' ← typToBooleType ty
         pure (sanitizeVarName v, ty'))
@@ -1765,12 +1782,28 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
       -- (was previously dropped to `none` per `[CORE-decreases]`, leaving
       -- Strata's auto checker unable to prove sequence-recursion
       -- termination, e.g. `bytes_seq_as_nat` recursing on `Seq::subrange`).
+      -- Note: `recfn_decl` has no inline slot upstream, so a lambda-bearing
+      -- recursive spec fn cannot be auto-inlined here; it would hit
+      -- Strata's SMT encoder lambda-rejection.  Tracked separately.
       let recDecl :=
         BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy
           (ann specElts) decrAnn body
       pure (.command_recfndefs default (ann #[recDecl]))
     else
-      pure (.command_fndef default name typeArgs inputBindings outputTy (ann specElts) body (ann none))
+      -- Auto-inline lambda-bearing spec functions.  Strata's SMT encoder
+      -- can't axiomatize a function whose body contains an unapplied
+      -- lambda (`Cannot encode function 'foo' to SMT: its body contains
+      -- a lambda expression. Consider marking the function as `inline``);
+      -- emitting `inline function ...` makes Strata substitute the body
+      -- at each call site, where the lambda typically beta-reduces under
+      -- `Seq_lib_map`/`Seq_lib_filter`-style builtins before SMT
+      -- encoding.  This is semantically equivalent to the axiomatic
+      -- definition Strata would otherwise generate.
+      let shouldInline := f.body.any expContainsLambda
+      let inlineAnn :=
+        if shouldInline then ann (some (.inline default)) else ann none
+      pure (.command_fndef default name typeArgs inputBindings outputTy
+        (ann specElts) body inlineAnn)
   | none =>
     pure (.command_fndecl default name typeArgs inputBindings outputTy)
 
