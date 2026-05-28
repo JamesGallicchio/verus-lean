@@ -346,6 +346,126 @@ private def coerceIndexedResult (env : VarEnv) (bound : BoundEnv)
   let tgtKind? := expected?.bind numKindOfTyp?
   coerceNumeric srcKind? tgtKind? selected
 
+/-- Return the result type of a `SpecFn` (closure) type, peeling decorations. -/
+private partial def specFnRetTy? : Typ → Option Typ
+  | .Decorated _ t => specFnRetTy? t
+  | .SpecFn _ r => some r
+  | _ => none
+
+/-- True for primitive scalar types (numbers, `bool`, `char`).  `Seq::map`
+    synthesis is restricted to these: a closure over a primitive element
+    can only have a primitive-arithmetic body, which translates cleanly to
+    a first-order function.  Closures over tuples/structs/enums project
+    datatype fields, and the resulting accessor applications hit a Strata
+    typing gap once promoted out of an (un-type-checked) lambda — see the
+    `crypto_noref` tuple closure.  Such closures fall back to the lambda
+    form instead. -/
+private partial def isPrimitiveScalarTyp : Typ → Bool
+  | .Decorated _ t => isPrimitiveScalarTyp t
+  | .Bool | .Int | .Nat | .Char => true
+  | .UInt _ | .SInt _ | .USize | .ISize => true
+  | _ => false
+
+/-- Recover a `Seq::map` closure's result type from the `Box` wrapper that
+    Verus emits around the closure argument.  VLIR drops the `.Call` type
+    arguments, so this `Box`-carried `SpecFn` type is the reliable source. -/
+private def boxedClosureRetTy? : Exp → Option Typ
+  | .Unary (.Box bt) _ => specFnRetTy? bt
+  | _ => none
+
+/-- Synthesize a lambda-free replacement for a `Seq::map` / `Seq::map_values`
+    call.  Strata's SMT encoder rejects closures handed to the uninterpreted
+    `Seq_lib_map`, so instead of `Seq_lib_map(s, fun … => …)` we emit ordinary
+    top-level declarations and call those:
+
+      * `Seq_map_empty_<id>` — an uninterpreted empty result sequence, with an
+        axiom pinning its length to 0.  Needed because Boole has no typed
+        empty-sequence literal for element types like `nat`.
+      * `Seq_map_closure_<id>` — a first-order `function` whose parameters are
+        the closure's binders and whose body is the (already-translated)
+        closure body.  No lambda, so it encodes to SMT cleanly.
+      * `Seq_map_rec_<id>` — an `int`-recursive function that rebuilds the
+        mapped sequence one element at a time, applying the closure function.
+
+    The call site becomes `Seq_map_rec_<id>(seq, |seq|)`.  `seqB` is the
+    translated source sequence; `closureBodyB` the translated closure body
+    (lowered in a scope binding `closureParams`); `elemTy` the source element
+    type; `retTy` the closure's result type. -/
+private def emitSeqMapDecls
+    (seqB closureBodyB : BExpr)
+    (closureParams : List (String × Typ)) (elemTy retTy : Typ) :
+    BuildM BExpr := do
+  let id ← freshSynthId
+  let emptyName := s!"Seq_map_empty_{id}"
+  let closureName := s!"Seq_map_closure_{id}"
+  let recName := s!"Seq_map_rec_{id}"
+  addFreeVars #[emptyName, closureName, recName]
+  let elemBTy ← typToBooleType elemTy
+  let retBTy ← typToBooleType retTy
+  let noTypeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+    ann none
+  let noSpec : Strata.Ann (Array (BooleDDM.SpecElt SourceRange)) SourceRange :=
+    ann #[]
+  -- (1) uninterpreted empty result sequence + length axiom.  Boole has no
+  -- typed empty-sequence literal for element types like `nat`, so the empty
+  -- base case of the recursion is an uninterpreted constant constrained to
+  -- length 0.
+  let emptyIdx ← resolveFreeVar emptyName
+  let emptyCmd : BCmd :=
+    .command_constdecl default (ann emptyName) noTypeArgs (Bld.seqTy retBTy)
+  let emptyAxiom : BCmd :=
+    .command_axiom default (ann none)
+      (Bld.eq (Bld.seqLength (Bld.fvar emptyIdx)) (Bld.intConst 0))
+  -- (2) first-order closure function: its parameters are the closure's
+  -- binders and its body is the translated closure body.
+  let closureBindingsArr ← closureParams.toArray.mapM (fun (name, ty) => do
+    let bty ← typToBooleType ty
+    pure (BooleDDM.Binding.mkBinding default (ann (sanitizeVarName name))
+      (BooleDDM.TypeP.expr bty)))
+  let closureBindings := BooleDDM.Bindings.mkBindings default (ann closureBindingsArr)
+  let closureCmd : BCmd :=
+    .command_fndef default (ann closureName) noTypeArgs closureBindings retBTy
+      noSpec closureBodyB (ann none)
+  -- (3) int-recursive map function: `map(s, n)` rebuilds the image of the
+  -- length-`n` prefix of `s`, recursing `n → n - 1` with `decreases n`.
+  let seqParamName := "s"
+  let idxParamName := "n"
+  let mapBindings := BooleDDM.Bindings.mkBindings default (ann #[
+    BooleDDM.Binding.mkBinding default (ann seqParamName)
+      (BooleDDM.TypeP.expr (Bld.seqTy elemBTy)),
+    BooleDDM.Binding.mkBinding default (ann idxParamName)
+      (BooleDDM.TypeP.expr Bld.intTy)])
+  let mapOutTy := Bld.seqTy retBTy
+  let closureIdx ← resolveFreeVar closureName
+  let recIdx ← resolveFreeVar recName
+  let (decrAnn, mapBody) ← withScope do
+    addBoundVars #[seqParamName, idxParamName]
+    let sIdx ← match ← lookupBoundVar seqParamName with
+      | some i => pure i
+      | none => throw "emitSeqMapDecls: sequence parameter unbound"
+    let nIdx ← match ← lookupBoundVar idxParamName with
+      | some i => pure i
+      | none => throw "emitSeqMapDecls: index parameter unbound"
+    let sE := Bld.bvar sIdx
+    let nE := Bld.bvar nIdx
+    let nPrev := Bld.intSub nE (Bld.intConst 1)
+    let cond := Bld.intLe nE (Bld.intConst 0)
+    let selE := Bld.seqSelect sE nPrev
+    -- `Seq::map` passes (index, element); `Seq::map_values` passes (element).
+    let closureArgs := if closureParams.length ≥ 2 then [nPrev, selE] else [selE]
+    let closureCall := Bld.appN (Bld.fvar closureIdx) closureArgs
+    let recCall := Bld.appN (Bld.fvar recIdx) [sE, nPrev]
+    let consE ← seqBuildExpr recCall closureCall
+    let body := Bld.iteTyped mapOutTy cond (Bld.fvar emptyIdx) consE
+    pure (Bld.mkMeasure (some nE), body)
+  let recDecl := BooleDDM.RecFnDecl.recfn_decl default (ann recName) noTypeArgs
+    mapBindings mapOutTy noSpec decrAnn mapBody
+  pushSynthDecl emptyCmd
+  pushSynthDecl emptyAxiom
+  pushSynthDecl closureCmd
+  pushSynthDecl (.command_recfndefs default (ann #[recDecl]))
+  pure (Bld.appN (Bld.fvar recIdx) [seqB, Bld.seqLength seqB])
+
 mutual
 
 private partial def comparisonPrelude
@@ -1033,6 +1153,40 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let prefixSeq := Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.take")) [s, i]
         let suffixSeq := Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.drop")) [s, suffixStart]
         return Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.append")) [prefixSeq, suffixSeq]
+      | _ => mkFallback
+    else if fnameStr == "Seq_lib_map" || fnameStr == "Seq_lib_map_values" then
+      -- `Seq::map` / `Seq::map_values` would otherwise pass a closure into the
+      -- uninterpreted `Seq_lib_map`, which Strata's SMT encoder rejects.
+      -- Synthesize an int-recursive replacement instead (see
+      -- `emitSeqMapDecls`).  Fall back to the lambda form when the call
+      -- doesn't match the expected shape, or when the closure captures an
+      -- outer variable (which the standalone closure function couldn't see).
+      match argsFiltered with
+      | [seqArg, closureArg] =>
+        -- VLIR drops `.Call` type arguments, so the closure's result type
+        -- comes from the `Box` wrapper's `SpecFn` type (or, failing that,
+        -- the element type of the call's expected sequence type).
+        let closureRetTy? : Option Typ :=
+          boxedClosureRetTy? closureArg <|> (expected?.bind seqElemTyp?)
+        match peelCallWrappers closureArg with
+        | .Bind (.Lambda closureParams) closureBody =>
+          let paramNames := closureParams.map Prod.fst
+          let captures := (expVarRefs closureBody).filter
+            (fun v => !paramNames.contains v)
+          let arityOk := closureParams.length == 1 || closureParams.length == 2
+          match captures, closureRetTy?, closureParams.getLast?, arityOk with
+          | [], some retTy, some (_, elemTy), true =>
+            if isPrimitiveScalarTyp elemTy && isPrimitiveScalarTyp retTy then do
+              let seqB ← expToBoole env bound none seqArg
+              let closureBodyB ← withScope do
+                addBoundVars
+                  (closureParams.map (fun (n, _) => sanitizeVarName n)).toArray
+                expToBoole (extendEnv env closureParams) closureParams.reverse
+                  (some retTy) closureBody
+              emitSeqMapDecls seqB closureBodyB closureParams elemTy retTy
+            else mkFallback
+          | _, _, _, _ => mkFallback
+        | _ => mkFallback
       | _ => mkFallback
     else
       mkFallback
@@ -1739,6 +1893,42 @@ private def synthVariantRequires
       elts := elts.push (.requires_spec default noLabel (ann none) cond)
   pure elts
 
+/-- Like `expContainsLambda`, but ignores the closure argument of a
+    `Seq::map` / `Seq::map_values` call.  Those closures are lowered by
+    `emitSeqMapDecls` into ordinary recursive declarations with no surviving
+    lambda; and on the fallback path the lambda lands inside the
+    uninterpreted `Seq_lib_map`, where the `inline` attribute cannot help
+    either.  Either way such a closure must not force the enclosing spec
+    function to be inlined. -/
+partial def expHasInlineForcingLambda : Exp → Bool
+  | .Const _ _ | .Var _ => false
+  | .Call fn _ args =>
+    let callee := identToBoole (CallFun.name fn)
+    if callee == "Seq_lib_map" || callee == "Seq_lib_map_values" then
+      -- Recurse into every argument except the trailing closure.
+      args.dropLast.any expHasInlineForcingLambda
+    else args.any expHasInlineForcingLambda
+  | .CallLambda body args =>
+    expHasInlineForcingLambda body || args.any expHasInlineForcingLambda
+  | .StructCtor _ fields => fields.any (fun (_, e) => expHasInlineForcingLambda e)
+  | .EnumCtor _ _ data => data.any (fun (_, e) => expHasInlineForcingLambda e)
+  | .TupleCtor _ data => data.any expHasInlineForcingLambda
+  | .Unary _ e => expHasInlineForcingLambda e
+  | .Binary _ a b => expHasInlineForcingLambda a || expHasInlineForcingLambda b
+  | .If c t f =>
+    expHasInlineForcingLambda c || expHasInlineForcingLambda t
+      || expHasInlineForcingLambda f
+  | .Bind (.Lambda _) _ => true
+  | .Bind (.Let _ _ e) body =>
+    expHasInlineForcingLambda e || expHasInlineForcingLambda body
+  | .Bind (.Quant _ _ trigs) body =>
+    trigs.any (·.any expHasInlineForcingLambda) || expHasInlineForcingLambda body
+  | .Bind (.Choose _ pred) body =>
+    expHasInlineForcingLambda pred || expHasInlineForcingLambda body
+  | .ArrayLiteral elems => elems.any expHasInlineForcingLambda
+  | .MatchBlock (scrut, _) body =>
+    expHasInlineForcingLambda scrut || expHasInlineForcingLambda body
+
 def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd := do
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
@@ -1799,7 +1989,10 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
       -- `Seq_lib_map`/`Seq_lib_filter`-style builtins before SMT
       -- encoding.  This is semantically equivalent to the axiomatic
       -- definition Strata would otherwise generate.
-      let shouldInline := f.body.any expContainsLambda
+      -- `Seq::map` closures are excluded: they are synthesized into
+      -- recursive declarations (`emitSeqMapDecls`), so they leave no
+      -- lambda in the translated body.
+      let shouldInline := f.body.any expHasInlineForcingLambda
       let inlineAnn :=
         if shouldInline then ann (some (.inline default)) else ann none
       pure (.command_fndef default name typeArgs inputBindings outputTy
@@ -2383,7 +2576,10 @@ def declsToBooleProgram (decls : List Decl) :
   let ctx ← get
   let supportNeeds := ctx.supportNeeds
   let supportCmds ← supportDeclCommands typToBooleType supportNeeds
-  return supportCmds ++ userCmds
+  -- Closure-dependent helpers synthesized during expression lowering
+  -- (e.g. the `Seq::map` int-recursion replacement). Spliced after the
+  -- support decls so they precede the user decls that reference them.
+  return supportCmds ++ ctx.synthDecls ++ userCmds
 
 /-- Convenience: run the full translation pipeline and return the resulting
     BooleDDM commands, or an error string. -/
