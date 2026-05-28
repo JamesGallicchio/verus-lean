@@ -26,17 +26,31 @@ private def readPreludeBody? (fileName : String) : IO (Option String) := do
   else
     pure none
 
+private def readNatPreludeBody? : IO (Option String) :=
+  readPreludeBody? "Nat.boole.st"
+
 private def readSeqPreludeBody? : IO (Option String) :=
   readPreludeBody? "Seq.boole.st"
 
 private def readVecPreludeBody? : IO (Option String) :=
   readPreludeBody? "Vec.boole.st"
 
+/-- Concatenate the prelude pieces into a single text block for `loadPrelude`.
+
+    `Nat.boole.st` is always included (when present): it hosts the `nat`
+    type + `nat.toInt`/`nat.fromInt` API that `Cast.applyCast` resolves for
+    every `.natToInt` / `.intToNat` coercion the translator emits — and
+    those coercions can appear in any program with `nat`-typed expressions,
+    not just sequence-using ones.  Order matters: Nat must come before Seq
+    because `Seq_len`'s body references `int_to_nat` from Nat. -/
 private def assemblePreludeText
     (seqNeeded vecNeeded : Bool)
-    (seqPreludeBody? vecPreludeBody? : Option String) : Option String :=
+    (natPreludeBody? seqPreludeBody? vecPreludeBody? : Option String) :
+    Option String :=
   let pieces :=
-    [if seqNeeded then seqPreludeBody? else none, if vecNeeded then vecPreludeBody? else none]
+    [ natPreludeBody?
+    , if seqNeeded then seqPreludeBody? else none
+    , if vecNeeded then vecPreludeBody? else none ]
       |>.filterMap id
   match pieces with
   | [] => none
@@ -102,6 +116,7 @@ unsafe def genBooleFromFile
     (printFn : String → IO Unit) : IO Unit := do
   let target := System.FilePath.mk path
   let bundleFiles ← collectJsonBundleFiles target
+  let natPreludeBody? ← readNatPreludeBody?
   let seqPreludeBody? ← readSeqPreludeBody?
   let vecPreludeBody? ← readVecPreludeBody?
   let mut allDecls : List Decl := []
@@ -119,7 +134,7 @@ unsafe def genBooleFromFile
   let preludeText? := assemblePreludeText
       (preludePlan.needsSeq && seqPreludeBody?.isSome)
       (preludePlan.needsVec && vecPreludeBody?.isSome)
-      seqPreludeBody? vecPreludeBody?
+      natPreludeBody? seqPreludeBody? vecPreludeBody?
   let preludeResult ←
     match preludeText? with
     | some text => Boole.Emit.loadPrelude text
