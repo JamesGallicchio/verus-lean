@@ -20,7 +20,11 @@ def normalizeCallArgs (args : List Exp) : List Exp :=
 
 /-! ## Expression and statement substitution -/
 
-private partial def expVarRefs : Exp → List String :=
+/-- Collect the names of every `Var` reference in an expression. Note this
+    is an over-approximation: names bound by an inner `let`/quantifier/
+    lambda/choose are not removed, so callers using it for capture
+    detection treat a hit as "may capture". -/
+partial def expVarRefs : Exp → List String :=
   let merge (xs : List (List String)) : List String := (xs.foldl (· ++ ·) []).eraseDups
   fun
   | .Const _ _ => []

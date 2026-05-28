@@ -57,6 +57,15 @@ structure BuildCtx where
       with `withPromotedLocals`.  Consulted by `tryForLoopRecovery` to
       decide whether to lower the binder type as `Int`. -/
   promotedLocals : Std.HashSet String := ∅
+  /-- Top-level commands synthesized on demand during expression lowering
+      (e.g. the first-order closure function + int-recursive helper that
+      replace a `Seq::map` lambda — see `emitSeqMapDecls`). Spliced into
+      the program after the support declarations in `declsToBooleProgram`.
+      Unlike `SupportDecl`s these are closure-dependent, so they can't be
+      a fixed enum. -/
+  synthDecls : Array (BooleDDM.Command SourceRange) := #[]
+  /-- Monotonic counter for naming synthesized declarations uniquely. -/
+  synthFnCounter : Nat := 0
 
 abbrev BuildM := StateT BuildCtx (Except String)
 
@@ -117,6 +126,19 @@ def freshLoopLabelId : BuildM Nat := do
   let n := ctx.loopLabelCounter
   set { ctx with loopLabelCounter := n + 1 }
   pure n
+
+/-- Return a fresh unique id for a synthesized declaration and increment
+    the counter in `BuildCtx`. -/
+def freshSynthId : BuildM Nat := do
+  let ctx ← get
+  let n := ctx.synthFnCounter
+  set { ctx with synthFnCounter := n + 1 }
+  pure n
+
+/-- Record a synthesized top-level command for later splicing into the
+    program (see `BuildCtx.synthDecls`). -/
+def pushSynthDecl (cmd : BooleDDM.Command SourceRange) : BuildM Unit :=
+  modify (fun ctx => { ctx with synthDecls := ctx.synthDecls.push cmd })
 
 /-- Set the per-procedure promoted-locals set.  Private — callers use
     `withPromotedLocals` for proper save/restore semantics. -/
