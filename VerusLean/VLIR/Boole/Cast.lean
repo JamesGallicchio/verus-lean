@@ -26,18 +26,36 @@ private def castFnExpr (need : SupportDecl) : BuildM BExpr := do
   let idx ← resolveFreeVar (supportDeclName need)
   pure (Bld.fvar idx)
 
-/-- Apply a unary cast helper.  Most cast kinds are emitted as calls to a
-    bodyless support-decl function (`bv8_to_int_u`, `int_to_nat`, …) that
-    gets axiomatized at the call site.  `.bvToInt` is special-cased to
-    emit Strata's native `(e as_int)` / `(e as_sint)` postfix instead,
-    which lowers to `Bv<W>.ToUInt`/`Bv<W>.ToInt` at Core — cvc5's bv
-    theory then proves nonneg-ness of unsigned bv→int by construction,
-    making an explicit `bv<W>_to_int_u_nonneg` axiom unnecessary. -/
+/-- Apply a unary cast helper.
+
+    Most cast kinds fall through to the generic path: a call to a bodyless
+    support-decl function that gets axiomatized at the call site.  Three
+    kinds are special-cased to skip the support-decl machinery and use
+    constructs that already exist in the prelude / Strata core:
+
+    * `.bvToInt` → Strata's native `(e as_int)` / `(e as_sint)` postfix,
+      which lowers to `Bv<W>.ToUInt`/`Bv<W>.ToInt` at Core — cvc5's bv
+      theory proves nonneg-ness of unsigned bv→int by construction.
+    * `.natToInt` → the prelude's `nat.toInt(n)` function (declared in
+      `prelude/Nat.boole.st`, always loaded).  Skips the `nat_to_int`
+      support decl and lets cvc5 reason via the prelude's round-trip
+      axioms (`nat_nonneg`, `nat_fromInt_toInt`, `nat_toInt_fromInt`).
+    * `.intToNat` → the prelude's `nat.fromInt(x)` function (which body-
+      delegates to `nat.fromIntAux` modulo a `0 <= x` precondition).  All
+      translator-emitted `.intToNat` sites convert values the surrounding
+      context knows to be nonneg (cast results, sequence lengths, …), so
+      the precondition is trivially dischargeable. -/
 def applyCast (need : SupportDecl) (e : BExpr) : BuildM BExpr := do
   match need with
   | .bvToInt w signed =>
     if signed then pure (Bld.castToSInt (Bld.bvTy w) e)
     else pure (Bld.castToInt (Bld.bvTy w) e)
+  | .natToInt =>
+    let idx ← resolveFreeVar "nat.toInt"
+    pure (Bld.app (Bld.fvar idx) e)
+  | .intToNat =>
+    let idx ← resolveFreeVar "nat.fromInt"
+    pure (Bld.app (Bld.fvar idx) e)
   | _ =>
     requireSupport need
     if supportDeclUsesNat need then

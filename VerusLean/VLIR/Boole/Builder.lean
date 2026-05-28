@@ -60,8 +60,7 @@ def bvar (idx : Nat) : BExpr := .bvar default idx
 
 /-- Strata's native `(e as_int)` cast — unsigned bv→int.  Lowers to
     `Bv<W>.ToUInt` at Core, which cvc5 understands as nonneg-by-construction
-    via the SMT-LIB `bv2nat` family, so callers don't need an extra
-    `bv<W>_to_int_u_nonneg` axiom. -/
+    via the SMT-LIB `bv2nat` family. -/
 def castToInt (sourceTy : BType) (e : BExpr) : BExpr :=
   .cast_to_int default sourceTy e
 
