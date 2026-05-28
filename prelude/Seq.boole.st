@@ -14,8 +14,10 @@ type Set (T: Type);
 
 // --- Concrete: defined using Strata built-ins ---
 
+// `nat.fromInt`'s `requires 0 <= x` is dischargeable from Strata's built-in
+// `Sequence.length` nonneg axiom (`seqLengthFunc` in Core/Factory.lean).
 function Seq_len<T>(s: Sequence T): nat {
-  int_to_nat(Sequence.length(s))
+  nat.fromInt(Sequence.length(s))
 }
 
 function Seq_lib_insert<T>(s: Sequence T, i: int, val: T): Sequence T {

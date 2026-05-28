@@ -1,22 +1,18 @@
 // Nat prelude — always loaded.
 //
-// Hosts the `nat` type, the `int_to_nat` legacy coercion, and the explicit
-// `nat.toInt` / `nat.fromInt` API + round-trip axioms.  Lives in its own
-// prelude (instead of the Seq prelude) because translator-emitted nat
-// coercions can appear in any program with `nat`-typed expressions, not
-// just sequence-using ones.
+// Hosts the `nat` type and the explicit `nat.toInt` / `nat.fromInt` API +
+// round-trip axioms.  Lives in its own prelude (instead of the Seq prelude)
+// because translator-emitted nat coercions can appear in any program with
+// `nat`-typed expressions, not just sequence-using ones.
 
 type nat;
 
-function int_to_nat(i: int): nat;
-
 // --- Richer nat API ------------------------------------------------------
 // Explicit toInt/fromInt API + round-trip axioms.  Lets cvc5 reason about
-// nat-typed expressions via the embedding into int, much more reliably than
-// the single uninterpreted `int_to_nat` coercion above (which has no inverse
-// or nonneg axiom).  Boole-side arithmetic and comparisons are then defined
-// once (`nat.add`, `nat.lt`, …) so translator output doesn't need to splice
-// `nat.toInt(...)` everywhere a nat appears in a binop.
+// nat-typed expressions via the embedding into int.  Boole-side arithmetic
+// and comparisons are defined once (`nat.add`, `nat.lt`, …) so translator
+// output doesn't need to splice `nat.toInt(...)` everywhere a nat appears
+// in a binop.
 
 function nat.toInt      (n : nat) : int;
 function nat.fromIntAux (x : int) : nat;
