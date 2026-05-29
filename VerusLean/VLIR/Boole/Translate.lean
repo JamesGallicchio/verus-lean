@@ -474,8 +474,8 @@ When a binary operation is in nat-space, we lower it to the prelude's
 `nat.fromInt(nat.toInt(a) <op> nat.toInt(b))` (arithmetic).  The result is
 semantically identical — the prelude bodies expand to the int form — but the
 translated spec stays in nat-space, matching the source and the hand-written
-Strata reference.  `emitNatBinop` (in the `mutual` block below) is the shared
-emitter; the two tables here map an operator to its prelude function.
+Strata reference.  `numBinopEmit` (below) dispatches to these; the two tables
+here map an operator to its prelude function.
 
 The two tables fire under deliberately *different* guards, kept side-by-side
 here so the asymmetry is visible rather than buried in the `.Binary` arm:
@@ -488,13 +488,11 @@ here so the asymmetry is visible rather than buried in the `.Binary` arm:
     don't say whether the sum is wanted in nat-space (a nat `a + b` consumed
     in an int context is correctly lowered as int).
 
-TODO(nat-domain-dispatch): `natCmpFn`, `natArithFn?`, and the int/bv operator
-emission in the `.Binary` arm are really one dispatch
-`(numeric-domain, binop) → emitter`.  Unifying them behind a single
-domain-selection + emitter table would remove this guard asymmetry and the
-three sequential lowering strategies in that arm.  Deferred: the bv
-width-inference / narrow-then-widen / signedness-promotion logic there makes
-it a delicate refactor that deserves its own regression pass. -/
+Final emission now flows through `NumDomain` / `numBinopEmit` below.  Domain
+selection stays at the call sites because it is coupled to operand preparation:
+scalar operands translate at the target mathematical type, while bv operands
+must preserve the width-inference / narrow-then-widen / signedness-promotion
+policy before emission. -/
 
 /-- Prelude function for a nat-space comparison (always applicable when both
     operands are nat — see the table doc above). -/
@@ -515,6 +513,78 @@ def natArithFn? : BinaryOp → Option String
   | .Arith .Mul _          => some "nat.mul"
   | .Arith .EuclideanDiv _ => some "nat.div"
   | _                      => none
+
+/-- The lowering domain of a numeric binary operation: a mathematical `nat`
+    or `int`, or a width-`w` (un)signed bitvector. -/
+inductive NumDomain where
+  | nat
+  | int
+  | bv (w : Nat) (signed : Bool)
+  deriving Repr, DecidableEq
+
+/-- Unified emitter table: build `op` applied to already-prepared operands
+    `l`, `r` in lowering `domain`.  This is the single
+    `(domain, op) → Boole expression` dispatch the comparison and arithmetic
+    arms share.  Operand *preparation* stays in those arms (it differs per
+    domain — translating leaves at the domain scalar type for nat/int, or the
+    bv width-inference dance for bv), but emission funnels through here.
+
+    Returns `none` when `op` has no lowering in `domain`: bitwise ops on
+    nat/int, and `EuclideanMod` on nat (no `nat.mod`; see `natArithFn?`).
+
+    Domain conventions:
+      * `nat` → the prelude functions (`natCmpFn` / `natArithFn?`).
+      * `int` → `applyBinaryOp`, which already maps every arith/inequality
+        op to its `int` builder.
+      * `bv w signed` → `applyBv*` builders; `signed` picks the U/S variant
+        for compares and div/mod/shr.  Shift ops carry their own width
+        (`Shl w` / `Shr w`); other bv ops use the domain width `w`. -/
+def numBinopEmit (domain : NumDomain) (op : BinaryOp) (l r : BExpr) :
+    BuildM (Option BExpr) := do
+  match domain with
+  | .int => pure (applyBinaryOp op l r)
+  | .nat =>
+    let fnName? : Option String := match op with
+      | .Inequality cmp => some (natCmpFn cmp)
+      | _ => natArithFn? op
+    match fnName? with
+    | some name => let idx ← resolveFreeVar name; pure (some (Bld.appN (Bld.fvar idx) [l, r]))
+    | none => pure none
+  | .bv w s =>
+    match op with
+    | .Inequality cmp =>
+      let opName := match cmp with
+        | .Le => if s then "SLe" else "ULe"
+        | .Lt => if s then "SLt" else "ULt"
+        | .Ge => if s then "SGe" else "UGe"
+        | .Gt => if s then "SGt" else "UGt"
+      pure (applyBvCmpOp w opName l r)
+    | .Arith a _ =>
+      let opName := match a with
+        | .Add => "Add"
+        | .Sub => "Sub"
+        | .Mul => "Mul"
+        | .EuclideanDiv => if s then "SDiv" else "UDiv"
+        | .EuclideanMod => if s then "SMod" else "UMod"
+      pure (applyBvBinOp w opName l r)
+    | .Bitwise bitop _ =>
+      -- Shift ops carry their own width; and/or/xor use the domain width.
+      let opW := match bitop with
+        | .Shl sw _ | .Shr sw => sw
+        | _ => w
+      let opName := match bitop with
+        | .BitAnd => "And"
+        | .BitOr => "Or"
+        | .BitXor => "Xor"
+        | .Shl _ _ => "Shl"
+        | .Shr _ => if s then "SShr" else "UShr"
+      if opName == "SShr" then
+        -- Signed shift right: no direct builder, resolve the fvar.
+        let fnIdx ← resolveFreeVar s!"Bv{opW}.SShr"
+        pure (some (Bld.appN (Bld.fvar fnIdx) [l, r]))
+      else
+        pure (applyBvBitOp opW opName l r)
+    | _ => pure (applyBinaryOp op l r)
 
 mutual
 
@@ -565,16 +635,16 @@ private partial def comparisonPrelude
     let r ← coerceBvBv rhsInfo? targetInfo? r0
     return (argTy?, l, r)
 
-/-- Emit a nat-native binary op `fnName(lhs, rhs)` (e.g. `nat.add`, `nat.lt`).
-    Both operands are translated with `expected = Nat`, so nat leaves stay
-    nat and bv/int leaves coerce to nat at the leaf.  See the `natCmpFn` /
-    `natArithFn?` table doc above the `mutual` block for when this fires. -/
-partial def emitNatBinop (env : VarEnv) (bound : BoundEnv)
-    (fnName : String) (lhs rhs : Exp) : BuildM BExpr := do
-  let l ← expToBoole env bound (some Typ.Nat) lhs
-  let r ← expToBoole env bound (some Typ.Nat) rhs
-  let idx ← resolveFreeVar fnName
-  pure (Bld.appN (Bld.fvar idx) [l, r])
+/-- Prepare both operands of a scalar (`nat` / `int`) binary op by translating
+    each at the domain scalar type `ty`, so the leaves coerce to that domain.
+    The bv domain prepares operands differently (width-inference dance) and so
+    stays inline in the `.Binary` arm.  Emission of the prepared operands is
+    shared via `numBinopEmit`. -/
+partial def prepScalarOperands (env : VarEnv) (bound : BoundEnv)
+    (ty : Typ) (lhs rhs : Exp) : BuildM (BExpr × BExpr) := do
+  let l ← expToBoole env bound (some ty) lhs
+  let r ← expToBoole env bound (some ty) rhs
+  pure (l, r)
 
 /-- Translate a VLIR expression to a BooleDDM expression. -/
 partial def expToBoole (env : VarEnv) (bound : BoundEnv)
@@ -649,33 +719,27 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     let r ← expToBoole env bound none rhs
     return boolNot (boolEquiv l r)
   | .Binary (.Inequality cmp) lhs rhs => do
-    -- nat-native lowering: `nat <cmp> nat` → `nat.lt`/`nat.le`/… directly
-    -- (see the `natCmpFn` table doc).  Fires on the operand types, since a
-    -- comparison's result is always `bool`.
-    if inferComparisonNumKind env bound lhs == some .nat &&
-       inferComparisonNumKind env bound rhs == some .nat then
-      return ← emitNatBinop env bound (natCmpFn cmp) lhs rhs
-    let (argTy?, l, r) ← comparisonPrelude env bound lhs rhs
-    match argTy? with
-    | some ty =>
-      match bitInfoOfTyp ty with
-      | some (w, signed) =>
-        let opName := match cmp with
-          | .Le => if signed then "SLe" else "ULe"
-          | .Lt => if signed then "SLt" else "ULt"
-          | .Ge => if signed then "SGe" else "UGe"
-          | .Gt => if signed then "SGt" else "UGt"
-        match applyBvCmpOp w opName l r with
-        | some result => return result
-        | none => throw s!"unsupported bitvector width {w} for op {opName}"
-      | none =>
-        throw s!"internal error: expected bitvector comparison type, got {repr ty}"
-    | none =>
-      match cmp with
-      | .Le => return intLe l r
-      | .Lt => return intLt l r
-      | .Ge => return intGe l r
-      | .Gt => return intGt l r
+    -- Select the lowering domain + prepare operands, then dispatch via the
+    -- unified `numBinopEmit`.  nat fires on the operand types (a comparison's
+    -- result is `bool`, so there is no expected-nat hint); otherwise
+    -- `comparisonPrelude` chooses int vs bv and prepares the operands.
+    let (domain, l, r) ← do
+      if inferComparisonNumKind env bound lhs == some .nat &&
+         inferComparisonNumKind env bound rhs == some .nat then
+        let (l, r) ← prepScalarOperands env bound Typ.Nat lhs rhs
+        pure (NumDomain.nat, l, r)
+      else
+        let (argTy?, l, r) ← comparisonPrelude env bound lhs rhs
+        let domain ← match argTy? with
+          | some ty =>
+            match bitInfoOfTyp ty with
+            | some (w, s) => pure (NumDomain.bv w s)
+            | none => throw s!"internal error: expected bitvector comparison type, got {repr ty}"
+          | none => pure NumDomain.int
+        pure (domain, l, r)
+    match ← numBinopEmit domain (.Inequality cmp) l r with
+    | some result => return result
+    | none => throw s!"unsupported comparison: {repr cmp} in domain {repr domain}"
   | .Binary op lhs rhs => do
     -- Run arith in `int` when the context demands int or any subtree
     -- mixes int and bv operands. Otherwise bv overflow corrupts the
@@ -689,9 +753,13 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     -- `b != 0`), those are exactly the obligations Verus discharges at the
     -- source — surfaced faithfully rather than hidden behind an int
     -- round-trip.  `EuclideanMod` stays on the int path (see `natArithFn?`).
-    if expectedKind? == some .nat then
-      if let some fnName := natArithFn? op then
-        return ← emitNatBinop env bound fnName lhs rhs
+    match (if expectedKind? == some .nat then natArithFn? op else none) with
+    | some _ =>
+      let (l, r) ← prepScalarOperands env bound Typ.Nat lhs rhs
+      match ← numBinopEmit .nat op l r with
+      | some result => return result
+      | none => throw s!"nat lowering missing for {repr op}"
+    | none => pure ()
     let arithRunsInInt :=
       match op with
       | .Arith _ _ =>
@@ -700,12 +768,9 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         | _ => expHasMixedIntBvArith env bound (.Binary op lhs rhs)
       | _ => false
     if arithRunsInInt then
-      let l ← expToBoole env bound (some Typ.Int) lhs
-      let r ← expToBoole env bound (some Typ.Int) rhs
-      match applyBinaryOp op l r with
-      | some result =>
-        let result ← coerceNumeric (some .int) expectedKind? result
-        return result
+      let (l, r) ← prepScalarOperands env bound Typ.Int lhs rhs
+      match ← numBinopEmit .int op l r with
+      | some result => return ← coerceNumeric (some .int) expectedKind? result
       | none => throw s!"unsupported int-context binary op: {repr op}"
     let lhsInfo? := inferBitInfo env bound lhs
     let rhsInfo? := inferBitInfo env bound rhs
@@ -737,48 +802,17 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     let r0 ← expToBoole env bound rExpected? rhs
     let l ← coerceBvBv lhsInfo? info? l0
     let r ← coerceBvBv rhsInfo? info? r0
-    match op with
-    | .Bitwise bitop _ =>
-      let w? := match bitop with
-        | .Shl w _ | .Shr w => some w
-        | _ => info?.map Prod.fst
-      let signed := info?.map Prod.snd |>.getD false
-      let opName := match bitop with
-        | .BitAnd => "And"
-        | .BitOr => "Or"
-        | .BitXor => "Xor"
-        | .Shl _ _ => "Shl"
-        | .Shr _ => if signed then "SShr" else "UShr"
-      let resolvedW := w?.getD usizeBitWidth
-      match opName with
-      | "SShr" =>
-        -- Signed shift right: no direct builder, fall through to fvar
-        let fnIdx ← resolveFreeVar s!"Bv{resolvedW}.SShr"
-        return Bld.appN (Bld.fvar fnIdx) [l, r]
-      | _ =>
-        match applyBvBitOp resolvedW opName l r with
-        | some result => return result
-        | none => throw s!"unsupported bitvector width {resolvedW} for op {opName}"
-    | .Arith a _ =>
-      match info? with
-      | some (w, signed) =>
-        let opName := match a with
-          | .Add => "Add"
-          | .Sub => "Sub"
-          | .Mul => "Mul"
-          | .EuclideanDiv => if signed then "SDiv" else "UDiv"
-          | .EuclideanMod => if signed then "SMod" else "UMod"
-        match applyBvBinOp w opName l r with
-        | some result => return result
-        | none => throw s!"unsupported bitvector width {w} for op {opName}"
-      | none =>
-        match applyBinaryOp op l r with
-        | some result => return result
-        | none => throw s!"unsupported binary op: {repr op}"
-    | _ =>
-      match applyBinaryOp op l r with
-      | some result => return result
-      | none => throw s!"unsupported binary op: {repr op}"
+    -- Domain: bv when a width was inferred; otherwise int for arith / bool
+    -- ops.  Bitwise with no inferred width defaults to bv `usize`, preserving
+    -- the prior `resolvedW := w?.getD usizeBitWidth` behaviour.
+    let domain := match info? with
+      | some (w, s) => NumDomain.bv w s
+      | none => match op with
+        | .Bitwise _ _ => NumDomain.bv usizeBitWidth false
+        | _ => NumDomain.int
+    match ← numBinopEmit domain op l r with
+    | some result => return result
+    | none => throw s!"unsupported binary op: {repr op} in domain {repr domain}"
   | .Unary op e => do
     let x ←
       match op with
