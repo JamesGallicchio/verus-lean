@@ -466,6 +466,56 @@ private def emitSeqMapDecls
   pushSynthDecl (.command_recfndefs default (ann #[recDecl]))
   pure (Bld.appN (Bld.fvar recIdx) [seqB, Bld.seqLength seqB])
 
+/-! ### nat-native binop lowering
+
+When a binary operation is in nat-space, we lower it to the prelude's
+`nat.lt` / `nat.add` / … directly rather than the int round-trip
+`nat.toInt(a) <op> nat.toInt(b)` (comparisons) or
+`nat.fromInt(nat.toInt(a) <op> nat.toInt(b))` (arithmetic).  The result is
+semantically identical — the prelude bodies expand to the int form — but the
+translated spec stays in nat-space, matching the source and the hand-written
+Strata reference.  `emitNatBinop` (in the `mutual` block below) is the shared
+emitter; the two tables here map an operator to its prelude function.
+
+The two tables fire under deliberately *different* guards, kept side-by-side
+here so the asymmetry is visible rather than buried in the `.Binary` arm:
+
+  * `natCmpFn` fires on the *operand* types (`inferComparisonNumKind` reports
+    both sides nat).  A comparison's result is always `bool`, so there is no
+    "expected nat" hint to key on — the operands are the only signal.
+  * `natArithFn?` fires on the *expected/result* type (`expectedKind == nat`),
+    which `.Unary (.Clip .Nat _)` propagates down.  The operand types alone
+    don't say whether the sum is wanted in nat-space (a nat `a + b` consumed
+    in an int context is correctly lowered as int).
+
+TODO(nat-domain-dispatch): `natCmpFn`, `natArithFn?`, and the int/bv operator
+emission in the `.Binary` arm are really one dispatch
+`(numeric-domain, binop) → emitter`.  Unifying them behind a single
+domain-selection + emitter table would remove this guard asymmetry and the
+three sequential lowering strategies in that arm.  Deferred: the bv
+width-inference / narrow-then-widen / signedness-promotion logic there makes
+it a delicate refactor that deserves its own regression pass. -/
+
+/-- Prelude function for a nat-space comparison (always applicable when both
+    operands are nat — see the table doc above). -/
+def natCmpFn : InequalityOp → String
+  | .Le => "nat.le"
+  | .Lt => "nat.lt"
+  | .Ge => "nat.ge"
+  | .Gt => "nat.gt"
+
+/-- Prelude function for a nat-space arithmetic op, or `none` if the op has no
+    nat-native form.  `EuclideanMod` is absent on purpose: there is no
+    `nat.mod` in the prelude (its `b != 0` precondition is unprovable for
+    `pow2(N)` divisors), so mod stays on the int path and re-wraps via
+    `nat.fromInt`. -/
+def natArithFn? : BinaryOp → Option String
+  | .Arith .Add _          => some "nat.add"
+  | .Arith .Sub _          => some "nat.sub"
+  | .Arith .Mul _          => some "nat.mul"
+  | .Arith .EuclideanDiv _ => some "nat.div"
+  | _                      => none
+
 mutual
 
 private partial def comparisonPrelude
@@ -514,6 +564,17 @@ private partial def comparisonPrelude
     let l ← coerceBvBv lhsInfo? targetInfo? l0
     let r ← coerceBvBv rhsInfo? targetInfo? r0
     return (argTy?, l, r)
+
+/-- Emit a nat-native binary op `fnName(lhs, rhs)` (e.g. `nat.add`, `nat.lt`).
+    Both operands are translated with `expected = Nat`, so nat leaves stay
+    nat and bv/int leaves coerce to nat at the leaf.  See the `natCmpFn` /
+    `natArithFn?` table doc above the `mutual` block for when this fires. -/
+partial def emitNatBinop (env : VarEnv) (bound : BoundEnv)
+    (fnName : String) (lhs rhs : Exp) : BuildM BExpr := do
+  let l ← expToBoole env bound (some Typ.Nat) lhs
+  let r ← expToBoole env bound (some Typ.Nat) rhs
+  let idx ← resolveFreeVar fnName
+  pure (Bld.appN (Bld.fvar idx) [l, r])
 
 /-- Translate a VLIR expression to a BooleDDM expression. -/
 partial def expToBoole (env : VarEnv) (bound : BoundEnv)
@@ -588,6 +649,12 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     let r ← expToBoole env bound none rhs
     return boolNot (boolEquiv l r)
   | .Binary (.Inequality cmp) lhs rhs => do
+    -- nat-native lowering: `nat <cmp> nat` → `nat.lt`/`nat.le`/… directly
+    -- (see the `natCmpFn` table doc).  Fires on the operand types, since a
+    -- comparison's result is always `bool`.
+    if inferComparisonNumKind env bound lhs == some .nat &&
+       inferComparisonNumKind env bound rhs == some .nat then
+      return ← emitNatBinop env bound (natCmpFn cmp) lhs rhs
     let (argTy?, l, r) ← comparisonPrelude env bound lhs rhs
     match argTy? with
     | some ty =>
@@ -615,6 +682,16 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     -- post-hoc `bv*_to_int_u` wrap (`n == 2^64 - 1` ↦ `bv64_to_int_u(n
     -- + 1bv64) == 0`).
     let expectedKind? := expected?.bind numKindOfTyp?
+    -- nat-native lowering: nat-result arithmetic → `nat.add`/`nat.sub`/… (see
+    -- the `natArithFn?` table doc).  Fires on the *expected* type, which
+    -- `.Unary (.Clip .Nat _)` propagates down.  Operands are translated at
+    -- `Nat`, so where `nat.sub`/`nat.div` carry preconditions (`b <= a` /
+    -- `b != 0`), those are exactly the obligations Verus discharges at the
+    -- source — surfaced faithfully rather than hidden behind an int
+    -- round-trip.  `EuclideanMod` stays on the int path (see `natArithFn?`).
+    if expectedKind? == some .nat then
+      if let some fnName := natArithFn? op then
+        return ← emitNatBinop env bound fnName lhs rhs
     let arithRunsInInt :=
       match op with
       | .Arith _ _ =>
@@ -774,21 +851,25 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         let x0 ← expToBoole env bound hint? e
         coerceBvBv innerInfo? (some (targetW, true)) x0
       | .Clip .Nat _ =>
-        -- `x as nat` ≡ `int_to_nat(x)` on the integer value of `x`.
-        -- Translating the inner with expected `.Int` makes any mixed
-        -- arithmetic (e.g. `(bytes[i] as nat) + pow2(..)*rec`, where the
-        -- VLIR is `Clip Nat (Add bv8 nat)`) run in `int` — the existing
-        -- arith-in-int path promotes the bv leaf via `bvN_to_int`.
-        -- If the surrounding context wants `int`, keep that int value
-        -- directly instead of producing the redundant
-        -- `nat_to_int(int_to_nat(...))` round-trip; Verus has already
-        -- checked the source-side nat cast.  If the context wants `nat`,
-        -- insert the actual `int_to_nat` boundary.
-        let x ← expToBoole env bound (some Typ.Int) e
+        -- `x as nat`: translate the inner at the clip's target numeric kind.
+        --   • outer wants int → translate at int and pass through (Verus has
+        --     already checked the source nat cast, so no clamp is needed;
+        --     this also avoids a redundant `nat.toInt(nat.fromInt(...))`).
+        --   • outer wants bv  → translate at int, then int→bv.
+        --   • otherwise (nat) → translate the inner directly at `Nat`.  Nat
+        --     leaves stay nat; bv/int leaves coerce to nat at the leaf; and
+        --     nat-result `Add`/`Mul` fold to `nat.add`/`nat.mul` (see the
+        --     `.Binary` arm) instead of the old `nat.fromInt(nat.toInt(a) +
+        --     nat.toInt(b))` int round-trip.  The mixed case
+        --     `(bytes[i] as nat) + pow2(..)*rec` still works: the bv leaf
+        --     coerces bv→nat on its own rather than relying on running the
+        --     whole sum in int.
         match expected?.bind numKindOfTyp? with
-        | some .int => pure x
-        | some (.bv w signed) => coerceNumeric (some .int) (some (.bv w signed)) x
-        | _ => coerceNumeric (some .int) (some .nat) x
+        | some .int => expToBoole env bound (some Typ.Int) e
+        | some (.bv w signed) => do
+          let x ← expToBoole env bound (some Typ.Int) e
+          coerceNumeric (some .int) (some (.bv w signed)) x
+        | _ => expToBoole env bound (some Typ.Nat) e
       | .Unbox t => do
         let inner ← expToBoole env bound (some t) e
         let srcKind? := numKindOfTyp? t

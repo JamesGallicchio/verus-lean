@@ -89,10 +89,18 @@ classify_boole_verify_log() {
   # Lake completed cleanly. Now scrutinize per-obligation results.
   # Pair each `Obligation: <name>` with the next `Result: ...` line so we can
   # tell *which* obligation failed.
+  #
+  # Both `❌ fail` (cvc5 found a counterexample) and `❓ unknown` (cvc5 gave
+  # up) count as non-passing: a `pass -> unknown` transition is a real loss of
+  # proof power and must be flagged, not tolerated.  Obligations documented in
+  # the per-wrapper `expected_fail_pattern` are exempt (known-hard goals).
+  # Per-obligation `🚨 Solver Timeout` is deliberately NOT matched here —
+  # timeouts are nondeterministic, and a whole-run timeout is already handled
+  # above as `skip_solver_timeout`.
   local unexpected_fails
   unexpected_fails="$(awk -v pat="$expected_fail_pattern" '
     /^Obligation:/ { obligation = $0; sub(/^Obligation: */, "", obligation); next }
-    /^Result: ❌ fail/ {
+    /^Result: ❌ fail/ || /^Result: ❓ unknown/ {
       if (pat == "" || obligation !~ pat) {
         print obligation
       }
@@ -134,9 +142,9 @@ expected_boole_fail_pattern_for_wrapper() {
   case "$1" in
     # ── negative tests (intentional source-level failures) ──────────────
     */vlir-tests/basic_failure.lean) echo 'fail_a_post_expr' ;;
-    # `by_lean.rs`: `lean_test` ensures fails + 3 asserts in
+    # `by_lean.rs`: `lean_test` ensures fails + asserts in
     # `assert_lean_jumble`. Brittle to assertion ordering in source.
-    */vlir-tests/by_lean.lean)       echo 'lean_test_ensures|assert_[456]_' ;;
+    */vlir-tests/by_lean.lean)       echo 'lean_test_ensures|assert_[4-9]_' ;;
     # `matching.rs` intentionally fails on `assert(s is Soccer)` (an
     # unconstrained enum) and `is_insect(mammal) == 6` (calls a `->`
     # accessor with the wrong variant precondition).
@@ -146,24 +154,46 @@ expected_boole_fail_pattern_for_wrapper() {
     */verus-examples/debug.lean)      echo '.' ;;
 
     # ── pre-documented not-faithful translations (see differential_status
-    #    "not faithful translation"): fail on specific obligations for
-    #    known, unrelated reasons (uninterpreted nat/bv coercions, generic
-    #    type-var SMT encoding, intentional type_fail/bvslt baselines).
-    #    The Boole translation is unchanged across the int-termination
-    #    pull; the patterns below tolerate Provenance serial renumbering. ─
+    #    "not faithful translation"): fail (or return ❓ unknown) on specific
+    #    obligations for known, unrelated reasons (hard bv/quantifier/
+    #    int-recursion goals, generic type-var SMT encoding, intentional
+    #    type_fail/bvslt baselines).
+    #
+    #    NOTE: the classifier counts ❓ unknown the same as ❌ fail (a
+    #    `pass -> unknown` transition is a real loss of proof power and must
+    #    be flagged).  Most obligations below are ❓ unknown, not ❌ fail.
+    #    These were verified NOT to be regressions from the nat-prelude /
+    #    nat-arithmetic migration: the always-loaded nat axioms are inert
+    #    without ground `nat.toInt` terms in the goal (confirmed by stripping
+    #    the Nat prelude from `bitvector_equivalence` — unknown count
+    #    unchanged), and only `quantifiers` uses `nat` in its body (where the
+    #    `nat.toInt(i) >= 0` sub-goal actually became *more* provable).
+    #    Obligation indices shifted (`assert_15` -> `assert_20`, etc.) because
+    #    the always-loaded Nat prelude adds declarations ahead of them; anchor
+    #    on the semantic prefix where possible. ─
 
-    # `[TRANS-coercion-uninterpreted]`: `∀ i:nat :: nat_to_int(i) >= 0`
-    # universal — `nat_to_int` has no body.
-    */verus-examples/quantifiers.lean)           echo 'assert_15_' ;;
+    # `[TRANS-coercion-uninterpreted]`: `∀ i:nat :: nat.toInt(i) >= 0 &&
+    # tr(nat.toInt(i))` — the `>= 0` half is now provable via `nat_nonneg`,
+    # but the uninterpreted `tr(...)` half keeps the obligation unknown.
+    */verus-examples/quantifiers.lean)           echo 'assert_20_' ;;
     # `[TRANS-coercion-uninterpreted]`: `b1 == i*2` loop entry-invariant
-    # over uninterpreted `bv8_to_bv64_u`.
-    */verus-examples/statements.lean)            echo 'entry_invariant_' ;;
+    # over uninterpreted `bv8_to_bv64_u`, plus the loop's maintain-invariant
+    # and a dependent assert.
+    */verus-examples/statements.lean)            echo 'entry_invariant_|arbitrary_iter_maintain_invariant_|assert_13_' ;;
     # `[TRANS-coercion-uninterpreted]`: `bitvector_query`/`compute`
     # obligations depending on uninterpreted `bv8_to_*` coercions.
-    */verus-examples/bitvector_basic.lean)       echo 'bitvector_query|compute|assert_29_' ;;
+    */verus-examples/bitvector_basic.lean)       echo 'bitvector_query|compute|assert_32_' ;;
     # `[VERIFY-generic-typevar-ddm]`: SMT encoding error on type-var
     # obligations; dependent asserts also fail.
-    */verus-examples/generics.lean)              echo 'assert_[56]_' ;;
+    */verus-examples/generics.lean)              echo 'assert_[89]_' ;;
+    # `[VERIFY-bv-equivalence]`: the curve25519-style bit-equivalence
+    # induction over 32 `equivalence_proof_bv` call-elim preconditions is
+    # beyond cvc5's bv reasoning here (confirmed pre-existing: independent of
+    # the nat prelude).
+    */verus-examples/bitvector_equivalence.lean) echo 'callElimAssert_equivalence_proof_' ;;
+    # `[VERIFY-funext]`: function-extensionality ensures + dependent asserts
+    # cvc5 cannot discharge without an extensionality axiom.
+    */verus-examples/fun_ext.lean)               echo 'test_funext_specific_|assert_(5|8|11)_' ;;
     # `[TRANS-coercion-uninterpreted]`: `s >= n` precondition becomes
     # `s >= bv64_to_int_u(n)` with `bv64_to_int_u` uninterpreted.
     */verus-examples/external.lean)              echo 'callElimAssert_test_requires_' ;;
@@ -172,8 +202,12 @@ expected_boole_fail_pattern_for_wrapper() {
     */vlir-tests/tests__adopted_rust_verify_test__integer_ring.lean) echo '_ensures_' ;;
     # Intentional bvslt/bvsle verify-mismatch baseline (strata-bv-lowering
     # issue) plus int-termination `triangle0_terminates_*` measure
-    # obligations on the same uninterpreted signed-compare path.
-    */vlir-tests/LoopSimpleWithSpec.lean) echo 'entry_invariant_|triangle0_is_monotonic_ensures_|triangle0_terminates_' ;;
+    # obligations on the same uninterpreted signed-compare path.  The loop's
+    # entry/maintain invariants, the `triangle0_is_monotonic` lemma (both its
+    # requires call-elim and its ensures), and a dependent assert are all
+    # cvc5-unknown — confirmed pre-existing (unchanged by the nat.sub fold;
+    # the nat.sub precondition obligations themselves all discharge).
+    */vlir-tests/LoopSimpleWithSpec.lean) echo 'entry_invariant_|arbitrary_iter_maintain_invariant_|triangle0_is_monotonic_ensures_|triangle0_is_monotonic_requires_|triangle0_terminates_|assert_4_' ;;
 
     # ── intended int-termination reclassification (2026-05-18 pull, see
     #    differential_status.md [CORE-decreases]). Translation is faithful;
@@ -187,8 +221,10 @@ expected_boole_fail_pattern_for_wrapper() {
     # (`decreases abs(i), 0int`); the translator collapses lex-decreases
     # to the head term, so the same-arg `M_is_odd(i) → M_is_even(i)`
     # edge has no strict decrease. Waits on Strata tuple-measure support.
-    */vlir-tests/recursion.lean)        echo 'M_is_odd_terminates_1' ;;
-    */verus-examples/guide__recursion.lean) echo 'M_is_odd_terminates_1' ;;
+    # Same int-recursive-UF limitation as `mutual_recursion` for the
+    # `M_even_odd_mod2_ensures_` goals + the two dependent asserts.
+    */vlir-tests/recursion.lean)        echo 'M_is_odd_terminates|M_even_odd_mod2_ensures_|assert_[46]_' ;;
+    */verus-examples/guide__recursion.lean) echo 'M_is_odd_terminates|M_even_odd_mod2_ensures_|assert_[46]_' ;;
 
     *) echo "" ;;
   esac
