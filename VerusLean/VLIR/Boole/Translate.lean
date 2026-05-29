@@ -1011,12 +1011,19 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       if (expected?.map isSeqTyp).getD false then expected?
       else lookupFnParamTypeFull env fnameStr 0
     let mkFallback := do
-      -- Some library fns have abstract declarations emitted as
-      -- support decls (not in the prelude text) because their types
-      -- reference other support decls. Register the need here so the
-      -- declaration appears in the final program.
-      if fnameStr == "Seq_lib_zip_with" then
-        requireSupport .seqZipWith
+      -- Some library fns have abstract declarations emitted as support decls
+      -- (not in the prelude text) because they are polymorphic/higher-order
+      -- and would fail SMT encoding if declared-but-unused (`Seq_lib_map`,
+      -- `Set_finite`, …) or because their types reference other support
+      -- decls (`Seq_lib_zip_with`'s `Tuple`).  A call here is the
+      -- emitted-level signal that the decl is actually used, so register the
+      -- need so the declaration appears in the final program.
+      if let some need := Support.supportDeclForName? fnameStr then
+        requireSupport need
+        -- The Set-typed Seq builtins also need the `Set` type declared.
+        match need with
+        | .seqLibToSet | .setFinite => requireSupport .set
+        | _ => pure ()
       let args' ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
         let paramTy? := lookupFnParamTypeFull env fnameStr idx
         let argExpected? := paramTy? <|> (match expected? with
@@ -2380,7 +2387,11 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
 
 /-! ### Struct/Enum → BCmd -/
 
-def structToBoole (s : Struct) : BuildM BCmd := do
+/-- Translate a struct to its Boole datatype, returning the datatype command
+    followed by any fixed-size-array length axioms it induces (the axioms must
+    come *after* the datatype so the `<dt>` type and `<dt>..<field>` accessor
+    they reference are already declared). -/
+def structToBoole (s : Struct) : BuildM (Array BCmd) := do
   let dtName := datatypeNameOf s.name
   addFreeVars #[dtName]
   let ctorName := structCtorNameOf s.name
@@ -2403,7 +2414,34 @@ def structToBoole (s : Struct) : BuildM BCmd := do
         BooleDDM.Binding.mkBinding default (ann (sanitizeIdent param)) (BooleDDM.TypeP.type default)
       ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
   let dtDecl := BooleDDM.DatatypeDecl.datatype_decl default (ann dtName) typeArgs constrList
-  pure (.command_datatypes default (ann #[dtDecl]))
+  let dtCmd : BCmd := .command_datatypes default (ann #[dtDecl])
+  -- Length axioms for fixed-size-array fields (`[T; N]`).  Verus's
+  -- compile-time array length is otherwise lost when `[T; N]` lowers to
+  -- `Sequence T`, but Strata's `Sequence.select` out-of-bounds checks need
+  -- it.  Emit `forall s : <dt> :: Sequence.length(<dt>..<field>(s)) == N` per
+  -- such field, *after* the datatype (so `<dt>` / the accessor are in scope).
+  -- Only for monomorphic datatypes — a polymorphic `[T; N]` field is unusual
+  -- and the binder type would need the type args threaded; skip rather than
+  -- emit an ill-typed axiom.
+  if s.typeParams.isEmpty then
+    let dtIdx ← resolveFreeVar dtName
+    let mut axioms : Array BCmd := #[]
+    for (fname, ty) in s.fields do
+      match arrayFixedLen? ty with
+      | some n =>
+        -- The field's *accessor* function is `<dt>..<field>` (the datatype
+        -- destructor), not the bare field name.
+        let accessorIdx ← resolveFreeVar (datatypeDestructorNameOf s.name fname)
+        let body := Bld.eq
+          (Bld.seqLength (Bld.appN (Bld.fvar accessorIdx) [Bld.bvar 0]))
+          (Bld.intConst (Int.ofNat n))
+        let axiomExpr := forallExpr #[("s", fvarTy dtIdx)] body
+        let axiomName := s!"{dtName}_{fieldAccessorNameOf fname}_len"
+        axioms := axioms.push (.command_axiom default (someLabel axiomName) axiomExpr)
+      | none => pure ()
+    pure (#[dtCmd] ++ axioms)
+  else
+    pure #[dtCmd]
 
 def enumToBoole (e : Enum) : BuildM BCmd := do
   let dtName := datatypeNameOf e.name
@@ -2519,8 +2557,8 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     let cmd ← funcCheckSstToBoole env f
     return [cmd]
   | .struct s => do
-    let cmd ← structToBoole s
-    return [cmd]
+    let cmds ← structToBoole s
+    return cmds.toList
   | .enum e => do
     let cmd ← enumToBoole e
     return [cmd]

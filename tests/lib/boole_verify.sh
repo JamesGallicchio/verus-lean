@@ -90,17 +90,25 @@ classify_boole_verify_log() {
   # Pair each `Obligation: <name>` with the next `Result: ...` line so we can
   # tell *which* obligation failed.
   #
-  # Both `❌ fail` (cvc5 found a counterexample) and `❓ unknown` (cvc5 gave
-  # up) count as non-passing: a `pass -> unknown` transition is a real loss of
-  # proof power and must be flagged, not tolerated.  Obligations documented in
-  # the per-wrapper `expected_fail_pattern` are exempt (known-hard goals).
-  # Per-obligation `🚨 Solver Timeout` is deliberately NOT matched here —
-  # timeouts are nondeterministic, and a whole-run timeout is already handled
-  # above as `skip_solver_timeout`.
+  # Three per-obligation results count as non-passing — a transition from
+  # `pass` to any of them is a real loss of proof power and must be flagged,
+  # not tolerated:
+  #   * `❌ fail`               — cvc5 found a counterexample;
+  #   * `❓ unknown`            — cvc5 gave up;
+  #   * `🚨 SMT Encoding Error` — the obligation never even reached the solver
+  #     (e.g. an unused polymorphic decl's unmonomorphizable type var).  This
+  #     is a *hard* failure and was previously invisible, silently hiding
+  #     dozens of broken obligations behind a "pass".
+  # Obligations documented in the per-wrapper `expected_fail_pattern` are
+  # exempt (known-hard goals / known Strata gaps).
+  #
+  # Per-obligation `🚨 Solver Timeout` is deliberately NOT matched — timeouts
+  # are nondeterministic, and a whole-run timeout is already handled above as
+  # `skip_solver_timeout`.
   local unexpected_fails
   unexpected_fails="$(awk -v pat="$expected_fail_pattern" '
     /^Obligation:/ { obligation = $0; sub(/^Obligation: */, "", obligation); next }
-    /^Result: ❌ fail/ || /^Result: ❓ unknown/ {
+    /^Result: ❌ fail/ || /^Result: ❓ unknown/ || /^Result: 🚨 SMT Encoding Error/ {
       if (pat == "" || obligation !~ pat) {
         print obligation
       }
@@ -184,8 +192,11 @@ expected_boole_fail_pattern_for_wrapper() {
     # obligations depending on uninterpreted `bv8_to_*` coercions.
     */verus-examples/bitvector_basic.lean)       echo 'bitvector_query|compute|assert_32_' ;;
     # `[VERIFY-generic-typevar-ddm]`: SMT encoding error on type-var
-    # obligations; dependent asserts also fail.
-    */verus-examples/generics.lean)              echo 'assert_[89]_' ;;
+    # obligations (`id_exec_ensures_`, `assert_7`); dependent asserts
+    # (`assert_8`/`assert_9`) also go unknown.  This is a Strata DDM
+    # limitation on verifying generic functions abstractly, not a translation
+    # defect — kept documented now that `🚨 SMT Encoding Error` is counted.
+    */verus-examples/generics.lean)              echo 'id_exec_ensures_|assert_[789]_' ;;
     # `[VERIFY-bv-equivalence]`: the curve25519-style bit-equivalence
     # induction over 32 `equivalence_proof_bv` call-elim preconditions is
     # beyond cvc5's bv reasoning here (confirmed pre-existing: independent of

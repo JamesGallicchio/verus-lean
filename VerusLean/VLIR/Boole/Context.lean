@@ -41,6 +41,23 @@ inductive SupportDecl where
       compile-time length is available at the call site. Fixed `[x; N]`
       arrays lower to concrete `Sequence.build` chains instead. -/
   | arrayFill
+  /-- Polymorphic abstract `Set (T)` type, plus the higher-order /
+      Set-typed Seq builtins below.  These are emitted as support decls
+      (not in the Seq prelude text) because they are *polymorphic and
+      higher-order*: when present-but-unused, Strata's SMT encoder cannot
+      monomorphize their free type vars (`Unimplemented encoding for type
+      var`).  As support decls they are emitted only when a call site
+      actually references them — where the type vars monomorphize — so an
+      unused builtin never reaches the encoder.  (`Seq::map` is normally
+      replaced by `emitSeqMapDecls` synthesis and so needs none of these.) -/
+  | set
+  | seqNew
+  | seqLibMap
+  | seqLibMapValues
+  | seqLibFilter
+  | seqLibSortBy
+  | seqLibToSet
+  | setFinite
   deriving DecidableEq, Repr
 
 structure BuildCtx where

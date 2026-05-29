@@ -27,13 +27,27 @@ def supportDeclName : SupportDecl → String
   | .tuple => "Tuple"
   | .seqZipWith => "Seq_lib_zip_with"
   | .arrayFill => "Array_array_fill_for_copy_types"
+  | .set => "Set"
+  | .seqNew => "Seq_new"
+  | .seqLibMap => "Seq_lib_map"
+  | .seqLibMapValues => "Seq_lib_map_values"
+  | .seqLibFilter => "Seq_lib_filter"
+  | .seqLibSortBy => "Seq_lib_sort_by"
+  | .seqLibToSet => "Seq_lib_to_set"
+  | .setFinite => "Set_finite"
 
 def supportDeclUsesNat : SupportDecl → Bool
-  | .nat | .natToInt | .intToNat | .bvToNat .. => true
+  -- `Seq_new`'s first parameter is `len : nat`.
+  | .nat | .natToInt | .intToNat | .bvToNat .. | .seqNew => true
   | _ => false
 
 def supportDeclSignature? : SupportDecl → Option (List Typ × Typ)
-  | .nat | .tuple | .seqZipWith | .arrayFill => none
+  -- The Seq higher-order / Set builtins use custom builders in `SupportEmit`
+  -- (arrow-typed params / multiple type params that the `[input] → output`
+  -- shape here can't express), so they return `none`.
+  | .nat | .tuple | .seqZipWith | .arrayFill
+  | .set | .seqNew | .seqLibMap | .seqLibMapValues | .seqLibFilter
+  | .seqLibSortBy | .seqLibToSet | .setFinite => none
   | .natToInt => some ([.Nat], .Int)
   | .intToNat => some ([.Int], .Nat)
   | .bvToInt w signed =>
@@ -60,10 +74,14 @@ def numericSupportDecls : List SupportDecl :=
         []))
 
 def allSupportDecls : List SupportDecl :=
-  -- Order matters for emission: `.tuple` declares the `Tuple` datatype
-  -- that `.seqZipWith` refers to in its return type, so `.seqZipWith`
-  -- must come after it.
-  [.tuple, .nat] ++ numericSupportDecls ++ [.seqZipWith, .arrayFill]
+  -- Order matters for emission: a decl's type references must already be
+  -- declared.  `.tuple` precedes `.seqZipWith` (return type `Sequence
+  -- (Tuple ..)`); `.set` precedes `.seqLibToSet` / `.setFinite` (which
+  -- mention `Set ..` in their signatures).
+  [.tuple, .nat] ++ numericSupportDecls ++
+    [.seqZipWith, .arrayFill,
+     .set, .seqNew, .seqLibMap, .seqLibMapValues, .seqLibFilter,
+     .seqLibSortBy, .seqLibToSet, .setFinite]
 
 def supportDeclForName? (fname : String) : Option SupportDecl :=
   allSupportDecls.find? (fun need => supportDeclName need == fname)

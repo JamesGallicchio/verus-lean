@@ -110,6 +110,66 @@ private def mkArrayFillDecl : BuildM BCmd := do
   let outputTy : BType := seqTy tTy
   pure (.command_fndecl default (ann fname) typeArgs inputBindings outputTy)
 
+/-- Emit an abstract (bodyless) polymorphic function declaration
+    `function <name><typeParams> (<params>) : <retTy>;`.  Generalises
+    `mkSeqZipWithDecl` for the higher-order / Set-typed Seq builtins, whose
+    arrow-typed params and multiple type params the generic `mkCastFnDecl`
+    can't express. -/
+private def mkAbstractPolyFnDecl (name : String) (typeParams : List String)
+    (params : List (String × BType)) (retTy : BType) : BuildM BCmd := do
+  addFreeVars #[name]
+  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+    if typeParams.isEmpty then ann none
+    else ann (some (BooleDDM.TypeArgs.type_args default
+      (ann (typeParams.toArray.map (fun p => BooleDDM.TypeVar.type_var default (ann p))))))
+  let inputBindings := BooleDDM.Bindings.mkBindings default
+    (ann (params.toArray.map (fun (n, t) =>
+      BooleDDM.Binding.mkBinding default (ann n) (BooleDDM.TypeP.expr t))))
+  pure (.command_fndecl default (ann name) typeArgs inputBindings retTy)
+
+/-- Build the abstract declaration for a higher-order / Set-typed Seq builtin
+    via `mkAbstractPolyFnDecl`.  The Set-typed cases (`seqLibToSet`,
+    `setFinite`) resolve the `Set` type via `resolveFreeVar`; the `.set`
+    support decl must already be emitted, which `allSupportDecls` ordering
+    guarantees. -/
+private def mkSeqHigherOrderDecl (lowerType : TypeLowerer)
+    (need : SupportDecl) : BuildM (Option BCmd) := do
+  let t := tvarTy "T"
+  let u := tvarTy "U"
+  match need with
+  | .seqNew => do
+    -- Seq_new<T>(len : nat, f : int -> T) : Sequence T
+    let natT ← lowerType .Nat
+    pure (some (← mkAbstractPolyFnDecl "Seq_new" ["T"]
+      [("len", natT), ("f", arrowTy intTy t)] (seqTy t)))
+  | .seqLibMap => do
+    -- Seq_lib_map<T, U>(s : Sequence T, f : int -> T -> U) : Sequence U
+    pure (some (← mkAbstractPolyFnDecl "Seq_lib_map" ["T", "U"]
+      [("s", seqTy t), ("f", arrowTy intTy (arrowTy t u))] (seqTy u)))
+  | .seqLibMapValues => do
+    -- Seq_lib_map_values<T, U>(s : Sequence T, f : T -> U) : Sequence U
+    pure (some (← mkAbstractPolyFnDecl "Seq_lib_map_values" ["T", "U"]
+      [("s", seqTy t), ("f", arrowTy t u)] (seqTy u)))
+  | .seqLibFilter => do
+    -- Seq_lib_filter<T>(s : Sequence T, p : T -> bool) : Sequence T
+    pure (some (← mkAbstractPolyFnDecl "Seq_lib_filter" ["T"]
+      [("s", seqTy t), ("p", arrowTy t boolTy)] (seqTy t)))
+  | .seqLibSortBy => do
+    -- Seq_lib_sort_by<T>(s : Sequence T, less : T -> T -> bool) : Sequence T
+    pure (some (← mkAbstractPolyFnDecl "Seq_lib_sort_by" ["T"]
+      [("s", seqTy t), ("less", arrowTy t (arrowTy t boolTy))] (seqTy t)))
+  | .seqLibToSet => do
+    -- Seq_lib_to_set<T>(s : Sequence T) : Set T
+    let setIdx ← resolveFreeVar "Set"
+    pure (some (← mkAbstractPolyFnDecl "Seq_lib_to_set" ["T"]
+      [("s", seqTy t)] (fvarTy setIdx #[t])))
+  | .setFinite => do
+    -- Set_finite<T>(s : Set T) : bool
+    let setIdx ← resolveFreeVar "Set"
+    pure (some (← mkAbstractPolyFnDecl "Set_finite" ["T"]
+      [("s", fvarTy setIdx #[t])] boolTy))
+  | _ => pure none
+
 def supportDeclToCommand (lowerType : TypeLowerer) (need : SupportDecl) :
     BuildM (Option BCmd) := do
   match need with
@@ -125,6 +185,12 @@ def supportDeclToCommand (lowerType : TypeLowerer) (need : SupportDecl) :
   | .arrayFill => do
     let cmd ← mkArrayFillDecl
     pure (some cmd)
+  | .set => do
+    let cmd ← mkAbstractTypeDecl "Set" ["T"]
+    pure (some cmd)
+  | .seqNew | .seqLibMap | .seqLibMapValues | .seqLibFilter
+  | .seqLibSortBy | .seqLibToSet | .setFinite =>
+    mkSeqHigherOrderDecl lowerType need
   | _ =>
     match supportDeclSignature? need with
     | some ([inputTy], outputTy) =>

@@ -140,6 +140,13 @@ def isFixedArrayTyp : Typ → Bool
   | .Decorated _ ty => isFixedArrayTyp ty
   | _ => false
 
+/-- The compile-time length `N` of a fixed-size array type `[T; N]`, peeling
+    decorations.  `none` for unsized slices / non-array types. -/
+def arrayFixedLen? : Typ → Option Nat
+  | .Array _ (some n) => some n
+  | .Decorated _ ty => arrayFixedLen? ty
+  | _ => none
+
 def setElemTyp? : Typ → Option Typ
   | .Struct name params =>
     match params with

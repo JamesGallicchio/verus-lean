@@ -152,6 +152,23 @@ def declIsVstdUninterpretedSpec : Decl → Bool
 private def isPervasiveScaffoldingBooleName (n : String) : Bool :=
   n.startsWith "Pervasive_"
 
+/-- Higher-order / polymorphic Seq builtins whose vstd spec-fn *declaration*
+    is never the right source in the emitted Boole, so it's dropped here
+    unconditionally:
+      * `Seq_lib_map` / `Seq_lib_map_values` — calls are replaced by
+        `emitSeqMapDecls` synthesis, or (on the non-primitive fallback) by the
+        on-demand `Seq_lib_*` SupportDecl;
+      * `Seq_lib_filter` / `Seq_lib_sort_by` / `Seq_new` / `Seq_lib_to_set` —
+        calls route to the on-demand SupportDecl via `mkFallback`;
+      * `Seq_subrange` — lowered to Strata's built-in `Sequence.subrange`.
+    Keeping the vstd declaration would re-introduce the unused-polymorphic
+    type-var encoding error (`Unimplemented encoding for type var`) the
+    SupportDecl migration exists to avoid. -/
+private def isSeqBuiltinHandledElsewhere (n : String) : Bool :=
+  n ∈ ["Seq_lib_map", "Seq_lib_map_values", "Seq_lib_filter",
+       "Seq_lib_sort_by", "Seq_new", "Seq_lib_to_set", "Set_finite",
+       "Seq_subrange"]
+
 /-- A vstd spec fn whose calls are all inlined at the call site by
     `expToBoole` (matched by `isPureBooleBuiltinCallName`).  Examples:
     `view`, `Seq.len`, `Vec.len`, `Vec.index`, `cloned`, `Box::new`,
@@ -196,6 +213,7 @@ def pruneUnreferencedVstdSpecs (decls : List Decl) : List Decl :=
         match declName? d with
         | some n =>
           if isPervasiveScaffoldingBooleName n then false
+          else if isSeqBuiltinHandledElsewhere n then false
           else referencedSet.contains n
         | none => false
     else true)
