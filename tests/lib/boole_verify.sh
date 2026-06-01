@@ -54,7 +54,16 @@ classify_boole_verify_log() {
     # `.*` between "requires" and "@[cases]" tolerates Strata's newer
     # wording that adds `a 'decreases' clause or` before `@[cases]`
     # (kondylidou/pr/benchmarks after #1092 termination-checking landed).
-    if grep -qE "Unsupported expression|Unsupported typed operator|unexpected token '\('; expected '\)'|Undeclared type or category Tuple|Unknown bound variable with index|[rR]ecursive function .* requires .*@\[cases\]" "$log"; then
+    #
+    # `requires a bitvector source type.*BooleType.tvar` is the native Bv→Int
+    # cast (`e as_int` / `e as_sint`, #1217) applied to a *type-variable*
+    # operand.  Strata does not monomorphize generic functions, so e.g.
+    # `g(u) : A` (A a type parameter) reaches the cast with an abstract type,
+    # and `as_int` *correctly* rejects a non-bitvector source.  The faithful
+    # native emission is right (we keep `as_int` rather than reverting to an
+    # uninterpreted opaque cast); the gap is Strata-side monomorphization of
+    # generics ([VERIFY-generic-typevar-ddm]), so classify it as a Strata gap.
+    if grep -qE "Unsupported expression|Unsupported typed operator|unexpected token '\('; expected '\)'|Undeclared type or category Tuple|Unknown bound variable with index|[rR]ecursive function .* requires .*@\[cases\]|requires a bitvector source type.*BooleType\.tvar" "$log"; then
       echo "skip_gap"
       return 0
     fi
@@ -184,13 +193,22 @@ expected_boole_fail_pattern_for_wrapper() {
     # tr(nat.toInt(i))` — the `>= 0` half is now provable via `nat_nonneg`,
     # but the uninterpreted `tr(...)` half keeps the obligation unknown.
     */verus-examples/quantifiers.lean)           echo 'assert_20_' ;;
-    # `[TRANS-coercion-uninterpreted]`: `b1 == i*2` loop entry-invariant
-    # over uninterpreted `bv8_to_bv64_u`, plus the loop's maintain-invariant
-    # and a dependent assert.
-    */verus-examples/statements.lean)            echo 'entry_invariant_|arbitrary_iter_maintain_invariant_|assert_13_' ;;
-    # `[TRANS-coercion-uninterpreted]`: `bitvector_query`/`compute`
-    # obligations depending on uninterpreted `bv8_to_*` coercions.
-    */verus-examples/bitvector_basic.lean)       echo 'bitvector_query|compute|assert_32_' ;;
+    # NOTE: `statements` and `external` previously carried
+    # `[TRANS-coercion-uninterpreted]` expected-fail patterns — unknowns from
+    # uninterpreted `bv8_to_bv64_u` / `bv64_to_int_u` coercions.  Migrating those
+    # casts to native `as_int`/`as_bv` (#1217) made them interpreted, so the
+    # obligations now discharge: their patterns are removed and the gate now
+    # *requires* those tests to pass.  (`statements`'s remaining ⌛
+    # `measure_decrease_0` is a hard nonlinear measure, tolerated by the
+    # per-obligation solver-timeout skip — it was never an expected-fail.)
+    # `quantifiers` (uninterpreted `tr(...)`, below) and `fun_ext` (function
+    # extensionality) are unrelated and keep their patterns.
+    #
+    # `bitvector_basic`: #1217 fixed its `compute` / `assert_32` coercion
+    # unknowns, so the pattern is narrowed from `bitvector_query|compute|
+    # assert_32_` to just `bitvector_query` — that goal is now interpreted but
+    # cvc5-hard (times out, can flake to unknown).
+    */verus-examples/bitvector_basic.lean)       echo 'bitvector_query' ;;
     # `[VERIFY-generic-typevar-ddm]`: SMT encoding error on type-var
     # obligations (`id_exec_ensures_`, `assert_7`); dependent asserts
     # (`assert_8`/`assert_9`) also go unknown.  This is a Strata DDM
@@ -205,9 +223,8 @@ expected_boole_fail_pattern_for_wrapper() {
     # `[VERIFY-funext]`: function-extensionality ensures + dependent asserts
     # cvc5 cannot discharge without an extensionality axiom.
     */verus-examples/fun_ext.lean)               echo 'test_funext_specific_|assert_(5|8|11)_' ;;
-    # `[TRANS-coercion-uninterpreted]`: `s >= n` precondition becomes
-    # `s >= bv64_to_int_u(n)` with `bv64_to_int_u` uninterpreted.
-    */verus-examples/external.lean)              echo 'callElimAssert_test_requires_' ;;
+    # (external: `s >= bv64_to_int_u(n)` coercion — now native `as_int` (#1217);
+    #  pattern removed, see the consolidated note above.)
     # Intentional baseline: `type_fail` + cvc5 `wide_mul` timeout +
     # nonlinear `*_ensures_*` cvc5 cannot discharge.
     */vlir-tests/tests__adopted_rust_verify_test__integer_ring.lean) echo '_ensures_' ;;
@@ -246,10 +263,13 @@ expected_boole_fail_pattern_for_wrapper() {
 # for the bug descriptions and the fix plan.
 known_translator_bug_pattern_for_wrapper() {
   case "$1" in
-    # mini_c currently emits a malformed tuple projection `Tuple.._2` while
-    # lowering match tuple temporaries; Lean elaboration aborts before any
-    # obligation runs. Tracked in differential_status.md.
-    */vlir-tests/mini_c.lean) echo 'Unknown variable Tuple\.\._2' ;;
+    # mini_c: the 2026-06-01 Strata pull resolved its earlier malformed tuple
+    # projection (`Tuple.._2`); the next translator-side blocker then surfaced —
+    # it references the `Set` type without triggering its `.set` support decl
+    # (`Undeclared type or category Set`), so Lean elaboration aborts before any
+    # obligation runs.  Still a translator bug (missing `requireSupport .set`),
+    # tracked in differential_status.md.
+    */vlir-tests/mini_c.lean) echo 'Undeclared type or category Set' ;;
     # LoopSimpleWithSpec uses `triangle0(i as nat)` style spec-fn calls; the
     # translator does not insert an `int -> nat` coercion at the call boundary,
     # so Strata reports `Expression has type int when nat expected` at Lean

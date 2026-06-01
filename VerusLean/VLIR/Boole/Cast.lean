@@ -26,25 +26,34 @@ private def castFnExpr (need : SupportDecl) : BuildM BExpr := do
   let idx ← resolveFreeVar (supportDeclName need)
   pure (Bld.fvar idx)
 
-/-- Apply a unary cast helper.
+/-- The generic uninterpreted-cast path: a call to a bodyless support-decl
+    function axiomatized at the call site.  Used for cast kinds with no native
+    Strata construct, and as a width fallback for the native bv casts below. -/
+private def genericCast (need : SupportDecl) (e : BExpr) : BuildM BExpr := do
+  requireSupport need
+  if supportDeclUsesNat need then
+    requireSupport .nat
+  let fn ← castFnExpr need
+  pure (Bld.app fn e)
 
-    Most cast kinds fall through to the generic path: a call to a bodyless
-    support-decl function that gets axiomatized at the call site.  Three
-    kinds are special-cased to skip the support-decl machinery and use
-    constructs that already exist in the prelude / Strata core:
+/-- Apply a unary cast helper.  Numeric casts between `bv`, `int`, and `nat`
+    all use native, *interpreted* constructs (so cvc5 reasons about them) and
+    skip the uninterpreted support-decl machinery:
 
-    * `.bvToInt` → Strata's native `(e as_int)` / `(e as_sint)` postfix,
-      which lowers to `Bv<W>.ToUInt`/`Bv<W>.ToInt` at Core — cvc5's bv
-      theory proves nonneg-ness of unsigned bv→int by construction.
-    * `.natToInt` → the prelude's `nat.toInt(n)` function (declared in
-      `prelude/Nat.boole.st`, always loaded).  Skips the `nat_to_int`
-      support decl and lets cvc5 reason via the prelude's round-trip
-      axioms (`nat_nonneg`, `nat_fromInt_toInt`, `nat_toInt_fromInt`).
-    * `.intToNat` → the prelude's `nat.fromInt(x)` function (which body-
-      delegates to `nat.fromIntAux` modulo a `0 <= x` precondition).  All
-      translator-emitted `.intToNat` sites convert values the surrounding
-      context knows to be nonneg (cast results, sequence lengths, …), so
-      the precondition is trivially dischargeable. -/
+    * `.bvToInt` → native `(e as_int)` / `(e as_sint)` (Core `Bv<W>.ToUInt` /
+      `Bv<W>.ToInt`); cvc5's bv theory proves nonneg-ness of unsigned bv→int.
+    * `.intToBv` → native `(e as_bv<w>)` (Core `Int.ToBv<w>`, truncating; the
+      two's-complement bit pattern is the same for signed/unsigned). [#1217]
+    * `.bvWiden` (bv→bv) → `(e as_int|as_sint) as_bv<toW>`. [#1217]
+    * `.bvToNat` → `nat.fromInt(e as_int|as_sint)`; unsigned `as_int` is nonneg
+      by construction, discharging `nat.fromInt`'s `0 <= x` precondition. [#1217]
+    * `.natToInt` → the prelude's `nat.toInt(n)` (`prelude/Nat.boole.st`),
+      reasoning via the round-trip axioms (`nat_nonneg`, …).
+    * `.intToNat` → the prelude's `nat.fromInt(x)`; translator-emitted sites
+      convert values the context knows nonneg, so the precond discharges.
+
+    Native bv casts fall back to `genericCast` for widths Strata has no
+    `as_bv<w>` token for (anything outside 1/8/16/32/64/128). -/
 def applyCast (need : SupportDecl) (e : BExpr) : BuildM BExpr := do
   match need with
   | .bvToInt w signed =>
@@ -56,12 +65,22 @@ def applyCast (need : SupportDecl) (e : BExpr) : BuildM BExpr := do
   | .intToNat =>
     let idx ← resolveFreeVar "nat.fromInt"
     pure (Bld.app (Bld.fvar idx) e)
-  | _ =>
-    requireSupport need
-    if supportDeclUsesNat need then
-      requireSupport .nat
-    let fn ← castFnExpr need
-    pure (Bld.app fn e)
+  | .intToBv w _signed =>
+    match Bld.castToBv w e with
+    | some be => pure be
+    | none => genericCast need e
+  | .bvWiden fromW toW signed =>
+    let eInt := if signed then Bld.castToSInt (Bld.bvTy fromW) e
+                else Bld.castToInt (Bld.bvTy fromW) e
+    match Bld.castToBv toW eInt with
+    | some be => pure be
+    | none => genericCast need e
+  | .bvToNat w signed =>
+    let eInt := if signed then Bld.castToSInt (Bld.bvTy w) e
+                else Bld.castToInt (Bld.bvTy w) e
+    let idx ← resolveFreeVar "nat.fromInt"
+    pure (Bld.app (Bld.fvar idx) eInt)
+  | _ => genericCast need e
 
 private def castExprToWiderBvB (fromW toW : Nat) (signed : Bool) (e : BExpr) : BuildM BExpr := do
   if fromW == toW then pure e

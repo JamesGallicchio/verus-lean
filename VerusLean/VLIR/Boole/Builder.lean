@@ -68,6 +68,19 @@ def castToInt (sourceTy : BType) (e : BExpr) : BExpr :=
 def castToSInt (sourceTy : BType) (e : BExpr) : BExpr :=
   .cast_to_sint default sourceTy e
 
+/-- Narrowing int→bv cast `e as_bv<w>` (Core `Int.ToBv<w>` → SMT `int_to_bv`).
+    Per-width tokens (1/8/16/32/64/128); `none` for any other width so callers
+    fall back to the uninterpreted support-decl cast. -/
+def castToBv (w : Nat) (e : BExpr) : Option BExpr :=
+  match w with
+  | 1   => some (.cast_to_bv1   default e)
+  | 8   => some (.cast_to_bv8   default e)
+  | 16  => some (.cast_to_bv16  default e)
+  | 32  => some (.cast_to_bv32  default e)
+  | 64  => some (.cast_to_bv64  default e)
+  | 128 => some (.cast_to_bv128 default e)
+  | _   => none
+
 def boolConst (b : Bool) : BExpr :=
   if b then .btrue default else .bfalse default
 

@@ -15,7 +15,7 @@ export VerusLean.Boole.Builder (
   BExpr BType BStmt BCmd BBlock
   boolTy intTy strTy bvTy mapTy seqTy arrowTy tvarTy fvarTy unknownTy
   fvar bvar boolConst intConst bitvecConstNat bitvecConst
-  castToInt castToSInt
+  castToInt castToSInt castToBv
   ite iteTyped eq neq eqTyped neqTyped app appN
   boolNot boolAnd boolOr boolImplies boolEquiv
   intAdd intSub intMul intDiv intMod intNeg
