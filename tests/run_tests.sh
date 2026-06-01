@@ -17,6 +17,10 @@ JSON_BOOGIE_EXAMPLES_DIR="$JSON_BOOGIE_DIR/verus-examples"
 JSON_BOOGIE_VLIR_DIR="$JSON_BOOGIE_DIR/vlir-tests"
 
 verbose=false
+# Comma-separated synthesized verification aids to disable, forwarded to
+# `verus-lean` via the BOOLE_SYNTH_DISABLE env var. Defaults to any pre-set
+# value so an exported env var still works without the flag.
+synth_disable="${BOOLE_SYNTH_DISABLE:-}"
 
 usage() {
   cat <<'EOF'
@@ -29,7 +33,15 @@ Stages (pipeline: .rs -> JSON -> .boole.st -> .lean wrapper -> verify):
                    generated .lean wrapper for a target
   --all            Run Verus + Boole + Verify across all suites
   --out <path>     Output .boole.st path for single-target --boole runs
-  --verbose        Show full CLI output for external commands
+  --verbose        Show full output: every proof obligation during --verify
+                   (default prints only a tally + non-passing obligations) and
+                   full CLI output for the Verus/Boole steps
+  --synth-disable <names>
+                   Comma-separated synthesized verification aids to turn OFF
+                   during Boole generation (sets BOOLE_SYNTH_DISABLE). Valid
+                   names: fixedArrayLengths, loopLowerBound, seqMapPrecond.
+                   Default: all aids on. Only affects stages that regenerate
+                   Boole (--boole / --all).
   -h, --help       Show this help
 
 Target:
@@ -423,6 +435,19 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --verbose) verbose=true; shift ;;
+    --synth-disable)
+      if [ $# -lt 2 ]; then
+        echo "Missing value for --synth-disable"
+        usage
+        exit 1
+      fi
+      synth_disable="$2"
+      shift 2
+      ;;
+    --synth-disable=*)
+      synth_disable="${1#*=}"
+      shift
+      ;;
     --all) run_verus=true; run_boole=true; run_verify=true; run_all_flag=true; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; while [ $# -gt 0 ]; do positional+=("$1"); shift; done ;;
@@ -430,6 +455,10 @@ while [ $# -gt 0 ]; do
     *) positional+=("$1"); shift ;;
   esac
 done
+
+# Forward the synthesized-aid toggle to `verus-lean` (read by Main.lean's
+# `synthConfigFromEnv` during Boole generation). Empty = all aids on.
+export BOOLE_SYNTH_DISABLE="$synth_disable"
 
 if [ ${#positional[@]} -gt 1 ]; then
   echo "Too many targets provided."

@@ -111,6 +111,19 @@ private def dedupeNamedCommands (cmds : Array Boole.Builder.BCmd) :
               go seen rest
   (go [] all).toArray
 
+/-- Build the synthesized-aid toggle config from the `BOOLE_SYNTH_DISABLE`
+    environment variable — a comma-separated list of `SynthConfig` field names
+    to turn *off* (e.g. `fixedArrayLengths,loopLowerBound,seqMapPrecond`).
+    Empty/unset means all aids on (the default).  Unknown names are ignored. -/
+def synthConfigFromEnv : IO Context.SynthConfig := do
+  let raw := (← IO.getEnv "BOOLE_SYNTH_DISABLE").getD ""
+  let off := (raw.splitOn ",").map (·.trim) |>.filter (· != "")
+  pure {
+    fixedArrayLengths := !off.contains "fixedArrayLengths"
+    loopLowerBound    := !off.contains "loopLowerBound"
+    seqMapPrecond     := !off.contains "seqMapPrecond"
+  }
+
 unsafe def genBooleFromFile
     (path : String)
     (printFn : String → IO Unit) : IO Unit := do
@@ -142,7 +155,8 @@ unsafe def genBooleFromFile
   match preludeResult with
   | .error e => failWith e
   | .ok (preludeOps, preludeNames) =>
-    match Translate.translateDeclsWithPrelude allDecls preludeNames with
+    let synthCfg ← synthConfigFromEnv
+    match Translate.translateDeclsWithPrelude allDecls preludeNames synthCfg with
     | .error e => failWith e
     | .ok (cmds, finalCtx) =>
       -- Filter out user commands whose names are already in the prelude

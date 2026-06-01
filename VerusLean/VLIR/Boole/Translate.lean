@@ -30,6 +30,7 @@ import VerusLean.VLIR.Boole.Query
 import VerusLean.VLIR.Boole.Reveal
 import VerusLean.VLIR.Boole.Signatures
 import VerusLean.VLIR.Boole.SupportEmit
+import VerusLean.VLIR.Boole.Synth
 import VerusLean.VLIR.Boole.VariantReqs
 
 namespace VerusLean.Boole
@@ -438,7 +439,7 @@ private def emitSeqMapDecls
   let mapOutTy := Bld.seqTy retBTy
   let closureIdx ← resolveFreeVar closureName
   let recIdx ← resolveFreeVar recName
-  let (decrAnn, mapBody) ← withScope do
+  let (decrAnn, mapBody, recReqs) ← withScope do
     addBoundVars #[seqParamName, idxParamName]
     let sIdx ← match ← lookupBoundVar seqParamName with
       | some i => pure i
@@ -457,9 +458,15 @@ private def emitSeqMapDecls
     let recCall := Bld.appN (Bld.fvar recIdx) [sE, nPrev]
     let consE ← seqBuildExpr recCall closureCall
     let body := Bld.iteTyped mapOutTy cond (Bld.fvar emptyIdx) consE
-    pure (Bld.mkMeasure (some nE), body)
+    -- The recursion selects `s[n-1]` in its step case; carry the prefix-range
+    -- precondition (gated by `SynthConfig.seqMapPrecond`) so that select's
+    -- out-of-bounds obligation discharges.
+    let cfg ← getSynthConfig
+    let recReqs : Array (BooleDDM.SpecElt SourceRange) :=
+      if cfg.seqMapPrecond then #[Synth.prefixRangeRequires sE nE] else #[]
+    pure (Bld.mkMeasure (some nE), body, recReqs)
   let recDecl := BooleDDM.RecFnDecl.recfn_decl default (ann recName) noTypeArgs
-    mapBindings mapOutTy noSpec decrAnn mapBody
+    mapBindings mapOutTy (ann recReqs) decrAnn mapBody
   pushSynthDecl emptyCmd
   pushSynthDecl emptyAxiom
   pushSynthDecl closureCmd
@@ -1498,6 +1505,31 @@ private partial def lowerProjectedAssignRhsToRoot
     let updatedContainer := Bld.appN (Bld.fvar ctorIdx) args
     lowerProjectedAssignRhsToRoot env projLayouts base updatedContainer
 
+/-- Collect base-variable names that appear as the *container* argument of
+    a `Std_specs_Core_index_set(container, index, value)` call anywhere in
+    the body.  The translator's call-site lowering (in `stmToBoole`) rewrites
+    these to `container := Sequence.update(container, index, value)`, so the
+    mutation reaches the emitted Boole even though the source AST holds it
+    as a `Stm.Call`, not a `Stm.Assign`.  Used both to identify by-value input
+    parameters that need a shadow local, and to find fixed-size-array locals
+    mutated inside a loop (which then need a `length` loop invariant). -/
+partial def collectIndexSetTargets : Stm → List String
+  | .Block stms => stms.flatMap collectIndexSetTargets
+  | .If _ b1 b2 =>
+    collectIndexSetTargets b1 ++ (b2.map collectIndexSetTargets).getD []
+  | .Loop _ _ cond body _ _ =>
+    (match cond with
+      | some (s, _) => collectIndexSetTargets s
+      | none => []) ++ collectIndexSetTargets body
+  | .DeadEnd s | .OpenInvariant s | .ClosureInner s => collectIndexSetTargets s
+  | .Call fn _ args =>
+    if isIndexSetName fn then
+      match args.head? with
+      | some e => (vecVarFromExp e).toList
+      | none => []
+    else []
+  | _ => []
+
 /-! ## Statement Translation Main -/
 
 mutual
@@ -1817,8 +1849,42 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
     let envWithBinder := extendEnv env [(loop.loopVarName, loopBinderTy)]
     let (invExprs, measureExpr?, bodyStms) ← withScope do
       pushBoundVar loopVarSan
-      let invExprs ← loop.invariants.toArray.mapM (fun inv =>
+      let userInvs ← loop.invariants.toArray.mapM (fun inv =>
         expToBooleFlat envWithBinder (some .Bool) inv.body)
+      let cfg ← getSynthConfig
+      -- (SynthConfig.loopLowerBound) Verus's `for i in lo..hi` iterator
+      -- guarantees `lo <= i` throughout, but Strata's `for i := lo to hi` hands
+      -- the body only the *upper* bound `i <= hi` (via the guard); without
+      -- `lo <= i` every `s[i]` out-of-bounds obligation fails on its `0 <= i`
+      -- half (repro: `assert i < hi` passes but `assert 0 <= i` is unknown).
+      -- Lowered from the source comparison `startExp <= loopVar` so the int/bv
+      -- dispatch and loop-variable scoping run through `expToBooleFlat`, as for
+      -- a user invariant.  Appended (not prepended) so existing invariants keep
+      -- their obligation indices.
+      let invsWithBound ← if cfg.loopLowerBound then do
+          let lb ← expToBooleFlat envWithBinder (some .Bool)
+            (Synth.lowerBoundInvExp loop.startExp loop.loopVarName)
+          pure (userInvs.push lb)
+        else pure userInvs
+      -- (SynthConfig.fixedArrayLengths) Fixed-size-array vars *mutated inside*
+      -- the loop (via `arr[i] = …`, lowered to `arr := Sequence.update(arr,…)`,
+      -- or a plain reassign) are havoc'd by the loop, dropping the entry
+      -- `length == N` fact.  Re-pin it as a loop invariant for each such array
+      -- (`Sequence.update` preserves length, so it is maintained).  Read-only
+      -- arrays keep their entry fact; restricting to *modified* vars also avoids
+      -- pinning a local whose length isn't established until after this loop.
+      let lenInvs ← if cfg.fixedArrayLengths then do
+          let modifiedNames :=
+            ((collectSetVars (.Block loop.userBody)).map (·.name)
+              ++ collectIndexSetTargets (.Block loop.userBody)).eraseDups
+          modifiedNames.filterMapM fun v =>
+            match (envWithBinder.get? v).bind arrayFixedLen? with
+            | some n => do
+              let vExpr ← resolveVar v
+              pure (some (Synth.fixedArrayLenFact vExpr n))
+            | none => pure none
+        else pure ([] : List BExpr)
+      let invExprs := invsWithBound ++ lenInvs.toArray
       -- Lower the first source `decreases` term into the for-loop's
       -- measure slot.  Lexicographic decreases (multiple terms) collapse
       -- to the head — combining them is future work.  Skip clauses whose
@@ -2241,30 +2307,6 @@ private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
       #[setStmtTyped retTy (sanitizeVarName f.retName) nextRet])
   pure (BooleDDM.Block.block default (ann #[initStmt, loopStmt]))
 
-/-- Collect base-variable names that appear as the *container* argument of
-    a `Std_specs_Core_index_set(container, index, value)` call anywhere in
-    the body.  The translator's call-site lowering (in `stmToBoole`) rewrites
-    these to `container := Sequence.update(container, index, value)`, so the
-    mutation reaches the emitted Boole even though the source AST holds it
-    as a `Stm.Call`, not a `Stm.Assign`.  Used to identify by-value input
-    parameters that need a shadow local. -/
-partial def collectIndexSetTargets : Stm → List String
-  | .Block stms => stms.flatMap collectIndexSetTargets
-  | .If _ b1 b2 =>
-    collectIndexSetTargets b1 ++ (b2.map collectIndexSetTargets).getD []
-  | .Loop _ _ cond body _ _ =>
-    (match cond with
-      | some (s, _) => collectIndexSetTargets s
-      | none => []) ++ collectIndexSetTargets body
-  | .DeadEnd s | .OpenInvariant s | .ClosureInner s => collectIndexSetTargets s
-  | .Call fn _ args =>
-    if isIndexSetName fn then
-      match args.head? with
-      | some e => (vecVarFromExp e).toList
-      | none => []
-    else []
-  | _ => []
-
 def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (sfMap : SpecFnMap) (f : ExecFn) : BuildM BCmd := do
   let fnName := identToBoole f.name
@@ -2341,6 +2383,29 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires rewrittenEnsures []
+    -- (SynthConfig.fixedArrayLengths) A function returning a fixed-size array
+    -- `[T; N]` must carry `length == N` to its callers: otherwise a caller
+    -- binding the result to a local loses the length the source type
+    -- guarantees.  Emit `ensures length(result) == N`; the body discharges it
+    -- from the result's own length facts (a literal's length, a loop invariant,
+    -- or a callee's ensures).  This is the cross-call half of the per-binding
+    -- length discipline — the input side is the parameter entry `assume`.
+    --
+    -- Scoped to the *main* return (`retDecls`), not `&mut [T; N]` outputs: an
+    -- output mutated *inside a loop via a call* (e.g. `compress` calling
+    -- `compress_u32(&mut state, …)`) would need a `length` loop invariant to
+    -- survive the havoc, but Stage-2b loop detection only sees plain-assign /
+    -- index_set mutations, not call-mutations.  Covering mut-out outputs is a
+    -- follow-up that first needs call-mutation detection in `tryForLoopRecovery`.
+    let specElts ← if (← getSynthConfig).fixedArrayLengths then
+        retDecls.foldlM (fun acc (name, ty) =>
+          match arrayFixedLen? ty with
+          | some n => do
+            let outExpr ← resolveVar name
+            pure (acc.push (.ensures_spec default noLabel (ann none)
+              (Synth.fixedArrayLenFact outExpr n)))
+          | none => pure acc) specElts
+      else pure specElts
     -- Lower the source-level `decreases` clause BEFORE body translation so
     -- the bound-var stack is in a known-clean state.  Body translation may
     -- leave additional bound vars on the stack, which would produce
@@ -2365,6 +2430,24 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
         pure (specElts, body)
       else
         let localStmts ← localsToVarStmts localsAll
+        -- (SynthConfig.fixedArrayLengths) Fixed-size-array params carry a
+        -- compile-time length (`[T; N]`) lost when the type lowers to
+        -- `Sequence T`.  Re-establish it at entry as `assume length(p) == N` —
+        -- a *type* invariant (always true), modeled as an assume rather than a
+        -- `requires` so it emits no call-site obligation and does not cascade an
+        -- element-length proof onto callers (e.g. `compress` passing
+        -- `&blocks[k]`).  Read-only arrays keep the fact across loops (loops
+        -- havoc only modified vars); mut-out / by-value copies inherit it
+        -- through their `copy := param` init below; arrays *mutated inside* a
+        -- loop additionally get a loop invariant (in `tryForLoopRecovery`).
+        let fixedArrayLenAssumes ← if (← getSynthConfig).fixedArrayLengths then
+            f.inputs.filterMapM fun (name, ty) =>
+              match arrayFixedLen? ty with
+              | some n => do
+                let pExpr ← resolveVar name
+                pure (some (assumeStmt "" (Synth.fixedArrayLenFact pExpr n)))
+              | none => pure none
+          else pure ([] : List BStmt)
         -- Init mutable-out variables from inputs
         let mutOutInits ← mutOutDecls.mapM (fun (inName, outName, payloadTy) => do
           let inExpr ← resolveVar inName
@@ -2378,7 +2461,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
           pure (setStmtTyped localTy (sanitizeVarName localName) inExpr))
         let retVar? := if hasRet then some (f.retName, f.returnType) else none
         let bodyStmts ← stmToBoole envLocal projLayouts mutArgMap retVar? fnName rewrittenBody
-        let allStmts := localStmts ++ mutOutInits ++ byValInits ++ bodyStmts
+        let allStmts := localStmts ++ fixedArrayLenAssumes ++ mutOutInits ++ byValInits ++ bodyStmts
         let body := BooleDDM.Block.block default (ann allStmts.toArray)
         pure (specElts, body)
     pure (specElts, body, decrAnn)
@@ -2423,7 +2506,8 @@ def structToBoole (s : Struct) : BuildM (Array BCmd) := do
   -- Only for monomorphic datatypes — a polymorphic `[T; N]` field is unusual
   -- and the binder type would need the type args threaded; skip rather than
   -- emit an ill-typed axiom.
-  if s.typeParams.isEmpty then
+  let cfg ← getSynthConfig
+  if cfg.fixedArrayLengths && s.typeParams.isEmpty then
     let dtIdx ← resolveFreeVar dtName
     let mut axioms : Array BCmd := #[]
     for (fname, ty) in s.fields do
@@ -2432,9 +2516,8 @@ def structToBoole (s : Struct) : BuildM (Array BCmd) := do
         -- The field's *accessor* function is `<dt>..<field>` (the datatype
         -- destructor), not the bare field name.
         let accessorIdx ← resolveFreeVar (datatypeDestructorNameOf s.name fname)
-        let body := Bld.eq
-          (Bld.seqLength (Bld.appN (Bld.fvar accessorIdx) [Bld.bvar 0]))
-          (Bld.intConst (Int.ofNat n))
+        let body := Synth.fixedArrayLenFact
+          (Bld.appN (Bld.fvar accessorIdx) [Bld.bvar 0]) n
         let axiomExpr := forallExpr #[("s", fvarTy dtIdx)] body
         let axiomName := s!"{dtName}_{fieldAccessorNameOf fname}_len"
         axioms := axioms.push (.command_axiom default (someLabel axiomName) axiomExpr)
@@ -2750,9 +2833,10 @@ def translateDeclsWithCtx (decls : List Decl) : Except String (Array BCmd × Bui
 /-- Like `translateDeclsWithCtx` but pre-registers prelude names so fvar
     indices align with Strata's `Program.globalContext` when the prelude is
     prepended to the output. -/
-def translateDeclsWithPrelude (decls : List Decl) (preludeNames : Array String) :
+def translateDeclsWithPrelude (decls : List Decl) (preludeNames : Array String)
+    (synthConfig : SynthConfig := {}) :
     Except String (Array BCmd × BuildCtx) :=
-  let initCtx := emptyCtx.addGlobalFreeVars preludeNames
+  let initCtx := { emptyCtx.addGlobalFreeVars preludeNames with synthConfig }
   match (declsToBooleProgram decls).run initCtx with
   | .ok (cmds, ctx) => .ok (cmds, ctx)
   | .error e => .error e

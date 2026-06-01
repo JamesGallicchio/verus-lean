@@ -60,6 +60,26 @@ inductive SupportDecl where
   | setFinite
   deriving DecidableEq, Repr
 
+/-- Feature toggles for the translator's *synthesized* verification aids —
+    invariants / axioms / preconditions that re-introduce facts Verus's types
+    and iterators guarantee but the `Sequence` lowering drops.  All default
+    `true` (current behavior); flipping one off only reduces *completeness*
+    (some out-of-bounds obligations revert to `unknown`), never soundness, so
+    it is a safe knob for measuring each aid's impact.  The fact *builders*
+    live in `Boole.Synth`; these flags gate their *emission* at each site. -/
+structure SynthConfig where
+  /-- Fixed-size-array `Sequence.length(_) == N` facts: the struct-field
+      length axiom, the per-parameter entry assume, and the
+      mutated-in-loop length invariant. -/
+  fixedArrayLengths : Bool := true
+  /-- For-range loop lower-bound invariant `lo <= i` (Strata's `for` hands the
+      body only the upper bound `i <= hi`, via the loop guard). -/
+  loopLowerBound : Bool := true
+  /-- Synthesized `Seq::map` recursion prefix-range precondition
+      `0 <= n && n <= Sequence.length(s)`. -/
+  seqMapPrecond : Bool := true
+  deriving Repr
+
 structure BuildCtx where
   allFreeVars : Array String := #[]
   supportNeeds : Array SupportDecl := #[]
@@ -83,6 +103,9 @@ structure BuildCtx where
   synthDecls : Array (BooleDDM.Command SourceRange) := #[]
   /-- Monotonic counter for naming synthesized declarations uniquely. -/
   synthFnCounter : Nat := 0
+  /-- Feature toggles for synthesized verification aids; all-on by default
+      (current behavior).  See `SynthConfig`. -/
+  synthConfig : SynthConfig := {}
 
 abbrev BuildM := StateT BuildCtx (Except String)
 
@@ -134,6 +157,9 @@ def emptyCtx : BuildCtx := BuildCtx.empty
 
 def requireSupport (need : SupportDecl) : BuildM Unit :=
   modify (·.addSupportNeed need)
+
+/-- The active synthesized-aid toggles for this translation. -/
+def getSynthConfig : BuildM SynthConfig := return (← get).synthConfig
 
 /-- Return a fresh unique loop-label id (0, 1, 2, …) and increment the
     counter in `BuildCtx`. Callers typically format it as

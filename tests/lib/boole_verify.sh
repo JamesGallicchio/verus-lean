@@ -278,12 +278,50 @@ known_translator_bug_pattern_for_wrapper() {
   esac
 }
 
+# Print a compact summary of a verify log: a one-line obligation tally
+# (`N obligations: P ✅  U ❓  F ❌  …`) followed by the name of every
+# non-passing obligation (unknown / fail / encoding-error / timeout), one per
+# line.  Prints nothing when the log has no obligations at all (e.g. a Lean
+# elaboration error before verification began) — the caller's status line and
+# `error:` excerpt cover that case.
+#
+# Result lines are categorized by their ASCII status word (`fail`, `unknown`,
+# `SMT Encoding Error`, `Solver Timeout`) rather than the emoji, so the match
+# does not depend on multi-byte regex handling; anything else counts as a pass.
+summarize_boole_verify_log() {
+  local log="$1"
+  awk '
+    /^Obligation:/ { ob = $0; sub(/^Obligation: */, "", ob); next }
+    /^Result:/ {
+      total++
+      if ($0 ~ /SMT Encoding Error/)  { enc++;     bad[++n] = "🚨 " ob }
+      else if ($0 ~ /Solver Timeout/) { timeout++; bad[++n] = "⌛ " ob }
+      else if ($0 ~ /unknown/)        { unknown++; bad[++n] = "❓ " ob }
+      else if ($0 ~ /fail/)           { fail++;    bad[++n] = "❌ " ob }
+      else                            { pass++ }
+      next
+    }
+    END {
+      if (total == 0) exit 0
+      printf "  %d obligations: %d ✅", total, pass
+      if (unknown) printf "  %d ❓", unknown
+      if (fail)    printf "  %d ❌", fail
+      if (enc)     printf "  %d 🚨", enc
+      if (timeout) printf "  %d ⌛", timeout
+      printf "\n"
+      for (i = 1; i <= n; i++) printf "    %s\n", bad[i]
+    }
+  ' "$log"
+}
+
 # Run `lake env lean` on a Boole .lean wrapper and emit a concise per-file
 # status line. Returns non-zero only on genuine failure (not on skip / known
 # translator bug).
 # $1 = wrapper path
-# $2 = output mode: "full" (stream lake output) or "concise" (summary only)
-# $3 = verbose flag (true/false); concise still streams if verbose
+# $2 = output mode: "full" (print the obligation summary) or "concise"
+#      (one-line per-file status only)
+# $3 = verbose flag (true/false); when true, stream the full per-obligation
+#      lake log instead of the summary (applies to either output mode)
 run_boole_verify() {
   local lean_file="$1"
   local output_mode="${2:-concise}"
@@ -303,8 +341,10 @@ run_boole_verify() {
   (cd "$STRATA_DIR" && lake env lean "$lean_file") >"$verify_log" 2>&1
   rc=$?
   set -e
-  if [ "$output_mode" = "full" ] || [ "$verbose" = "true" ]; then
+  if [ "$verbose" = "true" ]; then
     cat "$verify_log"
+  elif [ "$output_mode" = "full" ]; then
+    summarize_boole_verify_log "$verify_log"
   fi
   category="$(classify_boole_verify_log "$verify_log" "$rc" "$expected_fail_pattern" "$known_translator_bug_pattern")"
   case "$category" in
