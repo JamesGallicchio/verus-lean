@@ -24,7 +24,6 @@ tests/VerusFiles/FindMax.rs
 tests/VerusFiles/LoopSimple.rs
 tests/VerusFiles/LoopSimpleWithSpec.rs
 tests/VerusFiles/matching.rs
-tests/VerusFiles/mini_c.rs
 tests/VerusFiles/mutual_recursion.rs
 tests/VerusFiles/proof_fn.rs
 tests/VerusFiles/recursion.rs

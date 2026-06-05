@@ -593,6 +593,15 @@ def numBinopEmit (domain : NumDomain) (op : BinaryOp) (l r : BExpr) :
         pure (applyBvBitOp opW opName l r)
     | _ => pure (applyBinaryOp op l r)
 
+/-- Extract a constant non-negative shift amount, peeling Box/Unbox/Clip
+    wrappers.  Used by rule ④ to lower an int-modeled `x >> k` / `x << k` to
+    int `x / 2^k` / `x * 2^k`. -/
+private partial def constShiftAmount? : Exp → Option Nat
+  | .Const (.Int k) _ => if k ≥ 0 then some k.toNat else none
+  | .Unary (.Box _) e | .Unary (.Unbox _) e | .Unary (.Clip _ _) e =>
+    constShiftAmount? e
+  | _ => none
+
 mutual
 
 private partial def comparisonPrelude
@@ -748,6 +757,21 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     | some result => return result
     | none => throw s!"unsupported comparison: {repr cmp} in domain {repr domain}"
   | .Binary op lhs rhs => do
+    -- Rule ④: an int-modeled bit-shift (e.g. on a `u128` accumulator) has no
+    -- bitvector form, so lower it to int arithmetic — `x >> k → x / 2^k`,
+    -- `x << k → x * 2^k` — by rewriting to the synthetic arith op and taking
+    -- the int path below.  Sound for the non-negative, in-range values such an
+    -- accumulator holds.  Gated on the VALUE operand being int-modeled, so
+    -- ordinary bitvector shifts are unaffected.
+    if (inferComparableTyp? env bound lhs).bind numKindOfTyp? == some .int then
+      match op, constShiftAmount? rhs with
+      | .Bitwise (.Shr _) mode, some k =>
+        return ← expToBoole env bound expected?
+          (.Binary (.Arith .EuclideanDiv mode) lhs (.Const (.Int ((2 : Int) ^ k)) Typ.Int))
+      | .Bitwise (.Shl _ _) mode, some k =>
+        return ← expToBoole env bound expected?
+          (.Binary (.Arith .Mul mode) lhs (.Const (.Int ((2 : Int) ^ k)) Typ.Int))
+      | _, _ => pure ()
     -- Run arith in `int` when the context demands int or any subtree
     -- mixes int and bv operands. Otherwise bv overflow corrupts the
     -- post-hoc `bv*_to_int_u` wrap (`n == 2^64 - 1` ↦ `bv64_to_int_u(n
@@ -799,6 +823,20 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | none, some e =>
         if hasMixedSignedBitArgs then none else some e
       | none, none => none
+    -- A shift's operating width is its VALUE (lhs) operand's width, and the
+    -- amount (rhs) must match it (SMT `bvshl`/`bvlshr` require equal-width
+    -- operands).  A two-constant shift like `1u64 << 51` leaves
+    -- `lhsInfo?`/`rhsInfo?` = none (no `.Const` case in `inferBitInfo`) ⇒
+    -- `info? = none`, so each side would emit at its own VLIR width
+    -- (`bv64 << bv32`), which Strata rejects.  Pin the width from the lhs type
+    -- so `argTy?` forces both operands — value and amount — to it.
+    let info? :=
+      match op with
+      | .Bitwise (.Shl _ _) _ | .Bitwise (.Shr _) _ =>
+        let lhsTy? := inferComparableTyp? env bound lhs <|>
+          (match lhs with | .Const _ t => some t | _ => none)
+        info? <|> lhsTy?.bind bitInfoOfTyp
+      | _ => info?
     let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
     -- Preserve narrow-then-widen for Verus's bit-vector proof mode: only
     -- push `argTy?` when the operand has no natural bv width of its own
@@ -818,99 +856,77 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         | .Bitwise _ _ => NumDomain.bv usizeBitWidth false
         | _ => NumDomain.int
     match ← numBinopEmit domain op l r with
-    | some result => return result
+    | some result =>
+      -- Honor an int/nat result context even when the op lowered to bv.  A
+      -- bitwise/shift op has no int form, so it emits bv; when the surrounding
+      -- expression is int-modeled it must be cast up (e.g. `(1u64 << 54)` inside
+      -- `77 * ((1u64<<54)*(1u64<<54)) <= u128::MAX` — B1 `mul_boundary_spec`).
+      -- Only fires for an int/nat expected kind, so pure-bv/none contexts are
+      -- byte-for-byte unchanged.
+      match expectedKind? with
+      | some .int | some .nat =>
+        let domainKind : Option NumKind := match domain with
+          | .int => some .int
+          | .nat => some .nat
+          | .bv w s => some (.bv w s)
+        coerceNumeric domainKind expectedKind? result
+      | _ => return result
     | none => throw s!"unsupported binary op: {repr op} in domain {repr domain}"
   | .Unary op e => do
     let x ←
       match op with
-      | .Clip (.U w) _ =>
-        -- When the surrounding context already expects int (e.g. a
-        -- `Sequence.select` index, or a mod whose `arithRunsInInt`
-        -- fired), the Verus-inserted `Clip USize` overflow check is
-        -- redundant — int doesn't overflow.  Pass the inner through
-        -- directly with `expected? = some .Int` so loop-counter
-        -- arithmetic stays purely in int.
-        if expected? == some Typ.Int then
-          expToBoole env bound (some Typ.Int) e
-        else
-        let targetW := w.toNat
-        let innerInfo? := inferBitInfo env bound e
-        let isWidening := match innerInfo? with
-          | some (iw, _) => decide (iw < targetW) | none => false
-        let hint? := if isWidening then
-          innerInfo?.map (fun (iw, s) => if s then Typ.SInt iw else Typ.UInt iw)
-        else
-          some (.UInt targetW)
-        let x0 ← expToBoole env bound hint? e
-        if isSupportedBvWidth targetW then
-          coerceBvBv innerInfo? (some (targetW, false)) x0
-        else
-          pure x0
-      | .Clip .USize _ =>
-        if expected? == some Typ.Int then
-          expToBoole env bound (some Typ.Int) e
-        else
-        let targetW := usizeBitWidth
-        let innerInfo? := inferBitInfo env bound e
-        let isWidening := match innerInfo? with
-          | some (iw, _) => decide (iw < targetW) | none => false
-        let hint? := if isWidening then
-          innerInfo?.map (fun (iw, s) => if s then Typ.SInt iw else Typ.UInt iw)
-        else
-          some .USize
-        let x0 ← expToBoole env bound hint? e
-        coerceBvBv innerInfo? (some (targetW, false)) x0
-      | .Clip (.I w) _ =>
-        if expected? == some Typ.Int then
-          expToBoole env bound (some Typ.Int) e
-        else
-        let targetW := w.toNat
-        let innerInfo? := inferBitInfo env bound e
-        let isWidening := match innerInfo? with
-          | some (iw, _) => decide (iw < targetW) | none => false
-        let hint? := if isWidening then
-          innerInfo?.map (fun (iw, s) => if s then Typ.SInt iw else Typ.UInt iw)
-        else
-          some (.SInt targetW)
-        let x0 ← expToBoole env bound hint? e
-        if isSupportedBvWidth targetW then
-          coerceBvBv innerInfo? (some (targetW, true)) x0
-        else
-          pure x0
-      | .Clip .ISize _ =>
-        if expected? == some Typ.Int then
-          expToBoole env bound (some Typ.Int) e
-        else
-        let targetW := usizeBitWidth
-        let innerInfo? := inferBitInfo env bound e
-        let isWidening := match innerInfo? with
-          | some (iw, _) => decide (iw < targetW) | none => false
-        let hint? := if isWidening then
-          innerInfo?.map (fun (iw, s) => if s then Typ.SInt iw else Typ.UInt iw)
-        else
-          some .ISize
-        let x0 ← expToBoole env bound hint? e
-        coerceBvBv innerInfo? (some (targetW, true)) x0
-      | .Clip .Nat _ =>
-        -- `x as nat`: translate the inner at the clip's target numeric kind.
-        --   • outer wants int → translate at int and pass through (Verus has
-        --     already checked the source nat cast, so no clamp is needed;
-        --     this also avoids a redundant `nat.toInt(nat.fromInt(...))`).
-        --   • outer wants bv  → translate at int, then int→bv.
-        --   • otherwise (nat) → translate the inner directly at `Nat`.  Nat
-        --     leaves stay nat; bv/int leaves coerce to nat at the leaf; and
-        --     nat-result `Add`/`Mul` fold to `nat.add`/`nat.mul` (see the
-        --     `.Binary` arm) instead of the old `nat.fromInt(nat.toInt(a) +
-        --     nat.toInt(b))` int round-trip.  The mixed case
-        --     `(bytes[i] as nat) + pow2(..)*rec` still works: the bv leaf
-        --     coerces bv→nat on its own rather than relying on running the
-        --     whole sum in int.
-        match expected?.bind numKindOfTyp? with
-        | some .int => expToBoole env bound (some Typ.Int) e
-        | some (.bv w signed) => do
-          let x ← expToBoole env bound (some Typ.Int) e
-          coerceNumeric (some .int) (some (.bv w signed)) x
-        | _ => expToBoole env bound (some Typ.Nat) e
+      | .Clip range _ =>
+        -- Numeric cast (rule ③).  The target type's modeled *domain*
+        -- (`numKindOfTyp?`) decides the handling, covering widening, narrowing,
+        -- and `as int` uniformly:
+        --   • int-modeled target (`u128`/`i128`, or `as int`): compute the inner
+        --     in int — no wrap — then coerce to the outer expected.
+        --   • `as nat`: inner at nat, or int/bv per the outer expected.
+        --   • bv-width target (`u8`..`u64`/`usize`/`isize`): if the outer wants
+        --     int the overflow clip is redundant (int doesn't overflow) → pass
+        --     through int; else if the inner is int-modeled, recompute in int and
+        --     cast int→bv; else bv→bv with narrow-then-widen.
+        let targetTy : Typ := match range with
+          | .U w => .UInt w.toNat
+          | .I w => .SInt w.toNat
+          | .USize => .USize
+          | .ISize => .ISize
+          | .Int => .Int
+          | .Nat => .Nat
+          -- `as char` / non-numeric target: `numKindOfTyp?` is `none`, so the
+          -- `none` branch below passes the inner through (the old catch-all).
+          | .Char => .Char
+        match numKindOfTyp? targetTy with
+        | some .int =>
+          let inner ← expToBoole env bound (some Typ.Int) e
+          coerceNumeric (some .int) (expected?.bind numKindOfTyp?) inner
+        | some .nat =>
+          match expected?.bind numKindOfTyp? with
+          | some .int => expToBoole env bound (some Typ.Int) e
+          | some (.bv w signed) => do
+            let x ← expToBoole env bound (some Typ.Int) e
+            coerceNumeric (some .int) (some (.bv w signed)) x
+          | _ => expToBoole env bound (some Typ.Nat) e
+        | some (.bv tw ts) =>
+          if expected? == some Typ.Int then
+            expToBoole env bound (some Typ.Int) e
+          else
+            let innerInfo? := inferBitInfo env bound e
+            match innerInfo? with
+            | none =>
+              -- inner has no bv width ⇒ int-modeled (e.g. a `u128` narrowed by
+              -- `as u64`): recompute in int and cast int→bv (`coerceBvBv` can't).
+              let xi ← expToBoole env bound (some Typ.Int) e
+              coerceNumeric (some .int) (some (.bv tw ts)) xi
+            | some _ =>
+              let isWidening := match innerInfo? with
+                | some (iw, _) => decide (iw < tw) | none => false
+              let hint? := if isWidening then
+                innerInfo?.map (fun (iw, s) => if s then Typ.SInt iw else Typ.UInt iw)
+              else some targetTy
+              let x0 ← expToBoole env bound hint? e
+              coerceBvBv innerInfo? (some (tw, ts)) x0
+        | none => expToBoole env bound expected? e
       | .Unbox t => do
         let inner ← expToBoole env bound (some t) e
         let srcKind? := numKindOfTyp? t

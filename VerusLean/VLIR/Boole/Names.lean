@@ -11,9 +11,18 @@ namespace VerusLean.Boole.Names
 
 open VerusLean
 
+/-- Boole/Core reserved keywords that are also valid Rust identifiers, so a
+    source name spelled like one collides with the grammar (e.g. a local named
+    `out` clashes with the `out`/`inout` call-argument modifiers, a type named
+    `type` with the `type` keyword).  Such names are suffixed with `_` on
+    emission.  Extend as further collisions surface. -/
+def strataReservedIdents : List String :=
+  ["type", "out", "inout"]
+
 /-- Sanitize an identifier for Boole emission.
     First char: [A-Za-z_], rest: [A-Za-z0-9_'?!].
-    Characters outside this set are replaced by `_`. -/
+    Characters outside this set are replaced by `_`, and a name that lands on a
+    reserved keyword is suffixed with `_`. -/
 def sanitizeIdent (s : String) : String :=
   match s.toList with
   | [] => "_"
@@ -21,8 +30,8 @@ def sanitizeIdent (s : String) : String :=
     let first := if c.isAlpha || c == '_' then c else '_'
     let rest := cs.map (fun c =>
       if c.isAlphanum || c == '_' || c == '\'' || c == '?' || c == '!' then c else '_')
-    let out := String.ofList (first :: rest)
-    if out == "type" then "type_" else out
+    let ident := String.ofList (first :: rest)
+    if strataReservedIdents.contains ident then ident ++ "_" else ident
 
 /-- Drop the leading namespace segment from a dotted/double-colon identifier. -/
 def stripLeadingNamespace (s : String) : String :=

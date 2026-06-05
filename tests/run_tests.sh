@@ -303,6 +303,12 @@ write_boole_wrapper() {
     echo
     echo "open Strata"
     echo
+    # Large generated Boole programs (e.g. field arithmetic) elaborate deeply
+    # through the `#strata` macro; Lean's default `maxRecDepth` (512) overflows
+    # with "maximum recursion depth has been reached".  This only raises the
+    # ceiling, so smaller programs are unaffected.
+    echo "set_option maxRecDepth 100000"
+    echo
     echo "private def ${ident}_program : Strata.Program :="
     echo "#strata"
     echo "program Boole;"

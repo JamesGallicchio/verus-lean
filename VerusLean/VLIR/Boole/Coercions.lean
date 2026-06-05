@@ -56,11 +56,20 @@ inductive NumKind where
   | bv (w : Nat) (signed : Bool)
   deriving DecidableEq, Repr
 
+/-- The modeled numeric *domain* of a type — the single source of truth for
+    coercion decisions.  Every integer type has a domain: widths the Boole
+    backend represents as bitvectors (`supportedBvWidths`) are `.bv`; any wider
+    integer (`u128`/`i128`) has no bitvector model and is modeled as mathematical
+    `int`.  (Contrast `bitInfoOfTyp`, which answers the *different* question
+    "what bitvector width, if any" and stays `none` for `u128` — it is not a bv.)
+    Soundness: modeling `u128`/`i128` as `int` drops wrap-around semantics; it is
+    faithful only when the value provably never wraps, which Verus discharges as
+    a side condition (e.g. the field-mul boundary lemmas). -/
 def numKindOfTyp? : Typ → Option NumKind
   | .Int => some .int
   | .Nat => some .nat
-  | .UInt w => if isSupportedBvWidth w then some (.bv w false) else none
-  | .SInt w => if isSupportedBvWidth w then some (.bv w true) else none
+  | .UInt w => if isSupportedBvWidth w then some (.bv w false) else some .int
+  | .SInt w => if isSupportedBvWidth w then some (.bv w true) else some .int
   | .USize => some (.bv usizeBitWidth false)
   | .ISize => some (.bv usizeBitWidth true)
   | .Decorated _ ty => numKindOfTyp? ty
