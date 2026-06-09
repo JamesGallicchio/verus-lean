@@ -19,10 +19,11 @@ namespace VerusLean.Boole.Synth
 
 open Strata
 open Strata.BooleDDM
+open StrataDDM (SourceRange)
 open VerusLean.Boole.Bld
 
-private def ann (v : α) : Strata.Ann α SourceRange := ⟨default, v⟩
-private def noLabel : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange := ann none
+private def ann (v : α) : StrataDDM.Ann α SourceRange := ⟨default, v⟩
+private def noLabel : StrataDDM.Ann (Option (BooleDDM.Label SourceRange)) SourceRange := ann none
 
 /-- `Sequence.length(e) == n` — the fixed-size-array length fact.  Verus's
     compile-time `[T; N]` length is lost when the type lowers to `Sequence T`;

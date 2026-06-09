@@ -37,12 +37,14 @@ function nat.mul (a : nat, b : nat) : nat { nat.fromInt(nat.toInt(a) * nat.toInt
 function nat.div (a : nat, b : nat) : nat
   requires nat.toInt(b) != 0;
 { nat.fromInt(nat.toInt(a) div nat.toInt(b)) }
-// `nat.mod` is intentionally commented out — see discussion about whether
-// to expose it.  If reintroduced, route through `nat.fromIntAux` to skip the
-// nonzero-divisor precondition (cvc5 can't always discharge `pow2(N) != 0`
-// cheaply); the result for `mod 0` is then underspecified rather than
-// ill-typed.
-// function nat.mod (a : nat, b : nat) : nat { nat.fromIntAux(nat.toInt(a) mod nat.toInt(b)) }
+// `nat.mod` mirrors `nat.div`: a nonzero-divisor precondition, with the Euclidean
+// remainder non-negative so `nat.fromInt` is well-defined.  The precondition
+// guards the value axiom, so reasoning about a bare `nat.mod` value (e.g. parity
+// under an equality) is limited — callers needing the value cannot treat it
+// transparently — but the prelude stays consistent with `nat.div`.
+function nat.mod (a : nat, b : nat) : nat
+  requires nat.toInt(b) != 0;
+{ nat.fromInt(nat.toInt(a) mod nat.toInt(b)) }
 
 // Nat comparisons
 function nat.lt (a : nat, b : nat) : bool { nat.toInt(a) <  nat.toInt(b) }

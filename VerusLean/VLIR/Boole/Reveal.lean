@@ -13,7 +13,7 @@
   `specFnIsGenericFull` is the gate; `typTypeVars` / `fnTypeParams` are
   reused by translation orchestration to compute Boole `TypeArgs`.
 
-  Pure: no `BuildM`, no BooleDDM emission. The `Strata.Ann`-valued
+  Pure: no `BuildM`, no BooleDDM emission. The `StrataDDM.Ann`-valued
   `mkTypeArgsAnn` (BooleDDM-emitting) stays in `Translate.lean` and
   consumes `fnTypeParams` from here.
 -/

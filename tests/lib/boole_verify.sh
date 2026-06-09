@@ -3,6 +3,18 @@
 #
 # Requires the caller to have set $STRATA_DIR.
 
+# Run a Boole .lean wrapper through Lean and capture its combined output.
+# The Boole language lives in the downstream `StrataBoole` package (it depends
+# on Strata, not the reverse), so Lean runs from that package's context for
+# `import StrataBoole.MetaVerifier` to resolve.
+# Arguments:
+#   $1 = wrapper .lean path
+#   $2 = log file for combined stdout+stderr
+# Returns Lean's exit code.
+run_boole_wrapper() {
+  (cd "$STRATA_DIR/StrataBoole" && lake env lean "$1") >"$2" 2>&1
+}
+
 # Classify a verify log from `lake env lean <wrapper.lean>`.
 # Arguments:
 #   $1 = path to the captured log
@@ -358,7 +370,7 @@ run_boole_verify() {
   fi
   verify_log="$(mktemp)"
   set +e
-  (cd "$STRATA_DIR" && lake env lean "$lean_file") >"$verify_log" 2>&1
+  run_boole_wrapper "$lean_file" "$verify_log"
   rc=$?
   set -e
   if [ "$verbose" = "true" ]; then

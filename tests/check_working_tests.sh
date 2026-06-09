@@ -161,7 +161,7 @@ while IFS= read -r line || [ -n "$line" ]; do
       echo "=== Step 3: Strata Boole verify ==="
       verify_log="$(mktemp)"
       set +e
-      (cd "$STRATA_DIR" && lake env lean "$lean_file") >"$verify_log" 2>&1
+      run_boole_wrapper "$lean_file" "$verify_log"
       vrc=$?
       set -e
       # Stream the lake output (indented for visual nesting under the test).

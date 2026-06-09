@@ -14,6 +14,7 @@ namespace VerusLean.Boole.SupportEmit
 
 open Strata
 open Strata.BooleDDM
+open StrataDDM (SourceRange)
 open VerusLean
 open VerusLean.Boole.Bld
 open VerusLean.Boole.Builder
@@ -21,7 +22,7 @@ open VerusLean.Boole.Emit
 open VerusLean.Boole.Support
 open VerusLean.Boole.Context (SupportDecl)
 
-private def ann (v : α) : Strata.Ann α SourceRange := ⟨default, v⟩
+private def ann (v : α) : StrataDDM.Ann α SourceRange := ⟨default, v⟩
 
 abbrev TypeLowerer := Typ → BuildM BType
 
@@ -29,7 +30,7 @@ private def mkCastFnDecl (lowerType : TypeLowerer)
     (name : String) (inputTy outputTy : Typ) : BuildM BCmd := do
   addFreeVars #[name]
   let nameAnn := ann name
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
+  let typeArgs : StrataDDM.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange := ann none
   let inputBinding :=
     BooleDDM.Binding.mkBinding default (ann "x")
       (BooleDDM.TypeP.expr (← lowerType inputTy))
@@ -39,7 +40,7 @@ private def mkCastFnDecl (lowerType : TypeLowerer)
 
 private def mkAbstractTypeDecl (name : String) (params : List String) : BuildM BCmd := do
   addFreeVars #[name]
-  let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+  let args : StrataDDM.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
     if params.isEmpty then ann none
     else
       let bindings := params.toArray.map fun p =>
@@ -56,7 +57,7 @@ private def mkTupleDatatypeDecl : BuildM BCmd := do
   let typeParamBindings : Array (BooleDDM.Binding SourceRange) := #[
     BooleDDM.Binding.mkBinding default (ann "T0") (BooleDDM.TypeP.type default),
     BooleDDM.Binding.mkBinding default (ann "T1") (BooleDDM.TypeP.type default)]
-  let typeArgs : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+  let typeArgs : StrataDDM.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
     ann (some (BooleDDM.Bindings.mkBindings default (ann typeParamBindings)))
   let t0Idx ← resolveFreeVar "T0"
   let t1Idx ← resolveFreeVar "T1"
@@ -64,7 +65,7 @@ private def mkTupleDatatypeDecl : BuildM BCmd := do
     BooleDDM.Binding.mkBinding default (ann "_0") (BooleDDM.TypeP.expr (fvarTy t0Idx))
   let field1 :=
     BooleDDM.Binding.mkBinding default (ann "_1") (BooleDDM.TypeP.expr (fvarTy t1Idx))
-  let ctorArgs : Strata.Ann (Option (Strata.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)) SourceRange :=
+  let ctorArgs : StrataDDM.Ann (Option (StrataDDM.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)) SourceRange :=
     ann (some (ann #[field0, field1]))
   let ctor := BooleDDM.Constructor.constructor_mk default (ann "Tuple_ctor_2") ctorArgs
   let constrList := BooleDDM.ConstructorList.constructorListAtom default ctor
@@ -81,7 +82,7 @@ private def mkSeqZipWithDecl : BuildM BCmd := do
   let typeParamBindings : Array (BooleDDM.TypeVar SourceRange) := #[
     BooleDDM.TypeVar.type_var default (ann "A"),
     BooleDDM.TypeVar.type_var default (ann "B")]
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+  let typeArgs : StrataDDM.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
     ann (some (BooleDDM.TypeArgs.type_args default (ann typeParamBindings)))
   let aTy := tvarTy "A"
   let bTy := tvarTy "B"
@@ -100,7 +101,7 @@ private def mkArrayFillDecl : BuildM BCmd := do
   addFreeVars #[fname]
   let typeParamBindings : Array (BooleDDM.TypeVar SourceRange) := #[
     BooleDDM.TypeVar.type_var default (ann "T")]
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+  let typeArgs : StrataDDM.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
     ann (some (BooleDDM.TypeArgs.type_args default (ann typeParamBindings)))
   let tTy := tvarTy "T"
   let input :=
@@ -118,7 +119,7 @@ private def mkArrayFillDecl : BuildM BCmd := do
 private def mkAbstractPolyFnDecl (name : String) (typeParams : List String)
     (params : List (String × BType)) (retTy : BType) : BuildM BCmd := do
   addFreeVars #[name]
-  let typeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+  let typeArgs : StrataDDM.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
     if typeParams.isEmpty then ann none
     else ann (some (BooleDDM.TypeArgs.type_args default
       (ann (typeParams.toArray.map (fun p => BooleDDM.TypeVar.type_var default (ann p))))))

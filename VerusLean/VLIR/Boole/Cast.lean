@@ -5,7 +5,7 @@
   helpers as free variables and register required support declarations. They
   sit atop the pure-type primitives in `Coercions`, which stay IO-free so
   metadata modules (e.g. `Signatures`) can depend on them without pulling
-  `Strata.Util.IO` transitively.
+  `StrataDDM`'s IO layer transitively.
 -/
 import VerusLean.VLIR.Boole.Bld
 import VerusLean.VLIR.Boole.Builder

@@ -6,7 +6,7 @@
   explicit cast-helper applications instead of retargeting variables.
 
   This module stays pure (no `BuildM`, no IO) so metadata modules such as
-  `Signatures` can depend on it without transitively pulling `Strata.Util.IO`.
+  `Signatures` can depend on it without transitively pulling `StrataDDM`'s IO layer.
   The `BuildM`-valued cast-insertion helpers live in `Cast.lean`.
 -/
 import VerusLean.VLIR.Defs

@@ -9,13 +9,14 @@
     2.  If BooleDDM's surface API evolves, only this file changes.
     3.  SourceRange metadata is defaulted to `default` in one place.
 -/
-import Strata.Languages.Boole.Boole
+import StrataBoole.Boole
 import Strata.Languages.Core.DDMTransform.ASTtoCST
 
 namespace VerusLean.Boole.Builder
 
 open Strata
 open Strata.BooleDDM
+open StrataDDM (SourceRange)
 
 /-! ## Type abbreviations -/
 
@@ -25,7 +26,7 @@ abbrev BStmt := BooleDDM.Statement SourceRange
 abbrev BCmd  := BooleDDM.Command SourceRange
 abbrev BBlock := BooleDDM.Block SourceRange
 
-private def ann (v : α) : Strata.Ann α SourceRange := ⟨default, v⟩
+private def ann (v : α) : StrataDDM.Ann α SourceRange := ⟨default, v⟩
 
 /-! ## Type constructors -/
 
@@ -179,6 +180,12 @@ def seqLength (s : BExpr) : BExpr := .seq_length default unknownTy s
 def seqSelect (s i : BExpr) : BExpr := .seq_select default unknownTy s i
 def seqUpdate (s i v : BExpr) : BExpr := .seq_update default unknownTy s i v
 
+/-- Empty sequence carrying an explicit element type: `Sequence.empty<T>()`.
+    The Core `seq_empty` production embeds the element type in the surface
+    syntax, so element types without a dedicated typed constant (type
+    parameters, structs, …) round-trip through this polymorphic form. -/
+def seqEmpty (elemTy : BType) : BExpr := .seq_empty default elemTy
+
 /-- Old expression (procedure pre-state). -/
 def old (e : BExpr) : BExpr := .old default unknownTy e
 def oldTyped (ty : BType) (e : BExpr) : BExpr := .old default ty e
@@ -215,7 +222,7 @@ def lambdaExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
 
 /-! ## Statement constructors -/
 
-private def mkLabel (label : String) : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange :=
+private def mkLabel (label : String) : StrataDDM.Ann (Option (BooleDDM.Label SourceRange)) SourceRange :=
   if label.isEmpty || label == "||" then
     ann none
   else
@@ -241,7 +248,7 @@ def havocStmt (name : String) : BStmt :=
 
 /-- Build `lhs := choose v : T :: pred;`.  Strata lowers this to
     `havoc lhs; assume pred[v ↦ lhs];` in the verify pipeline (see
-    `Strata/Languages/Boole/Verify.lean`'s `.choose_assign` arm).  The
+    `StrataBoole/Verify.lean`'s `.choose_assign` arm).  The
     `pred` expression must be translated with `v` bound at de Bruijn 0
     so the parser/elaborator picks it up correctly. -/
 def chooseAssignStmt (lhs : String) (v : String) (vTy : BType) (pred : BExpr) : BStmt :=
@@ -280,7 +287,7 @@ private def invsFromArray (invs : Array BExpr) : BooleDDM.Invariants SourceRange
     BooleDDM.Invariants.consInvariants default (ann none) e acc)
     (.nilInvariants default)
 
-def mkMeasure (m : Option BExpr) : Strata.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange :=
+def mkMeasure (m : Option BExpr) : StrataDDM.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange :=
   match m with
   | none => ann none
   | some m => ann (some (.measure_mk default m))

@@ -39,6 +39,7 @@ namespace Translate
 
 open Strata
 open Strata.BooleDDM
+open StrataDDM (SourceRange)
 open VerusLean.Boole.Cast
 open VerusLean.Boole.Coercions
 open VerusLean.Boole.Context
@@ -64,9 +65,9 @@ open VerusLean.Boole.VariantReqs
 -- constructors inside `mutual` blocks).
 open VerusLean.Boole.Bld
 
-private def ann (v : α) : Strata.Ann α SourceRange := ⟨default, v⟩
-private def noLabel : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange := ann none
-private def someLabel (s : String) : Strata.Ann (Option (BooleDDM.Label SourceRange)) SourceRange :=
+private def ann (v : α) : StrataDDM.Ann α SourceRange := ⟨default, v⟩
+private def noLabel : StrataDDM.Ann (Option (BooleDDM.Label SourceRange)) SourceRange := ann none
+private def someLabel (s : String) : StrataDDM.Ann (Option (BooleDDM.Label SourceRange)) SourceRange :=
   ann (some (.label default (ann s)))
 
 /-- Predicate passed to `Normalize.inlineTemps`: which call-function names
@@ -211,7 +212,7 @@ def constToBoole (expected? : Option Typ) : Const → BExpr
 
 /-- BooleDDM-emit shim for `Reveal.fnTypeParams` (uses local `ann`). -/
 private def mkTypeArgsAnn (params : List String) :
-    Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+    StrataDDM.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
   if params.isEmpty then
     ann none
   else
@@ -277,12 +278,16 @@ private def arrayFillExpr (elem : BExpr) : BuildM BExpr := do
   let fillIdx ← resolveFreeVar "Array_array_fill_for_copy_types"
   pure (Bld.app (Bld.fvar fillIdx) elem)
 
-/-- Emit a typed empty-sequence literal.  `elemTy` selects the correct
-    `Sequence.empty_<T>` token; see `seqEmptyTokenName`.  Boole's DDM parser
-    cannot resolve a polymorphic `Sequence.empty` without arguments, so we
-    must commit to an element type at emission time. -/
+/-- Emit an empty-sequence literal for `elemTy`.  Concrete bv/int element
+    types use Boole's dedicated typed constants (`Sequence.empty_<T>`, via
+    `seqEmptyTokenName?`); every other element type — type parameters,
+    structs, … — uses the polymorphic `Sequence.empty<T>()` form, which
+    carries the element type explicitly through the Core `seq_empty`
+    production. -/
 private def seqEmptyExpr (elemTy : Typ) : BuildM BExpr := do
-  pure (Bld.fvar (← resolveFreeVar (seqEmptyTokenName elemTy)))
+  match seqEmptyTokenName? elemTy with
+  | some tok => pure (Bld.fvar (← resolveFreeVar tok))
+  | none => pure (Bld.seqEmpty (← typToBooleType elemTy))
 
 private def seqBuildExpr (seq elem : BExpr) : BuildM BExpr := do
   pure (Bld.appN (Bld.fvar (← resolveFreeVar "Sequence.build")) [seq, elem])
@@ -403,9 +408,9 @@ private def emitSeqMapDecls
   addFreeVars #[emptyName, closureName, recName]
   let elemBTy ← typToBooleType elemTy
   let retBTy ← typToBooleType retTy
-  let noTypeArgs : Strata.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+  let noTypeArgs : StrataDDM.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
     ann none
-  let noSpec : Strata.Ann (Array (BooleDDM.SpecElt SourceRange)) SourceRange :=
+  let noSpec : StrataDDM.Ann (Array (BooleDDM.SpecElt SourceRange)) SourceRange :=
     ann #[]
   -- (1) uninterpreted empty result sequence + length axiom.  Boole has no
   -- typed empty-sequence literal for element types like `nat`, so the empty
@@ -510,15 +515,14 @@ def natCmpFn : InequalityOp → String
   | .Gt => "nat.gt"
 
 /-- Prelude function for a nat-space arithmetic op, or `none` if the op has no
-    nat-native form.  `EuclideanMod` is absent on purpose: there is no
-    `nat.mod` in the prelude (its `b != 0` precondition is unprovable for
-    `pow2(N)` divisors), so mod stays on the int path and re-wraps via
-    `nat.fromInt`. -/
+    nat-native form.  `nat.mod` mirrors `nat.div`: both carry a nonzero-divisor
+    precondition (see `Nat.boole.st`). -/
 def natArithFn? : BinaryOp → Option String
   | .Arith .Add _          => some "nat.add"
   | .Arith .Sub _          => some "nat.sub"
   | .Arith .Mul _          => some "nat.mul"
   | .Arith .EuclideanDiv _ => some "nat.div"
+  | .Arith .EuclideanMod _ => some "nat.mod"
   | _                      => none
 
 /-- The lowering domain of a numeric binary operation: a mathematical `nat`
@@ -537,7 +541,7 @@ inductive NumDomain where
     bv width-inference dance for bv), but emission funnels through here.
 
     Returns `none` when `op` has no lowering in `domain`: bitwise ops on
-    nat/int, and `EuclideanMod` on nat (no `nat.mod`; see `natArithFn?`).
+    nat/int (see `natArithFn?`).
 
     Domain conventions:
       * `nat` → the prelude functions (`natCmpFn` / `natArithFn?`).
@@ -601,6 +605,17 @@ private partial def constShiftAmount? : Exp → Option Nat
   | .Unary (.Box _) e | .Unary (.Unbox _) e | .Unary (.Clip _ _) e =>
     constShiftAmount? e
   | _ => none
+
+/-- For rule ④'s gate only: is the shift's value operand modeled in `int`?  An
+    arithmetic or bitwise binary inherits its left operand's domain, and a
+    literal carries its annotated type.  Kept separate from `inferComparableTyp?`
+    (which also drives the coercion path) so widening shift detection here does
+    not perturb coercion. -/
+private partial def shiftValueIntModeled? (env : VarEnv) (bound : BoundEnv) : Exp → Bool
+  | .Binary (.Arith _ _) l _   => shiftValueIntModeled? env bound l
+  | .Binary (.Bitwise _ _) l _ => shiftValueIntModeled? env bound l
+  | .Const _ ty                => numKindOfTyp? ty == some .int
+  | e                          => (inferComparableTyp? env bound e).bind numKindOfTyp? == some .int
 
 mutual
 
@@ -763,7 +778,7 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     -- the int path below.  Sound for the non-negative, in-range values such an
     -- accumulator holds.  Gated on the VALUE operand being int-modeled, so
     -- ordinary bitvector shifts are unaffected.
-    if (inferComparableTyp? env bound lhs).bind numKindOfTyp? == some .int then
+    if shiftValueIntModeled? env bound lhs then
       match op, constShiftAmount? rhs with
       | .Bitwise (.Shr _) mode, some k =>
         return ← expToBoole env bound expected?
@@ -783,12 +798,23 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     -- `Nat`, so where `nat.sub`/`nat.div` carry preconditions (`b <= a` /
     -- `b != 0`), those are exactly the obligations Verus discharges at the
     -- source — surfaced faithfully rather than hidden behind an int
-    -- round-trip.  `EuclideanMod` stays on the int path (see `natArithFn?`).
-    match (if expectedKind? == some .nat then natArithFn? op else none) with
+    -- round-trip.  `EuclideanMod` additionally fires on nat operand types:
+    -- unlike `*`/`+`, a `nat % p` carries no nat-clip, so under an equality
+    -- (`a % p == b % p`) there is no expected-nat hint to catch it.  Restricted
+    -- to mod so `nat.sub`/`nat.div` keep their expected-driven firing; `nat.mod`'s
+    -- `b != 0` obligation is then surfaced faithfully, like `nat.div`.
+    let natModByOperands :=
+      (op matches .Arith .EuclideanMod _) &&
+      inferComparisonNumKind env bound lhs == some .nat &&
+      inferComparisonNumKind env bound rhs == some .nat
+    match (if expectedKind? == some .nat || natModByOperands then natArithFn? op else none) with
     | some _ =>
       let (l, r) ← prepScalarOperands env bound Typ.Nat lhs rhs
       match ← numBinopEmit .nat op l r with
-      | some result => return result
+      -- Coerce the nat-domain result to the caller's expected kind: a `nat`
+      -- result feeding an int/bv context (e.g. `(n % 2) as u8`, or `n % 2 == 0`
+      -- under the int-fallback) must be `nat.toInt`-wrapped, not left as `nat`.
+      | some result => return ← coerceNumeric (some .nat) expectedKind? result
       | none => throw s!"nat lowering missing for {repr op}"
     | none => pure ()
     let arithRunsInInt :=
@@ -1441,7 +1467,7 @@ abbrev expToBooleFlat (env : VarEnv) (expected? : Option Typ) (e : Exp) :
     as `_decr` in `Verify.lean`).  Returns `mkMeasure none` when the list
     is empty or shaped unexpectedly. -/
 private def decreasesToMeasureAnn (env : VarEnv) (decreases : List Stm) :
-    BuildM (Strata.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange) := do
+    BuildM (StrataDDM.Ann (Option (BooleDDM.Measure SourceRange)) SourceRange) := do
   match decreases with
   | [] => pure (Bld.mkMeasure none)
   | (.Assign _ _ rhs _) :: _ =>
@@ -2286,14 +2312,13 @@ private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
   let elemTy' ← typToBooleType elemTy
   let nTy' ← typToBooleType nTy
   let seqBuildIdx ← resolveFreeVar "Sequence.build"
-  -- Pick the typed empty matching the Vec element type captured from
-  -- the procedure inputs.
-  let seqEmptyIdx ← resolveFreeVar (seqEmptyTokenName elemTy)
   let seqSelectIdx ← resolveFreeVar "Sequence.select"
   let zeroInt := intConst 0
   let zeroBv := bitvecConstNat usizeBitWidth 0
   let oneBv := bitvecConstNat usizeBitWidth 1
-  let initEmptyExpr := Bld.fvar seqEmptyIdx
+  -- The empty seed matches the Vec element type captured from the procedure
+  -- inputs; a polymorphic element type renders as `Sequence.empty<T>()`.
+  let initEmptyExpr ← seqEmptyExpr elemTy
   let initStmt := setStmtTyped retTy (sanitizeVarName f.retName) initEmptyExpr
   let loopVarName := "i"
   let loopStmt ← withScope do
@@ -2492,13 +2517,60 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
     they reference are already declared). -/
 def structToBoole (s : Struct) : BuildM (Array BCmd) := do
   let dtName := datatypeNameOf s.name
+  -- Wrapper-datatype trick: a single-field struct whose one field is a
+  -- fixed-size array `[T; N]` is modeled as a *transparent* type synonym
+  -- `<dt> := Sequence T` with an identity constructor and an identity
+  -- destructor function, rather than an opaque datatype.  The opaque-datatype
+  -- form needs a global length axiom `∀ s :: length(<dt>..<field>(s)) == N` to
+  -- recover Verus's compile-time array length, but that axiom is unsound on a
+  -- total constructor (it asserts every `Sequence T` has length `N`, e.g.
+  -- `length(emptySeq) == 5`).  Here the length invariant rides on the ctor's
+  -- `requires` instead, and an arbitrary `<dt>` is correctly *not* known to
+  -- have length `N`.  Use sites are unchanged: the destructor is still named
+  -- `<dt>..<field>` and the constructor `<dt>_ctor`.
+  if let [(fname, fty)] := s.fields then
+    if let some n := arrayFixedLen? fty then
+      let ctorName := structCtorNameOf s.name
+      let destructorName := datatypeDestructorNameOf s.name fname
+      addFreeVars #[dtName, ctorName, destructorName]
+      let elemBTy ← typToBooleType fty
+      -- `command_typesynonym` takes type parameters as `Bindings`; the
+      -- function commands take them as `TypeArgs` (`mkTypeArgsAnn`).
+      let synTypeArgs : StrataDDM.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+        if s.typeParams.isEmpty then ann none
+        else
+          let bindings := s.typeParams.toArray.map fun param =>
+            BooleDDM.Binding.mkBinding default (ann (sanitizeIdent param)) (BooleDDM.TypeP.type default)
+          ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
+      let fnTypeArgs := mkTypeArgsAnn s.typeParams
+      -- `type <dt> := Sequence T;`
+      let synCmd : BCmd :=
+        .command_typesynonym default (ann dtName) synTypeArgs (ann none) elemBTy
+      -- A single binding `<field> : Sequence T`, shared (by name) between the
+      -- constructor and the destructor; the bodies are the identity `<field>`.
+      let bindings := BooleDDM.Bindings.mkBindings default (ann #[
+        BooleDDM.Binding.mkBinding default (ann (fieldAccessorNameOf fname))
+          (BooleDDM.TypeP.expr elemBTy)])
+      let identityBody := Bld.bvar 0
+      -- `function <dt>_ctor (<field> : Sequence T) : <dt>
+      --    requires Sequence.length(<field>) == N; { <field> }`
+      let ctorReq : BooleDDM.SpecElt SourceRange :=
+        .requires_spec default noLabel (ann none) (Synth.fixedArrayLenFact identityBody n)
+      let ctorCmd : BCmd :=
+        .command_fndef default (ann ctorName) fnTypeArgs bindings elemBTy
+          (ann #[ctorReq]) identityBody (ann none)
+      -- `function <dt>..<field> (<field> : Sequence T) : Sequence T { <field> }`
+      let destructorCmd : BCmd :=
+        .command_fndef default (ann destructorName) fnTypeArgs bindings elemBTy
+          (ann #[]) identityBody (ann none)
+      return #[synCmd, ctorCmd, destructorCmd]
   addFreeVars #[dtName]
   let ctorName := structCtorNameOf s.name
   let testerName := s!"{dtName}..is{ctorName}"
   let fieldNames := s.fields.map (fun (f, _) => fieldAccessorNameOf f)
   addFreeVars (#[ctorName, testerName] ++ fieldNames.toArray)
   let constrArgs ← if s.fields.isEmpty then
-    pure (ann (none : Option (Strata.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)))
+    pure (ann (none : Option (StrataDDM.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)))
   else do
     let bindings ← s.fields.toArray.mapM fun (fname, ty) => do
       let ty' ← typToBooleType ty
@@ -2506,7 +2578,7 @@ def structToBoole (s : Struct) : BuildM (Array BCmd) := do
     pure (ann (some (ann bindings)))
   let constr := BooleDDM.Constructor.constructor_mk default (ann ctorName) constrArgs
   let constrList := BooleDDM.ConstructorList.constructorListAtom default constr
-  let typeArgs : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+  let typeArgs : StrataDDM.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
     if s.typeParams.isEmpty then ann none
     else
       let bindings := s.typeParams.toArray.map fun param =>
@@ -2548,7 +2620,7 @@ def enumToBoole (e : Enum) : BuildM BCmd := do
   if e.fields.isEmpty then
     if dtName == "Slice_Iter_iter" then
       requireSupport .tuple
-      let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+      let args : StrataDDM.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
         ann (some (BooleDDM.Bindings.mkBindings default (ann #[
           BooleDDM.Binding.mkBinding default (ann "T") (BooleDDM.TypeP.type default)])))
       let tupleIdx ← resolveFreeVar "Tuple"
@@ -2556,7 +2628,7 @@ def enumToBoole (e : Enum) : BuildM BCmd := do
       pure (.command_typesynonym default (ann dtName) args (ann none) rhs)
     else
     -- Abstract type
-      let args : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+      let args : StrataDDM.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
         if e.typeParams.isEmpty then ann none
         else
           let bindings := e.typeParams.toArray.map fun param =>
@@ -2581,7 +2653,7 @@ def enumToBoole (e : Enum) : BuildM BCmd := do
       match field with
       | .labeled variant data =>
         let constrArgs ← if data.isEmpty then
-          pure (ann (none : Option (Strata.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)))
+          pure (ann (none : Option (StrataDDM.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)))
         else do
           let bindings ← data.toArray.mapM fun (fname, ty) => do
             let ty' ← typToBooleType ty
@@ -2591,7 +2663,7 @@ def enumToBoole (e : Enum) : BuildM BCmd := do
         pure (BooleDDM.Constructor.constructor_mk default (ann (enumCtorNameOf e.name variant)) constrArgs)
       | .tuple variant ts =>
         let constrArgs ← if ts.isEmpty then
-          pure (ann (none : Option (Strata.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)))
+          pure (ann (none : Option (StrataDDM.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)))
         else do
           let bindings ← ts.zipIdx.toArray.mapM fun (ty, i) => do
             let ty' ← typToBooleType ty
@@ -2607,7 +2679,7 @@ def enumToBoole (e : Enum) : BuildM BCmd := do
         constrs[1:].foldl
           (fun acc c => BooleDDM.ConstructorList.constructorListPush default acc c)
           (BooleDDM.ConstructorList.constructorListAtom default constrs[0]!)
-    let typeArgs : Strata.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
+    let typeArgs : StrataDDM.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
       if e.typeParams.isEmpty then ann none
       else
         let bindings := e.typeParams.toArray.map fun param =>

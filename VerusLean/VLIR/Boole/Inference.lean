@@ -155,23 +155,21 @@ def setElemTyp? : Typ → Option Typ
   | .Decorated _ ty => setElemTyp? ty
   | _ => none
 
-/-- Boole exposes typed empty-sequence constants per element type
-    (`Sequence.empty_bv32`, `Sequence.empty_int`, etc.) because the DDM
-    parser cannot resolve the polymorphic `Sequence.empty` without
-    arguments — see `seq_empty_*` in `Strata/Languages/Boole/Grammar.lean`.
-    Pick the right token for the element type, falling back to the bare
-    `"Sequence.empty"` name for element types we haven't covered yet
-    (which the DDM parser will still reject — but the failure mode is
-    explicit and easy to extend here). -/
-partial def seqEmptyTokenName : Typ → String
-  | .Decorated _ ty => seqEmptyTokenName ty
-  | .UInt 8  | .SInt 8  => "Sequence.empty_bv8"
-  | .UInt 16 | .SInt 16 => "Sequence.empty_bv16"
-  | .UInt 32 | .SInt 32 => "Sequence.empty_bv32"
-  | .UInt 64 | .SInt 64 => "Sequence.empty_bv64"
-  | .USize | .ISize => "Sequence.empty_bv64"
-  | .Int | .Nat => "Sequence.empty_int"
-  | _ => "Sequence.empty"
+/-- Boole exposes dedicated typed empty-sequence constants for the concrete
+    element types (`Sequence.empty_bv32`, `Sequence.empty_int`, etc.); see
+    `seq_empty_*` in `StrataBoole/Grammar.lean`.  Return that token when the
+    element type has one, or `none` for every other element type (type
+    parameters, structs, …), which `seqEmptyExpr` instead emits through the
+    polymorphic `Sequence.empty<T>()` form. -/
+partial def seqEmptyTokenName? : Typ → Option String
+  | .Decorated _ ty => seqEmptyTokenName? ty
+  | .UInt 8  | .SInt 8  => some "Sequence.empty_bv8"
+  | .UInt 16 | .SInt 16 => some "Sequence.empty_bv16"
+  | .UInt 32 | .SInt 32 => some "Sequence.empty_bv32"
+  | .UInt 64 | .SInt 64 => some "Sequence.empty_bv64"
+  | .USize | .ISize => some "Sequence.empty_bv64"
+  | .Int | .Nat => some "Sequence.empty_int"
+  | _ => none
 
 -- Pair: `bindContainsLambda` / `expContainsLambda`.
 -- Used by `specFnToBoole` to auto-inline spec functions whose body
@@ -382,6 +380,10 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
   | .Binary (.Bitwise (.Shl w _) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Binary (.Bitwise (.Shr w) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Unary _ e => inferBitInfo env bound e
+  -- A comparison produces `bool`, never a bitvector; inheriting the operands'
+  -- bv width here makes an enclosing comparison mis-coerce the bool result
+  -- (e.g. `(u == 1u8) == choice_is_true(c)` would coerce `(u == 1)` to int).
+  | .Binary (.Eq _) _ _ | .Binary .Ne _ _ | .Binary (.Inequality _) _ _ => none
   | .Binary _ e1 e2 => inferBitInfo env bound e1 <|> inferBitInfo env bound e2
   | .If _ t f => inferBitInfo env bound t <|> inferBitInfo env bound f
   | _ => none
@@ -426,13 +428,14 @@ def inferNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=
   match inferBitInfo env bound e with
   | some (w, s) => some (.bv w s)
   | none =>
-    match inferComparableTyp? env bound e with
-    | some .Int => some .int
-    | some .Nat => some .nat
-    | _ =>
-      match e with
-      | .Const _ ty => numKindOfTyp? ty
-      | _ => none
+    -- `inferBitInfo` already yields the supported bv widths, so here the type is
+    -- int/nat or an unsupported-width int (e.g. `u128`). Classifying through
+    -- `numKindOfTyp?` applies rule ① uniformly — an unsupported width is `int`,
+    -- matching how it is modeled — instead of falling through to `none`.
+    (inferComparableTyp? env bound e).bind numKindOfTyp? <|>
+      (match e with
+       | .Const _ ty => numKindOfTyp? ty
+       | _ => none)
 
 private structure ArithFootprint where
   hasMathInt : Bool := false
@@ -465,6 +468,12 @@ private def ArithFootprint.isMixed (f : ArithFootprint) : Bool :=
 partial def arithFootprint (env : VarEnv) (bound : BoundEnv) : Exp → ArithFootprint
   | .Binary (.Arith _ _) lhs rhs =>
     (arithFootprint env bound lhs).merge (arithFootprint env bound rhs)
+  | .Binary (.Bitwise _ _) lhs rhs =>
+    -- A bitwise/shift result inherits its operands' domain: an int-modeled
+    -- `u128 << k` is int (rule ④ lowers it to `· / 2^k` later), a `bv64 & m` is
+    -- bv.  Recursing — as in the `.Arith` case — lets a `(u128 << k) + bv64`
+    -- mix surface, instead of the whole shift reading as opaque (`{}`).
+    (arithFootprint env bound lhs).merge (arithFootprint env bound rhs)
   | .Unary (.Box t) _ | .Unary (.Unbox t) _ =>
     ArithFootprint.ofNumKind (numKindOfTyp? t)
   | .Unary (.Clip .Int _) _ | .Unary (.Clip .Nat _) _ =>
@@ -477,10 +486,24 @@ partial def arithFootprint (env : VarEnv) (bound : BoundEnv) : Exp → ArithFoot
   -- Without this recursion, Clip USize on a mixed-arith subtree looks
   -- pure-bv via `inferBitInfo`'s Clip case, hiding the mix.
   | .Unary (.Clip _ _) e => arithFootprint env bound e
-  | .Const _ t =>
+  | .Const c t =>
     match numKindOfTyp? t with
     | some (.bv ..) => { hasBv := true }
-    | _ => {}
+    | some _ =>
+      -- An explicit fixed-width int type whose width is unsupported (e.g. `u128`,
+      -- modeled as int), or a literal whose value is too large for any supported
+      -- bv width, is definitely int — contribute hasMathInt so a mix like
+      -- `u128_literal + bv64` or `2^108 + bv64` is detected. A small bare
+      -- `.Int`/`.Nat` literal stays context-determined ({}), since Verus often
+      -- serializes it with a default type even where the surrounding context
+      -- constrains it to a bv width.
+      match t with
+      | .UInt _ | .SInt _ => { hasMathInt := true }
+      | _ =>
+        match c with
+        | .Int v => if v.natAbs ≥ (2 : Nat) ^ 64 then { hasMathInt := true } else {}
+        | _ => {}
+    | none => {}
   | e =>
     ArithFootprint.ofNumKind (inferNumKind env bound e)
 

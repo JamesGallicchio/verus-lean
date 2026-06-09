@@ -18,3 +18,4 @@ lean_exe VerusParser where
   root := `VerusLean.VLIRParser
 
 require Strata from "../Strata"
+require StrataBoole from "../Strata/StrataBoole"

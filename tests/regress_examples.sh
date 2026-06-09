@@ -253,7 +253,7 @@ for target in "${targets[@]}"; do
 
   verify_log="$(mktemp "$REGRESSION_LOGS_DIR/verify.XXXXXX.log")"
   set +e
-  (cd "$STRATA_DIR" && lake env lean "$lean_file") >"$verify_log" 2>&1
+  run_boole_wrapper "$lean_file" "$verify_log"
   vrc=$?
   set -e
   category="$(classify_boole_verify_log \

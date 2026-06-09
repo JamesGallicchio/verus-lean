@@ -299,7 +299,9 @@ write_boole_wrapper() {
   ident="$(lean_ident_from_base "$base")"
   mkdir -p "$(dirname "$out_file")"
   {
-    echo "import Strata.MetaVerifier"
+    # The Boole language lives in the downstream `StrataBoole` package: its
+    # MetaVerifier registers the `Boole` dialect and provides `Strata.Boole.verify`.
+    echo "import StrataBoole.MetaVerifier"
     echo
     echo "open Strata"
     echo
@@ -309,7 +311,7 @@ write_boole_wrapper() {
     # ceiling, so smaller programs are unaffected.
     echo "set_option maxRecDepth 100000"
     echo
-    echo "private def ${ident}_program : Strata.Program :="
+    echo "private def ${ident}_program : StrataDDM.Program :="
     echo "#strata"
     echo "program Boole;"
     sed '1{/^[[:space:]]*program [A-Za-z][A-Za-z]*;.*$/d;}' "$program_file"

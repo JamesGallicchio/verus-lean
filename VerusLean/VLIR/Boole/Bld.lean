@@ -23,7 +23,7 @@ export VerusLean.Boole.Builder (
   bvAdd bvSub bvMul bvUDiv bvUMod bvSDiv bvSMod bvNeg
   bvAnd bvOr bvXor bvNot bvShl bvUShr
   bvUle bvUlt bvUge bvUgt bvSle bvSlt bvSge bvSgt
-  mapGet mapSet seqLength seqSelect seqUpdate old oldTyped
+  mapGet mapSet seqLength seqSelect seqUpdate seqEmpty old oldTyped
   forallExpr existsExpr lambdaExpr
   varStmt initStmt setStmt havocStmt chooseAssignStmt
   assertStmt assumeStmt coverStmt callStmt blockStmt setStmtTyped

@@ -7,11 +7,12 @@
   context.
 -/
 import Std.Data.HashSet
-import Strata.Languages.Boole.Boole
+import StrataBoole.Boole
 
 namespace VerusLean.Boole.Context
 
 open Strata
+open StrataDDM (SourceRange)
 
 structure BuildScope where
   boundVars : Array String := #[]

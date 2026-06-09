@@ -1,5 +1,5 @@
 /-
-  Boole.Emit — Assemble BooleDDM commands into a Strata.Program and emit text.
+  Boole.Emit — Assemble BooleDDM commands into a StrataDDM.Program and emit text.
 
   This module owns the final step:  `Array BooleDDM.Command → String`.
   It handles:
@@ -10,9 +10,9 @@
 import VerusLean.VLIR.Boole.Builder
 import VerusLean.VLIR.Boole.Context
 
-import Strata.Languages.Boole.Boole
-import Strata.Languages.Boole.Verify
-import Strata.Util.IO
+import StrataBoole.Boole
+import StrataBoole.Verify
+import StrataDDM
 
 namespace VerusLean.Boole.Emit
 
@@ -81,23 +81,23 @@ def lookupBoundVar (name : String) : BuildM (Option Nat) := do
   pure (findBoundVarIndex? ctx.allBoundVars name)
 
 /-- Convert an array of BooleDDM Commands to Strata Operations. -/
-def commandsToOps (cmds : Array BCmd) : Array Strata.Operation :=
+def commandsToOps (cmds : Array BCmd) : Array StrataDDM.Operation :=
   cmds.map (·.toAst)
 
 /-- Loaded dialect map for Boole. -/
-private def loadedBooleDialects : Strata.Elab.LoadedDialects :=
-  Strata.Elab.LoadedDialects.ofDialects! Strata.Boole_map.toList.toArray
+private def loadedBooleDialects : StrataDDM.Elab.LoadedDialects :=
+  StrataDDM.Elab.LoadedDialects.ofDialects! Strata.Boole_map.toList.toArray
 
-/-- Parse Boole text into a Strata.Program (for prelude loading). -/
-def parseBooleText (text : String) : IO (Except String Strata.Program) := do
-  let fm ← Strata.DialectFileMap.new loadedBooleDialects
-  match ← Strata.Util.readStrataText fm "<generated-boole>" text.toUTF8 with
+/-- Parse Boole text into a StrataDDM.Program (for prelude loading). -/
+def parseBooleText (text : String) : IO (Except String StrataDDM.Program) := do
+  let fm ← StrataDDM.DialectFileMap.new loadedBooleDialects
+  match ← StrataDDM.readStrataText fm "<generated-boole>" text.toUTF8 with
   | .program pgm => pure (.ok pgm)
   | .dialect _ => pure (.error "expected a Boole program, but Strata parsed a dialect")
 
 /-- Load prelude text, parse it, and return its operations + global names. -/
 def loadPrelude (preludeText : String) :
-    IO (Except String (Array Strata.Operation × Array String)) := do
+    IO (Except String (Array StrataDDM.Operation × Array String)) := do
   match ← parseBooleText s!"program Boole;\n\n{preludeText.trimAsciiEnd.toString}\n" with
   | .ok pgm =>
     pure (.ok (pgm.commands, pgm.globalContext.vars.map (·.1)))
@@ -106,7 +106,7 @@ def loadPrelude (preludeText : String) :
 /-- Build a `GlobalContext` from a list of names, in order. Uses
     `GlobalKind.type [] none` as a placeholder kind; the formatter only looks
     up names by index, not by kind. -/
-def buildGlobalContext (names : Array String) : Strata.GlobalContext :=
+def buildGlobalContext (names : Array String) : StrataDDM.GlobalContext :=
   names.foldl (fun ctx name =>
     ctx.ensureDefined name (.type [] none)) {}
 
@@ -119,10 +119,10 @@ def buildGlobalContext (names : Array String) : Strata.GlobalContext :=
     `freeVarNames` is the ordered list of names in our `BuildCtx.allFreeVars`
     — used to construct the `GlobalContext` for Strata's formatter. -/
 def renderProgram
-    (preludeOps bodyOps : Array Strata.Operation)
+    (preludeOps bodyOps : Array StrataDDM.Operation)
     (freeVarNames : Array String) : Except String String :=
   let allOps := preludeOps ++ bodyOps
-  let pgm := Strata.Program.create Strata.Boole_map "Boole" allOps
+  let pgm := StrataDDM.Program.create Strata.Boole_map "Boole" allOps
   match Strata.Boole.getProgram pgm with
   | .error e => .error (toString e)
   | .ok booleProg =>
