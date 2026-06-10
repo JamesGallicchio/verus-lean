@@ -66,12 +66,6 @@ def isTrivialTrueAssert : Stm → Bool
   | .AssertLean (.Const (.Bool true) _) => true
   | _ => false
 
-def isAssertAssumeEcho (a : Stm) (assumed : Exp) : Bool :=
-  match a with
-  | .Assert e => sameExpShape e assumed
-  | .AssertLean e => sameExpShape e assumed
-  | _ => false
-
 def assertQueryModeLabel : AssertQueryMode → String
   | .NonLinear => "nonlinear_query"
   | .BitVector => "bitvector_query"

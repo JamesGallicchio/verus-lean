@@ -36,6 +36,28 @@ def bitInfoOfTyp : Typ → Option (Nat × Bool)
   | .Decorated _ ty => bitInfoOfTyp ty
   | _ => none
 
+/-- Width and signedness of any fixed-width integer type, including widths
+    the backend does not model as bitvectors (`u128`/`i128`).  Contrast
+    `bitInfoOfTyp`, which answers "what bitvector width, if any" and stays
+    `none` for unsupported widths. -/
+def fixedWidthInfoOfTyp : Typ → Option (Nat × Bool)
+  | .UInt w => some (w, false)
+  | .SInt w => some (w, true)
+  | .USize => some (usizeBitWidth, false)
+  | .ISize => some (usizeBitWidth, true)
+  | .Decorated _ ty => fixedWidthInfoOfTyp ty
+  | _ => none
+
+/-- Every value of a `(srcW, srcSigned)` fixed-width type is representable in
+    a `(tgtW, tgtSigned)` fixed-width type — i.e. the cast between them never
+    wraps, so its truncation may be elided. -/
+def fitsFixedWidth (src tgt : Nat × Bool) : Bool :=
+  match src, tgt with
+  | (sw, false), (tw, false) => decide (sw ≤ tw)
+  | (sw, false), (tw, true)  => decide (sw < tw)
+  | (sw, true),  (tw, true)  => decide (sw ≤ tw)
+  | (_,  true),  (_,  false) => false
+
 def isIntTyp : Typ → Bool
   | .Int => true
   | .Decorated _ ty => isIntTyp ty

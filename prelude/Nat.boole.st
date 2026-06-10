@@ -1,9 +1,10 @@
 // Nat prelude — always loaded.
 //
 // Hosts the `nat` type and the explicit `nat.toInt` / `nat.fromInt` API +
-// round-trip axioms.  Lives in its own prelude (instead of the Seq prelude)
-// because translator-emitted nat coercions can appear in any program with
-// `nat`-typed expressions, not just sequence-using ones.
+// round-trip axioms, plus the `int_pow2` helper backing variable-amount
+// shift lowering.  Lives in its own prelude (instead of the Seq prelude)
+// because translator-emitted nat coercions and shift lowerings can appear
+// in any program, not just sequence-using ones.
 
 type nat;
 
@@ -51,3 +52,17 @@ function nat.lt (a : nat, b : nat) : bool { nat.toInt(a) <  nat.toInt(b) }
 function nat.le (a : nat, b : nat) : bool { nat.toInt(a) <= nat.toInt(b) }
 function nat.gt (a : nat, b : nat) : bool { nat.toInt(a) > nat.toInt(b) }
 function nat.ge (a : nat, b : nat) : bool { nat.toInt(a) >= nat.toInt(b) }
+
+// --- Integer powers of two ------------------------------------------------
+// `int_pow2(e)` backs the int-model lowering of bit-shifts whose amount is
+// not a compile-time constant: `x >> e` → `x div int_pow2(e)` and
+// `x << e` → `x * int_pow2(e)` (constant amounts lower directly to a `2^k`
+// integer literal instead).  Uninterpreted with guarded defining axioms;
+// values at negative exponents are unconstrained, matching the source
+// language where shift amounts are non-negative.
+
+function int_pow2 (e : int) : int;
+
+axiom [int_pow2_zero]: int_pow2(0) == 1;
+axiom [int_pow2_succ]: (forall e : int :: 0 <= e ==> int_pow2(e + 1) == 2 * int_pow2(e));
+axiom [int_pow2_pos]:  (forall e : int :: 0 <= e ==> 1 <= int_pow2(e));

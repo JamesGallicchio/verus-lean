@@ -606,6 +606,33 @@ private partial def constShiftAmount? : Exp → Option Nat
     constShiftAmount? e
   | _ => none
 
+/-- Rule ③'s narrowing gate: a cast to a fixed-width integer type whose
+    translation runs in the int domain keeps its wrap-around semantics unless
+    the inner's source type syntactically fits the target — `(x : u128) as u64`
+    is `x mod 2^64`, not `x`.  Unsigned targets wrap with `mod 2^w`; signed
+    targets wrap to the centered range via `(x + 2^(w-1)) mod 2^w - 2^(w-1)`
+    (Euclidean mod, so this is two's-complement reinterpretation).  Inners
+    whose source type cannot be read syntactically — arithmetic trees, calls
+    returning `nat`/`int` — wrap conservatively: eliding on a provable-but-
+    unread bound would silently change the statement (e.g. vstd's
+    `lemma_u128_shr_is_div` companion `(x as u64) % …` facts). -/
+private def clipWrapIntModeled (env : VarEnv) (bound : BoundEnv)
+    (target : Nat × Bool) (e : Exp) (inner : BExpr) : BExpr :=
+  let srcTy? := inferComparableTyp? env bound e <|>
+    (match e with | .Const _ t => some t | _ => none)
+  let fits := match srcTy?.bind fixedWidthInfoOfTyp with
+    | some src => fitsFixedWidth src target
+    | none => false
+  if fits then inner
+  else
+    let (tw, tsigned) := target
+    let full := Bld.intConst ((2 : Int) ^ tw)
+    if tsigned then
+      let half := Bld.intConst ((2 : Int) ^ (tw - 1))
+      Bld.intSub (Bld.intMod (Bld.intAdd inner half) full) half
+    else
+      Bld.intMod inner full
+
 /-- For rule ④'s gate only: is the shift's value operand modeled in `int`?  An
     arithmetic or bitwise binary inherits its left operand's domain, and a
     literal carries its annotated type.  Kept separate from `inferComparableTyp?`
@@ -676,6 +703,24 @@ partial def prepScalarOperands (env : VarEnv) (bound : BoundEnv)
   let l ← expToBoole env bound (some ty) lhs
   let r ← expToBoole env bound (some ty) rhs
   pure (l, r)
+
+/-- Rule ④'s variable-amount form: an int-modeled `x >> e` / `x << e` whose
+    amount `e` is not a compile-time constant lowers through the prelude's
+    `int_pow2` (`prelude/Nat.boole.st`) — `x div int_pow2(e)` /
+    `x * int_pow2(e)`.  Operands are prepared at `Int` exactly like the
+    int-context binary path, and the result coerces to the caller's expected
+    kind.  Sound on the same grounds as the constant form: shift amounts are
+    non-negative at the source, and the int model carries no width
+    truncation. -/
+private partial def intShiftViaPow2 (env : VarEnv) (bound : BoundEnv)
+    (expected? : Option Typ) (arithOp : ArithOp) (mode : Mode) (lhs rhs : Exp) :
+    BuildM BExpr := do
+  let (l, r) ← prepScalarOperands env bound Typ.Int lhs rhs
+  let powIdx ← resolveFreeVar "int_pow2"
+  let powR := Bld.app (Bld.fvar powIdx) r
+  match ← numBinopEmit .int (.Arith arithOp mode) l powR with
+  | some result => coerceNumeric (some .int) (expected?.bind numKindOfTyp?) result
+  | none => throw s!"internal error: int lowering missing for {repr arithOp}"
 
 /-- Translate a VLIR expression to a BooleDDM expression. -/
 partial def expToBoole (env : VarEnv) (bound : BoundEnv)
@@ -773,11 +818,15 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     | none => throw s!"unsupported comparison: {repr cmp} in domain {repr domain}"
   | .Binary op lhs rhs => do
     -- Rule ④: an int-modeled bit-shift (e.g. on a `u128` accumulator) has no
-    -- bitvector form, so lower it to int arithmetic — `x >> k → x / 2^k`,
-    -- `x << k → x * 2^k` — by rewriting to the synthetic arith op and taking
-    -- the int path below.  Sound for the non-negative, in-range values such an
-    -- accumulator holds.  Gated on the VALUE operand being int-modeled, so
-    -- ordinary bitvector shifts are unaffected.
+    -- bitvector form, so lower it to int arithmetic.  A constant amount `k`
+    -- lowers to a `2^k` literal — `x >> k → x / 2^k`, `x << k → x * 2^k` —
+    -- by rewriting to the synthetic arith op and taking the int path below.
+    -- A non-constant amount `e` (e.g. vstd's `lemma_u128_shr_is_div`, where
+    -- the amount is a parameter) lowers through the prelude's `int_pow2` —
+    -- `x >> e → x div int_pow2(e)`, `x << e → x * int_pow2(e)`.  Sound for
+    -- the non-negative, in-range values such operands hold.  Gated on the
+    -- VALUE operand being int-modeled, so ordinary bitvector shifts are
+    -- unaffected.
     if shiftValueIntModeled? env bound lhs then
       match op, constShiftAmount? rhs with
       | .Bitwise (.Shr _) mode, some k =>
@@ -786,6 +835,10 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       | .Bitwise (.Shl _ _) mode, some k =>
         return ← expToBoole env bound expected?
           (.Binary (.Arith .Mul mode) lhs (.Const (.Int ((2 : Int) ^ k)) Typ.Int))
+      | .Bitwise (.Shr _) mode, none =>
+        return ← intShiftViaPow2 env bound expected? .EuclideanDiv mode lhs rhs
+      | .Bitwise (.Shl _ _) mode, none =>
+        return ← intShiftViaPow2 env bound expected? .Mul mode lhs rhs
       | _, _ => pure ()
     -- Run arith in `int` when the context demands int or any subtree
     -- mixes int and bv operands. Otherwise bv overflow corrupts the
@@ -864,6 +917,16 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         info? <|> lhsTy?.bind bitInfoOfTyp
       | _ => info?
     let argTy? := info?.map (fun (w, signed) => if signed then Typ.SInt w else Typ.UInt w)
+    -- An arith op with no inferred bv width lowers in the int domain (see
+    -- `domain` below), so its operands must arrive int-typed: translate them
+    -- at `Int` so nat-kinded leaves — e.g. a nat-returning spec-fn call under
+    -- an all-int-modeled tree like `x div pow2(e)` with `x : u128` — coerce
+    -- via `nat.toInt` instead of feeding a bare `nat` to an int operator.
+    -- (Trees with a bv operand never reach this: either `arithRunsInInt`
+    -- routed them through the int path already, or `info?` is set.)
+    let argTy? := match argTy?, op with
+      | none, .Arith _ _ => some Typ.Int
+      | t, _ => t
     -- Preserve narrow-then-widen for Verus's bit-vector proof mode: only
     -- push `argTy?` when the operand has no natural bv width of its own
     -- (e.g. a literal). See `bitvector_basic::test10` for the failure mode.
@@ -925,6 +988,12 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         match numKindOfTyp? targetTy with
         | some .int =>
           let inner ← expToBoole env bound (some Typ.Int) e
+          -- Narrowing gate: `u128`/`i128` targets are fixed-width even though
+          -- int-modeled, so they wrap unless the inner fits; a width-less
+          -- `as int` passes through.
+          let inner := match fixedWidthInfoOfTyp targetTy with
+            | some tgt => clipWrapIntModeled env bound tgt e inner
+            | none => inner
           coerceNumeric (some .int) (expected?.bind numKindOfTyp?) inner
         | some .nat =>
           match expected?.bind numKindOfTyp? with
@@ -934,8 +1003,12 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
             coerceNumeric (some .int) (some (.bv w signed)) x
           | _ => expToBoole env bound (some Typ.Nat) e
         | some (.bv tw ts) =>
-          if expected? == some Typ.Int then
-            expToBoole env bound (some Typ.Int) e
+          if expected? == some Typ.Int then do
+            -- Narrowing gate (int-context form): the int domain has no
+            -- overflow, but the CAST still truncates when the inner's type
+            -- does not fit the target width.
+            let inner ← expToBoole env bound (some Typ.Int) e
+            pure (clipWrapIntModeled env bound (tw, ts) e inner)
           else
             let innerInfo? := inferBitInfo env bound e
             match innerInfo? with
@@ -1458,6 +1531,32 @@ abbrev expToBooleFlat (env : VarEnv) (expected? : Option Typ) (e : Exp) :
     BuildM BExpr :=
   expToBoole env [] expected? e
 
+/-- The int-model meaning of `HasType τ e` for a numeric `τ`: the value of
+    `e` (computed in unbounded int) lies in τ's value range.  Verus encodes
+    exec overflow checks as exactly this shape — `assert HasType(u64, x*y)`
+    followed by `assume HasType(u64, x*y)` and the clipped assignment — so
+    these nodes carry the overflow verification conditions and the
+    post-check range facts.  Returns `none` for types whose membership the
+    Boole encoding enforces by typing alone (bool, datatypes, sequences,
+    width-less `int`), which stay dropped. -/
+private def hasTypeRangeCond (env : VarEnv) (t : Typ) (inner : Exp) :
+    BuildM (Option BExpr) := do
+  let range? : Option (Option Int × Option Int) :=
+    match fixedWidthInfoOfTyp t with
+    | some (w, false) => some (some 0, some ((2 : Int) ^ w - 1))
+    | some (w, true)  => some (some (-((2 : Int) ^ (w - 1))), some ((2 : Int) ^ (w - 1) - 1))
+    | none => if numKindOfTyp? t == some .nat then some (some 0, none) else none
+  match range? with
+  | none => pure none
+  | some (lo?, hi?) =>
+    let x ← expToBooleFlat env (some .Int) inner
+    let conds := (lo?.map (fun lo => Bld.intLe (Bld.intConst lo) x)).toList ++
+      (hi?.map (fun hi => Bld.intLe x (Bld.intConst hi))).toList
+    match conds with
+    | [c] => pure (some c)
+    | [c1, c2] => pure (some (Bld.boolAnd c1 c2))
+    | _ => pure none
+
 /-- Lower a `decreases` clause (preserved on `ExecFn` / `ProofFn` as a list
     of `Stm.Assign decrease%initN := rhs`) into Boole's procedure-level
     `decr : Option Measure` slot.  Verus emits one Assign per source
@@ -1638,7 +1737,13 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     return [callStmt (mutOuts.toArray) callee (argsBoole.toArray)]
   | .Assert exp | .AssertLean exp => do
     match exp with
-    | .Unary (.HasType _) _ => return []
+    | .Unary (.HasType t) inner =>
+      -- Verus materializes exec overflow checks as `assert HasType(τ, e)`
+      -- ("possible arithmetic underflow/overflow"); numeric τ lowers to the
+      -- range obligation, non-numeric τ is a typing tautology and drops.
+      match ← hasTypeRangeCond env t inner with
+      | some c => return [assertStmt "" c]
+      | none => return []
     | _ =>
       let e ← expToBooleFlat env (some .Bool) exp
       return [assertStmt "" e]
@@ -1655,7 +1760,13 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     return [assertStmt "compute" e]
   | .Assume exp => do
     match exp with
-    | .Unary (.HasType _) _ => return []
+    | .Unary (.HasType t) inner =>
+      -- The companion of the overflow assert: Verus re-injects the checked
+      -- range as `assume HasType(τ, e)` (also emitted for call results),
+      -- which carries the `0 ≤ e < 2^w` facts the int model otherwise loses.
+      match ← hasTypeRangeCond env t inner with
+      | some c => return [assumeStmt "" c]
+      | none => return []
     | _ =>
       let e ← expToBooleFlat env (some .Bool) exp
       return [assumeStmt "" e]
@@ -1987,9 +2098,11 @@ partial def stmListToBooleAux (env : VarEnv) (projLayouts : List ProjLayout)
     let s2 ← stmListToBooleAux env projLayouts mutArgMap retVar? procName rest
     return [assumeStmt "" (boolConst false)] ++ s2
   | a :: (.Assume e) :: next :: rest =>
-    if isAssertAssumeEcho a e then
-      stmListToBooleAux env projLayouts mutArgMap retVar? procName (a :: next :: rest)
-    else if isTrivialTrueAssert a && isQueryScaffoldingAssume e next then
+    -- An `assert X; assume X` pair from Verus's SST is kept whole: Strata's
+    -- `assert` defers the obligation without extending the path conditions
+    -- (`Imperative/CmdEval`), so the `assume` is what carries the checked
+    -- fact to subsequent obligations.
+    if isTrivialTrueAssert a && isQueryScaffoldingAssume e next then
       stmListToBooleAux env projLayouts mutArgMap retVar? procName (next :: rest)
     else if isTrivialTrueAssert a then
       stmListToBooleAux env projLayouts mutArgMap retVar? procName ((.AssertCompute e) :: next :: rest)
@@ -2007,9 +2120,7 @@ partial def stmListToBooleAux (env : VarEnv) (projLayouts : List ProjLayout)
   | a :: next :: rest =>
     match next with
     | .Assume e =>
-      if isAssertAssumeEcho a e then
-        stmListToBooleAux env projLayouts mutArgMap retVar? procName (a :: rest)
-      else if isTrivialTrueAssert a then
+      if isTrivialTrueAssert a then
         stmListToBooleAux env projLayouts mutArgMap retVar? procName ((.AssertCompute e) :: rest)
       else do
         let s1 ← stmToBoole env projLayouts mutArgMap retVar? procName a

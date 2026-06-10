@@ -538,8 +538,34 @@ partial def expHasMixedIntBvArith (env : VarEnv) (bound : BoundEnv) : Exp → Bo
     expHasMixedIntBvArith env bound body
   | _ => false
 
-def inferComparisonNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=
-  if expHasMixedIntBvArith env bound e then some .int else inferNumKind env bound e
+/-- Join of two operand kinds for an arithmetic tree: nat-only arithmetic
+    stays nat, any int operand makes the tree int, and any bv operand defers
+    to the bit-info machinery (`none`) — an arith tree over bv operands is
+    either pure-bv (bv domain) or mixed (caught by `expHasMixedIntBvArith`
+    before this join is consulted). -/
+private def joinArithNumKind : Option NumKind → Option NumKind → Option NumKind
+  | some .nat, some .nat => some .nat
+  | some .nat, some .int | some .int, some .nat | some .int, some .int => some .int
+  | _, _ => none
+
+partial def inferComparisonNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=
+  if expHasMixedIntBvArith env bound e then some .int
+  else match inferNumKind env bound e with
+    | some k => some k
+    | none =>
+      -- `inferNumKind` reads leaves (vars, calls, clips, consts) but has no
+      -- view into arithmetic trees: `inferComparableTyp?` has no `.Binary`
+      -- case, so `a % p` or `x * y` infers `none` even when both operands
+      -- are nat/int-kinded.  A comparison between two such trees then gets
+      -- no numeric signal at all, and each side independently picks a
+      -- lowering domain (e.g. `nat.mod(...) == (...) mod nat.toInt(p)` —
+      -- nat vs int under `==`).  Joining the operands' kinds makes the
+      -- tree's kind visible so the comparison reconciles both sides.
+      match e with
+      | .Binary (.Arith _ _) l r =>
+        joinArithNumKind (inferComparisonNumKind env bound l)
+          (inferComparisonNumKind env bound r)
+      | _ => none
 
 def inferComparisonBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bool) :=
   if expHasMixedIntBvArith env bound e then none else inferBitInfo env bound e

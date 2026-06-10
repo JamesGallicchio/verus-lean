@@ -2,7 +2,7 @@
 // Benchmark B2 — `Scalar::from_bytes_mod_order_wide`  (VARIANT: upstream-faithful)
 // =============================================================================
 //
-// VARIANT of from_bytes_mod_order_wide_minimal.rs.  Same reachable set, but
+// VARIANT of B2_from_bytes_minimal.rs.  Same reachable set, but
 // each retained spec/lemma/proof was converged toward the pinned dalek-lite
 // commit (3f3443e) as closely as possible: upstream `scalar_as_nat` /
 // `u8_32_as_group_canonical`, upstream `is_canonical_scalar`, `u8_32_as_nat`
@@ -10,7 +10,7 @@
 // `lemma_scalar52_lt_pow2_256_if_canonical`, the verbatim
 // `lemma_group_order_bound` body (minus the two `constants::L` bridge calls,
 // inapplicable here), and the verbatim 4-call `from_bytes_mod_order_wide`
-// proof block.  The sibling `from_bytes_mod_order_wide_minimal.rs` is the
+// proof block.  The sibling `B2_from_bytes_minimal.rs` is the
 // plain "verus.rs minus unreachable functions" form (no convergence).
 // Both verify (10 verified, 0 errors).
 // =============================================================================
