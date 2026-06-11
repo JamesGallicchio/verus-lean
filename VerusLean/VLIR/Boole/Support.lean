@@ -9,12 +9,14 @@
 import VerusLean.VLIR.Defs
 import VerusLean.VLIR.Boole.Context
 import VerusLean.VLIR.Boole.Coercions
+import VerusLean.VLIR.Boole.Names
 
 namespace VerusLean.Boole.Support
 
 open VerusLean
 open VerusLean.Boole.Coercions
 open VerusLean.Boole.Context (SupportDecl)
+open VerusLean.Boole.Names (tupleTypeName)
 
 def supportDeclName : SupportDecl → String
   | .nat => "nat"
@@ -24,7 +26,7 @@ def supportDeclName : SupportDecl → String
   | .bvToNat w signed => bvToNatCastName w signed
   | .intToBv w signed => intToBvCastName w signed
   | .bvWiden fromW toW signed => bvWidenCastName fromW toW signed
-  | .tuple => "Tuple"
+  | .tuple => tupleTypeName
   | .seqZipWith => "Seq_lib_zip_with"
   | .arrayFill => "Array_array_fill_for_copy_types"
   | .set => "Set"

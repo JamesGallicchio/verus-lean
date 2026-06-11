@@ -121,7 +121,7 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
     pure (fvarTy idx)
   | .Tuple t1 t2 => do
     requireSupport .tuple
-    let idx ← resolveFreeVar "Tuple"
+    let idx ← resolveFreeVar tupleTypeName
     let a1 ← typToBooleType t1
     let a2 ← typToBooleType t2
     pure (fvarTy idx #[a1, a2])
@@ -644,6 +644,40 @@ private partial def shiftValueIntModeled? (env : VarEnv) (bound : BoundEnv) : Ex
   | .Const _ ty                => numKindOfTyp? ty == some .int
   | e                          => (inferComparableTyp? env bound e).bind numKindOfTyp? == some .int
 
+/-- Positional projection from a tuple value.  Tuple types lower to
+    right-nested binary pairs — `(A, B, C)` is `Tuple2 A (Tuple2 B C)`,
+    mirroring the parser's right fold — so field `k` of a `size`-tuple is
+    `Tuple2.._0` after `k` hops of `Tuple2.._1`, except the last field, which
+    is the bare `Tuple2.._1` spine.  A 1-tuple carries no wrapper (its type
+    lowers to the payload type), so projection is the identity. -/
+private def tupleProjChain (size field : Nat) (x : BExpr) : BuildM BExpr := do
+  if field ≥ size then
+    throw s!"tuple projection out of range: field {field} of a {size}-tuple"
+  if size == 1 then
+    return x
+  requireSupport .tuple
+  let sndIdx ← resolveFreeVar tupleSndSelector
+  let spine := (List.range (min field (size - 1))).foldl
+    (fun acc _ => Bld.app (Bld.fvar sndIdx) acc) x
+  if field == size - 1 then
+    return spine
+  else
+    let fstIdx ← resolveFreeVar tupleFstSelector
+    return Bld.app (Bld.fvar fstIdx) spine
+
+/-- Tuple value from positional element expressions, as right-nested
+    constructor applications — `(a, b, c)` is
+    `Tuple2_ctor_2(a, Tuple2_ctor_2(b, c))` — mirroring the type lowering.
+    A single element is the payload itself (1-tuples carry no wrapper). -/
+private def tupleCtorChain : List BExpr → BuildM BExpr
+  | [] => throw "cannot build an empty tuple value"
+  | [a] => return a
+  | a :: rest => do
+    requireSupport .tuple
+    let ctorIdx ← resolveFreeVar tupleCtorName
+    let tail ← tupleCtorChain rest
+    return Bld.appN (Bld.fvar ctorIdx) [a, tail]
+
 mutual
 
 private partial def comparisonPrelude
@@ -775,11 +809,14 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       expToBoole env bound (enumFieldExpectedType? env dt variant field) e)
     return Bld.appN ctor args
   | .TupleCtor size data => do
-    if size == 2 then requireSupport .tuple
-    let ctorIdx ← resolveFreeVar s!"Tuple_ctor_{size}"
-    let ctor := Bld.fvar ctorIdx
+    -- The unit value has no nested-pair form; unit-typed returns/assigns are
+    -- dropped before emission (see `isUnitValueExp`), so the opaque reference
+    -- here never reaches an emitted program.
+    if size == 0 then
+      let ctorIdx ← resolveFreeVar s!"{tupleTypeName}_ctor_{size}"
+      return Bld.appN (Bld.fvar ctorIdx) []
     let args ← data.mapM (expToBoole env bound none)
-    return Bld.appN ctor args
+    tupleCtorChain args
   | .Binary (.ExtEq deep ty) lhs rhs => do
     extEqExpToBoole env bound deep ty lhs rhs
   | .Binary (.Eq _) lhs rhs => do
@@ -1093,15 +1130,14 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     | .IsVariant dt variant => do
       let testerIdx ← resolveFreeVar (enumTesterNameOf dt variant)
       return Bld.app (Bld.fvar testerIdx) x
-    | .Proj' size field => do
-      let projName ←
-        if size == 2 then do
-          requireSupport .tuple
-          pure s!"Tuple.._{field}"
-        else
-          pure s!"Tuple_{size}_{field}"
-      let projIdx ← resolveFreeVar projName
-      return Bld.app (Bld.fvar projIdx) x
+    | .Proj' size field =>
+      -- The parser encodes a tuple's `IsVariant(x, tuple%N)` test as `Proj' N N`,
+      -- reading the field index from the `tuple%N` variant string (which equals
+      -- the arity).  A tuple has a single constructor, so the test is always true.
+      if field == size then
+        return boolConst true
+      else
+        tupleProjChain size field x
     | _ =>
       match applyUnaryOp op x with
       | some result => return result
@@ -1634,16 +1670,10 @@ private partial def lowerProjectedAssignRhsToRoot
     lowerProjectedAssignRhsToRoot env projLayouts base updatedContainer
   | .Proj' base size field, rhs => do
     let container ← lvalueReadExprToBoole env base
-    if size == 2 then requireSupport .tuple
-    let ctorIdx ← resolveFreeVar s!"Tuple_ctor_{size}"
-    let args ← (List.range size).mapM (fun i => do
+    let args ← (List.range size).mapM (fun i =>
       if i == field then pure rhs
-      else do
-        let projName :=
-          if size == 2 then s!"Tuple.._{i}" else s!"Tuple_{size}_{i}"
-        let projIdx ← resolveFreeVar projName
-        pure (Bld.app (Bld.fvar projIdx) container))
-    let updatedContainer := Bld.appN (Bld.fvar ctorIdx) args
+      else tupleProjChain size i container)
+    let updatedContainer ← tupleCtorChain args
     lowerProjectedAssignRhsToRoot env projLayouts base updatedContainer
 
 /-- Collect base-variable names that appear as the *container* argument of
@@ -2734,7 +2764,7 @@ def enumToBoole (e : Enum) : BuildM BCmd := do
       let args : StrataDDM.Ann (Option (BooleDDM.Bindings SourceRange)) SourceRange :=
         ann (some (BooleDDM.Bindings.mkBindings default (ann #[
           BooleDDM.Binding.mkBinding default (ann "T") (BooleDDM.TypeP.type default)])))
-      let tupleIdx ← resolveFreeVar "Tuple"
+      let tupleIdx ← resolveFreeVar tupleTypeName
       let rhs := fvarTy tupleIdx #[intTy, mapTy intTy (tvarTy "T")]
       pure (.command_typesynonym default (ann dtName) args (ann none) rhs)
     else
@@ -3047,7 +3077,13 @@ def cmdDeclName? : BCmd → Option String
   | .command_recfndefs _ _ => none  -- multiple names
   | .command_typedecl _ name _ => some name.val
   | .command_typesynonym _ name _ _ _ => some name.val
-  | .command_datatypes _ _ => none  -- multiple names
+  | .command_datatypes _ decls =>
+    -- `structToBoole`/`enumToBoole` emit one datatype per command, so a
+    -- singleton names the command (letting shard dedupe drop re-declarations);
+    -- multi-decl commands stay anonymous.
+    match decls.val with
+    | #[.datatype_decl _ name _ _] => some name.val
+    | _ => none
   | .boole_procedure _ name _ _ _ _ _ _ => some name.val
   | .command_procedure _ name _ _ _ _ => some name.val
   | .command_axiom _ _ _ => none

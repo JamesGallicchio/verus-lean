@@ -21,6 +21,7 @@ open VerusLean.Boole.Builder
 open VerusLean.Boole.Emit
 open VerusLean.Boole.Support
 open VerusLean.Boole.Context (SupportDecl)
+open VerusLean.Boole.Names (tupleTypeName tupleCtorName tupleFstSelector tupleSndSelector)
 
 private def ann (v : α) : StrataDDM.Ann α SourceRange := ⟨default, v⟩
 
@@ -49,11 +50,12 @@ private def mkAbstractTypeDecl (name : String) (params : List String) : BuildM B
   pure (.command_typedecl default (ann name) args)
 
 /-- Emit the polymorphic 2-ary tuple datatype:
-    `datatype Tuple (T0 : Type, T1 : Type) { Tuple_ctor_2(_0 : T0, _1 : T1) };`.
+    `datatype Tuple2 (T0 : Type, T1 : Type) { Tuple2_ctor_2(_0 : T0, _1 : T1) };`.
     VLIR represents tuples as nested pairs, so this single datatype covers the
-    non-unit tuple surface. -/
+    non-unit tuple surface.  The name avoids cvc5's builtin `Tuple` sort
+    (see `Names.tupleTypeName`). -/
 private def mkTupleDatatypeDecl : BuildM BCmd := do
-  addFreeVars #["Tuple", "Tuple_ctor_2", "Tuple.._0", "Tuple.._1"]
+  addFreeVars #[tupleTypeName, tupleCtorName, tupleFstSelector, tupleSndSelector]
   let typeParamBindings : Array (BooleDDM.Binding SourceRange) := #[
     BooleDDM.Binding.mkBinding default (ann "T0") (BooleDDM.TypeP.type default),
     BooleDDM.Binding.mkBinding default (ann "T1") (BooleDDM.TypeP.type default)]
@@ -67,14 +69,14 @@ private def mkTupleDatatypeDecl : BuildM BCmd := do
     BooleDDM.Binding.mkBinding default (ann "_1") (BooleDDM.TypeP.expr (fvarTy t1Idx))
   let ctorArgs : StrataDDM.Ann (Option (StrataDDM.Ann (Array (BooleDDM.Binding SourceRange)) SourceRange)) SourceRange :=
     ann (some (ann #[field0, field1]))
-  let ctor := BooleDDM.Constructor.constructor_mk default (ann "Tuple_ctor_2") ctorArgs
+  let ctor := BooleDDM.Constructor.constructor_mk default (ann tupleCtorName) ctorArgs
   let constrList := BooleDDM.ConstructorList.constructorListAtom default ctor
-  let dtDecl := BooleDDM.DatatypeDecl.datatype_decl default (ann "Tuple") typeArgs constrList
+  let dtDecl := BooleDDM.DatatypeDecl.datatype_decl default (ann tupleTypeName) typeArgs constrList
   pure (.command_datatypes default (ann #[dtDecl]))
 
 /-- Emit `function Seq_lib_zip_with<A, B>(s: Sequence A, t: Sequence B):
-    Sequence (Tuple A B);` as an abstract declaration. The return type
-    references `Tuple`, so this support decl must be emitted after
+    Sequence (Tuple2 A B);` as an abstract declaration. The return type
+    references the tuple datatype, so this support decl must be emitted after
     `.tuple`. See `allSupportDecls` ordering in `Support.lean`. -/
 private def mkSeqZipWithDecl : BuildM BCmd := do
   let fname := "Seq_lib_zip_with"
@@ -86,7 +88,7 @@ private def mkSeqZipWithDecl : BuildM BCmd := do
     ann (some (BooleDDM.TypeArgs.type_args default (ann typeParamBindings)))
   let aTy := tvarTy "A"
   let bTy := tvarTy "B"
-  let tupleIdx ← resolveFreeVar "Tuple"
+  let tupleIdx ← resolveFreeVar tupleTypeName
   let sInput :=
     BooleDDM.Binding.mkBinding default (ann "s") (BooleDDM.TypeP.expr (seqTy aTy))
   let tInput :=

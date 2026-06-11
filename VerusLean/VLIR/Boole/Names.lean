@@ -74,6 +74,24 @@ def identToBoole (i : Ident) : String :=
 def sanitizeVarName (s : String) : String :=
   sanitizeIdent (s.replace "%" "_pct_")
 
+/-! ## Support Tuple Datatype Names
+
+The binary tuple support datatype is emitted as `Tuple2`: cvc5 reserves
+`Tuple` as a builtin sort, so a user-declared `(declare-datatype Tuple
+(par …))` is shadowed at SMT parsing and applications of its selectors fail
+to type-match ("matching failed for selector argument of parameterized
+datatype").  Parsed user datatype names are decapitalized
+(`pathedNameFromJson`), so a capitalized support name cannot collide with a
+user type. -/
+
+def tupleTypeName : String := "Tuple2"
+
+def tupleCtorName : String := s!"{tupleTypeName}_ctor_2"
+
+def tupleFstSelector : String := s!"{tupleTypeName}.._0"
+
+def tupleSndSelector : String := s!"{tupleTypeName}.._1"
+
 /-! ## Datatype and Field Names -/
 
 private def strataReservedTypeNames : List String :=
@@ -119,18 +137,24 @@ def enumTesterNameOf (dt : Ident) (variant : String) : String :=
   s!"{dtName}..is{ctorName}"
 
 def projFieldNameOf (dt : Ident) (variant field : String) : String :=
+  let dtName := datatypeNameOf dt
+  let variantName := sanitizeIdent variant
+  -- A variant named like its datatype is a plain (single-variant) struct,
+  -- whose declaration binds fields by their own names (`fieldAccessorNameOf`:
+  -- named fields stay bare, positional fields become `_<i>`).  Only true enum
+  -- variants need the `<dt>_<variant>_` disambiguation prefix; enum
+  -- declarations bind their fields through this same function, so both sides
+  -- agree either way.
+  let isStructVariant := variantName.toLower == dtName.toLower
   if field == "_" then
-    s!"{datatypeNameOf dt}_{sanitizeIdent variant}_0"
+    s!"{dtName}_{variantName}_0"
   else
     match field.toNat? with
-    | some i => s!"{datatypeNameOf dt}_{sanitizeIdent variant}_{i}"
+    | some i =>
+      if isStructVariant then field else s!"{dtName}_{variantName}_{i}"
     | none =>
-      let dtName := datatypeNameOf dt
-      let variantName := sanitizeIdent variant
-      if variantName.toLower == dtName.toLower then
-        field
-      else
-        s!"{dtName}_{variantName}_{sanitizeIdent field}"
+      if isStructVariant then field
+      else s!"{dtName}_{variantName}_{sanitizeIdent field}"
 
 /-! ## Recognized Library Name Shapes -/
 
