@@ -2,12 +2,12 @@
 // Benchmark B1 — `FieldElement51::mul`  (VARIANT: fully proved, zero admits)
 // =============================================================================
 //
-// FULL variant of B1_mul_minimal.rs: every lemma in the transitive closure
+// FULL variant of b1_minimal.rs: every lemma in the transitive closure
 // of the `mul` correctness proof carries its real proof body — no `admit()`
 // or `assume(false)` anywhere in this file.  Companion files:
-//   B1_mul_minimal.rs         — lemma_mul_boundary + lemma_mul_value admitted
-//   B1_mul_boundary_proved.rs — only lemma_mul_value admitted
-//   B1_mul.rs                 — (this file) everything proved
+//   b1_minimal.rs         — lemma_mul_boundary + lemma_mul_value admitted
+//   b1_boundary_proved.rs — only lemma_mul_value admitted
+//   b1_full.rs                 — (this file) everything proved
 //
 // Field multiplication in GF(p), p = 2^255 - 19, the prime field underlying
 // Curve25519/Ed25519.  A `FieldElement51` is an integer in radix 2^51, stored

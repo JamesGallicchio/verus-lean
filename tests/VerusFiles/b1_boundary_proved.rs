@@ -2,7 +2,7 @@
 // Benchmark B1 — `FieldElement51::mul`  (VARIANT: lemma_mul_boundary proved)
 // =============================================================================
 //
-// VARIANT of B1_mul_minimal.rs.  Identical specs + target `mul`, but the
+// VARIANT of b1_minimal.rs.  Identical specs + target `mul`, but the
 // no-overflow / limb-bound lemma `lemma_mul_boundary` is given its FULL proof
 // body (its transitive closure of support lemmas is vendored below in §7a)
 // rather than `admit()`.  Only `lemma_mul_value` (the carry-chain ≡ product

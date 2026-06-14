@@ -16,7 +16,7 @@ Solver success is **not** used to classify faithfulness.
   (#1217); generics reclassified.**  The pull landed PR **#1217** (`Bv{n}.ToUInt`
   / `Bv{n}.ToInt` / `Int.ToBv{n}` cast operators) and **#1214** (empty-seq
   literal typing).  Upstream dropped the verus-boogie reference test
-  `StrataTest/Languages/Boole/B2_from_bytes_minimal.lean`
+  `StrataTest/Languages/Boole/b2_minimal.lean`
   ("deleted the big test to put it in another pr"); it is preserved locally
   (restored on top of the branch, untracked, with its `gen_smt_vcs` experiment).
   - **#1217 — native interpreted casts (`Cast.lean::applyCast`).** The remaining
