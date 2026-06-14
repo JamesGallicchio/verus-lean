@@ -678,6 +678,45 @@ private def tupleCtorChain : List BExpr → BuildM BExpr
     let tail ← tupleCtorChain rest
     return Bld.appN (Bld.fvar ctorIdx) [a, tail]
 
+/-- Peel `Box`/`Unbox` coercion wrappers (typing artifacts with no Boole
+    counterpart) off an expression's spine. -/
+private partial def stripBoxWrappers : Exp → Exp
+  | .Unary (.Box _) e | .Unary (.Unbox _) e => stripBoxWrappers e
+  | e => e
+
+/-- A multi-binder `choose|v1, …, vn| pred` whose chosen value is the binder
+    tuple `(v1, …, vn)` normalizes to a single-binder choose over the product
+    type — `choose p : (T1, …, Tn) :: pred[vk := p.k]` with chosen value `p` —
+    which is the shape Boole's one-binder `choose_assign` statement and the
+    spec-fn choice axiom can express.  Verus lowers
+    `let (x, y) = choose|i, j| pred(i, j)` through exactly this tuple shape
+    (the destructure is separate `Proj'` assignments).  The product binder
+    name is derived from the source binders, uniquified against the
+    predicate's free variables.  Single-binder chooses and any other body
+    shape pass through unchanged. -/
+private def normalizeChooseProduct : Exp → Exp
+  | e@(.Bind (.Choose vars pred) chooseBody) => Id.run do
+    if vars.length < 2 then return e
+    let .TupleCtor n elems := stripBoxWrappers chooseBody | return e
+    if n != vars.length || elems.length != vars.length then return e
+    let elemVars := elems.map stripBoxWrappers
+    let isBinderTuple := (elemVars.zip vars).all fun (el, (v, _)) =>
+      match el with | .Var x => x == v | _ => false
+    if !isBinderTuple then return e
+    let free := expVarRefs pred
+    let baseName := String.intercalate "_" (vars.map Prod.fst) ++ "_choose"
+    let mut pairName := baseName
+    while free.contains pairName do
+      pairName := pairName ++ "_"
+    let prodTy := match (vars.map Prod.snd).reverse with
+      | [] => Typ.Empty
+      | last :: rest => rest.foldl (fun acc ty => .Tuple ty acc) last
+    let subs := vars.zipIdx.map fun ((v, _), k) =>
+      (v, Exp.Unary (.Proj' n k) (.Var pairName))
+    let pred' := substExps subs pred
+    return .Bind (.Choose [(pairName, prodTy)] pred') (.Var pairName)
+  | e => e
+
 mutual
 
 private partial def comparisonPrelude
@@ -1521,11 +1560,13 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       return lambdaExpr binds body'
     | .Choose _vars _pred =>
       -- Boole has no expression-level `choose`; the predicate is dropped
-      -- here.  In practice the Verus shape is `let lhs = choose|v| pred(v)`,
-      -- which `stmToBoole`'s `.Assign` arm intercepts and emits as a
-      -- `choose_assign` statement (preserving the predicate); only that
-      -- path is currently exercised by tests.  Fallback when reached
-      -- elsewhere: translate the body verbatim.
+      -- here.  The shapes that occur in practice are handled upstream of this
+      -- case: `let lhs = choose|v| pred(v)` statements become Boole
+      -- `choose_assign` (`stmToBoole`'s `.Assign` arm), choose in
+      -- call-argument position is hoisted to a `choose_assign` temporary
+      -- (`hoistChooseArg`), and a spec fn whose whole body is a choose
+      -- becomes Boole's native `command_choosefndef` (`specFnToBoole`).
+      -- Fallback when reached elsewhere: translate the body verbatim.
       expToBoole env bound expected? body
   | .MatchBlock _scrut body =>
     expToBoole env bound expected? body
@@ -1703,6 +1744,32 @@ partial def collectIndexSetTargets : Stm → List String
 
 /-! ## Statement Translation Main -/
 
+/-- Hoist a `choose` expression in call-argument position
+    (`lemma(i, choose|j| pred(j))`) to a fresh temporary bound by a
+    `choose_assign` statement, returning the prelude statements and the
+    temporary's name.  The temporary is added to the ambient scope: its
+    inline `var` introduces a binding level, so the predicate here — and
+    every expression of the enclosing call — must be translated with the
+    temporary in scope or their variable indices shift by one.
+    Multi-binder chooses are first normalized to the product form
+    (`normalizeChooseProduct`); any other argument shape returns `none`
+    and translates as a plain expression. -/
+private def hoistChooseArg (env : VarEnv) (idx : Nat) (arg : Exp) :
+    BuildM (Option (List BStmt × String)) := do
+  if let .Bind (.Choose [(v, vTy)] pred) chooseBody :=
+      normalizeChooseProduct (stripBoxWrappers arg) then
+    if let .Var bodyVar := stripBoxWrappers chooseBody then
+      if bodyVar == v then
+        let tmpName := sanitizeVarName s!"{v}_choose_arg{idx}"
+        let vTy' ← typToBooleType vTy
+        addBoundVars #[tmpName]
+        let pred' ← withScope do
+          addBoundVars #[v]
+          expToBooleFlat env (some .Bool) pred
+        return some ([varStmt tmpName vTy',
+          chooseAssignStmt tmpName (sanitizeVarName v) vTy' pred'], tmpName)
+  return none
+
 mutual
 
 partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
@@ -1751,9 +1818,27 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       return []
     let argsFiltered := normalizeCallArgsForCallee env fn args
     let callee := identToBoole fn
-    let argsBoole ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
-      let paramTy? := lookupFnParamTypeFull env callee idx
-      expToBooleFlat env paramTy? arg)
+    -- `choose` in argument position is hoisted to a `choose_assign`-bound
+    -- temporary emitted before the call (`hoistChooseArg`).  Two passes:
+    -- hoisting first registers every temporary's binding level, then all
+    -- arguments — hoisted and plain — translate in that final scope.
+    let mut hoistStmts : List BStmt := []
+    let mut hoistedNames : Array (Option String) := #[]
+    for (arg, idx) in argsFiltered.zipIdx do
+      match ← hoistChooseArg env idx arg with
+      | some (stmts, tmpName) =>
+        hoistStmts := hoistStmts ++ stmts
+        hoistedNames := hoistedNames.push (some tmpName)
+      | none =>
+        hoistedNames := hoistedNames.push none
+    let mut argsBoole : List BExpr := []
+    for (arg, idx) in argsFiltered.zipIdx do
+      match hoistedNames[idx]? with
+      | some (some tmpName) =>
+        argsBoole := argsBoole ++ [← resolveVar tmpName]
+      | _ =>
+        let paramTy? := lookupFnParamTypeFull env callee idx
+        argsBoole := argsBoole ++ [← expToBooleFlat env paramTy? arg]
     -- Compute mutable outputs
     let infos := (mutArgMap.get? callee).getD []
     let mutOuts ← infos.filterMapM (fun info => do
@@ -1764,7 +1849,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         match vecVarFromExp arg with
         | some v => pure (some (sanitizeVarName v))
         | none => pure none)
-    return [callStmt (mutOuts.toArray) callee (argsBoole.toArray)]
+    return hoistStmts ++ [callStmt (mutOuts.toArray) callee (argsBoole.toArray)]
   | .Assert exp | .AssertLean exp => do
     match exp with
     | .Unary (.HasType t) inner =>
@@ -1820,11 +1905,13 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     -- statement (`lhs := choose v : T :: pred;`).  The Verus AST for this
     -- shape is `Bind (Choose [(v, ty)] pred) (Var v)` after wrappers are
     -- stripped; we recognise it here rather than letting the expression
-    -- path drop the predicate.  Single-binder only — multi-binder
-    -- choose-let lowers to a tuple destructure on the Verus side, which
-    -- doesn't reach this arm.
+    -- path drop the predicate.  A multi-binder choose-let arrives here as
+    -- the tuple temporary's assignment (`tmp := choose|i, j| pred` with the
+    -- binder tuple as the chosen value; the destructure is separate `Proj'`
+    -- assignments) and is first normalized to a single binder over the
+    -- product type (`normalizeChooseProduct`).
     if let some lhsName := lvalueVarName? lhs then
-      if let .Bind (.Choose [(v, vTy)] pred) (.Var bodyVar) := rhsCore then
+      if let .Bind (.Choose [(v, vTy)] pred) (.Var bodyVar) := normalizeChooseProduct rhsCore then
         if v == bodyVar then
           let vTy' ← typToBooleType vTy
           let pred' ← withScope do
@@ -2300,7 +2387,7 @@ partial def expHasInlineForcingLambda : Exp → Bool
   | .MatchBlock (scrut, _) body =>
     expHasInlineForcingLambda scrut || expHasInlineForcingLambda body
 
-def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd := do
+def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List BCmd) := do
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
   let name := ann fnName
@@ -2308,6 +2395,45 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
   let (inputBindings, inputNames) ← mkMonoInputs f.inputs
   let outputTy ← typToBooleType f.returnType
   let envLocal := extendEnv env f.inputs
+  -- A spec fn whose whole body is `choose |v| pred` (Verus's Hilbert choice)
+  -- has no Boole *expression* form, but Strata's `command_choosefndef` (#1365)
+  -- declares exactly this shape: `function f(args) : R := choose v : T :: pred;`.
+  -- Emit it directly so choose-defined spec fns translate 1:1.
+  --
+  -- Soundness note: Strata lowers `command_choosefndef` to an *unguarded*
+  -- choice axiom (`∀ args, v :: v = f(args) ==> pred`, i.e.
+  -- `∀ args :: pred[v := f(args)]`).  That is a conservative extension only for
+  -- predicates with a witness at every argument; a predicate unsatisfiable at
+  -- some argument makes the context inconsistent there.  The Verus spec fns we
+  -- translate choose over satisfiable predicates (e.g. `u8_32_from_nat`: every
+  -- `n mod 2^256` has a 32-byte encoding), and the general guard belongs in
+  -- Strata's lowering (requested on #1365), not in per-frontend axioms.
+  if emitBody then
+    if let some bodyExp := f.body then
+    if let .Bind (.Choose [(v, vTy)] pred) chooseBody :=
+        normalizeChooseProduct (stripBoxWrappers bodyExp) then
+      if let .Var bodyVar := stripBoxWrappers chooseBody then
+      if bodyVar == v then
+        -- `pred` translated under the (params, v) de Bruijn context the
+        -- construct's scope chain expects (v = bvar 0, innermost param =
+        -- bvar 1, …), with a fixed-size-array binder's `Sequence.length == N`
+        -- fact folded in so the chosen value carries its `[T; N]` binder type.
+        return ← withScope do
+          addBoundVars inputNames
+          let predB ← withScope do
+            addBoundVars #[v]
+            expToBoole envLocal [(v, vTy)] (some .Bool) pred
+          let vRef ← withScope do
+            addBoundVars #[v]
+            expToBoole envLocal [(v, vTy)] none (.Var v)
+          let predFull := match arrayFixedLen? vTy with
+            | some n => Bld.boolAnd (Synth.fixedArrayLenFact vRef n) predB
+            | none => predB
+          let vTyB ← typToBooleType vTy
+          let vBind := BooleDDM.MonoBind.mono_bind_mk default
+            (ann (sanitizeVarName v)) vTyB
+          pure [.command_choosefndef default name typeArgs inputBindings
+            outputTy vBind predFull]
   let (body?, specElts, decrAnn) ← withScope do
     addBoundVars inputNames
     let body? ← if emitBody then
@@ -2349,7 +2475,7 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
       let recDecl :=
         BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy
           (ann specElts) decrAnn body
-      pure (.command_recfndefs default (ann #[recDecl]))
+      pure [.command_recfndefs default (ann #[recDecl])]
     else
       -- Auto-inline lambda-bearing spec functions.  Strata's SMT encoder
       -- can't axiomatize a function whose body contains an unapplied
@@ -2366,10 +2492,10 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM BCmd :=
       let shouldInline := f.body.any expHasInlineForcingLambda
       let inlineAnn :=
         if shouldInline then ann (some (.inline default)) else ann none
-      pure (.command_fndef default name typeArgs inputBindings outputTy
-        (ann specElts) body inlineAnn)
+      pure [.command_fndef default name typeArgs inputBindings outputTy
+        (ann specElts) body inlineAnn]
   | none =>
-    pure (.command_fndecl default name typeArgs inputBindings outputTy)
+    pure [.command_fndecl default name typeArgs inputBindings outputTy]
 
 /-! ### ProofFn/ExecFn → BCmd -/
 
@@ -2856,9 +2982,8 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     (allDecls : List Decl) :
     Decl → BuildM (List BCmd)
   | .assertion _ => return []
-  | .specFn f => do
-    let cmd ← specFnToBoole env (!f.isOpaque) f
-    return [cmd]
+  | .specFn f =>
+    specFnToBoole env (!f.isOpaque) f
   | .proofFn f => do
     let cmd ← proofFnToBoole env projLayouts mutArgMap sfMap f
     return [cmd]
@@ -3074,6 +3199,7 @@ def translateDeclsWithPrelude (decls : List Decl) (preludeNames : Array String)
 def cmdDeclName? : BCmd → Option String
   | .command_fndecl _ name _ _ _ => some name.val
   | .command_fndef _ name _ _ _ _ _ _ => some name.val
+  | .command_choosefndef _ name _ _ _ _ _ => some name.val
   | .command_recfndefs _ _ => none  -- multiple names
   | .command_typedecl _ name _ => some name.val
   | .command_typesynonym _ name _ _ _ => some name.val

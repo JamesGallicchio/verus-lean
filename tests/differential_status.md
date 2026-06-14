@@ -510,7 +510,7 @@ to repeat them.
 - `verus-examples:guide/invariants` (`[TRANS-extensional-eq]`: source `assert(operations@.take(i as int) =~= ...)` is expanded to plain `==`; `[TRANS-coercion-uninterpreted]` in fib-loop invariants like `bv64_to_int_u(prev) == nat_to_int(fib(i - bv{64}(1)))`)
 - `verus-examples:guide/lib_examples` (`[VERIFY-lambda-encoding]` in returned/captured function values and collection constructors; `[SURFACE-sequence-empty]`; the current Vec translation itself is now the datatype-based path)
 - `verus-examples:guide/pervasive_example` (current output uses `Sequence.length(s) == 5` cleanly — the older `[TRANS-seq-len-literal-typing]` nat/bv64 mismatch claim no longer applies after recent translator work. Remaining gap is Strata's current `Sequence` frontend/indexing support)
-- `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; `[SURFACE-sequence-empty]`)
+- `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; `[SURFACE-sequence-empty]`. **2026-06-11:** the multi-binder choose-let (`quants.rs:325`) and choose-in-argument (`quants.rs:452`) shapes now emit faithfully — see `[TRANS-choose]` — and the file runs end-to-end: cvc5 129 ✅ / 26 ⌛ / 0 ❌, previously failed elaboration on the unbound choose binders)
 - `verus-examples:guide/recursion` (`[TRANS-reveal-with-fuel]`: `M_test_even`/`M_test_odd` lower their `reveal(M_is_even)`/`reveal(M_is_odd)` calls to globally-scoped `assume ∀ i :: M_is_even(i) == ...` — fuel amount discarded; older "test_triangle_*" procedure names are stale)
 - `verus-examples:integers` (`[TRANS-coercion-uninterpreted]`: heavy use of `bv8_to_int_u`, `bv8_to_nat_u`, `bv8_to_bv16_u`, `nat_to_int` coercions in call arguments and assertions like `nat_to_int(add1_nat(bv8_to_nat_u(u))) == bv8_to_int_u(u + bv{8}(1))`; cvc5 cannot reason through the uninterpreted coercions)
 - `verus-examples:invariants` (`[TRANS-atomic-ghost-scaffolding]`: `open_atomic_invariant!` flattened to helper-call scaffolding; `[MODEL-missing-types]` — `AtomicInvariant`)
@@ -889,23 +889,44 @@ to repeat them.
   `syntax.rs:279`, `quants.rs` (lines 295, 312, 313),
   `chapter-1-22.rs` (lines 188, 224) — all emit clean
   `choose_assign` form.
-- **Two shapes remain unfaithful:**
-  - **Multi-binder choose-let** (`let (x, y) = choose|i, j| pred(i, j)`):
-    Verus desugars to a tuple destructure, so the `Stm.Assign` arm
-    doesn't match.  Surfaces as `Tuple_ctor_2(i, j)` with `i, j`
-    unbound — Strata catches it as `Unknown expr identifier`,
-    not a silent miscompile.  Verus examples:
-    `syntax.rs:284`, `quants.rs:325`.
-  - **Expression-level choose** (`f(choose|j| pred(j))` in argument
-    or other sub-expression position):
-    `expToBoole`'s `.Choose` arm translates the body and silently
-    drops the predicate.  Verus examples:
-    `quants.rs:452`, `state_machines/refinement.rs:81`,
+- **2026-06-11 — the two remaining statement-reachable shapes ship:**
+  - **Multi-binder choose-let** (`let (x, y) = choose|i, j| pred(i, j)`,
+    arriving as the tuple temporary's assignment with the binder tuple as
+    the chosen value): `normalizeChooseProduct` rewrites it to a
+    single-binder choose over the right-nested pair type
+    (`choose p : (T1, …, Tn) :: pred[vk ↦ p.k]`), which the existing
+    statement and spec-fn paths then handle.  `quants.rs:325` now emits
+    `tmp_ren0 := choose i_j_choose : (Tuple2 int int) ::
+    less_than(Tuple2.._0(i_j_choose), Tuple2.._1(i_j_choose));`.
+  - **Choose in call-argument position** (`lemma(i, choose|j| pred(j))`):
+    `hoistChooseArg` hoists each such argument to a fresh temporary bound
+    by `choose_assign` ahead of the call — `quants.rs:452` now emits
+    `j_choose_arg1 := choose j : int :: g(i, j); call
+    lemma_g_proves_f(i, j_choose_arg1);` and its ensures passes.  The
+    temporary's inline `var` introduces a binding level, so the hoist
+    registers it in scope before any of the call's expressions translate
+    (two passes over the arguments).
+  - A spec fn whose whole body is a choose emits Boole's native
+    `command_choosefndef` (`function f(args) : R := choose v : T :: pred;`,
+    Strata #1365), which Strata lowers to an uninterpreted `f` plus a choice
+    axiom (see `specFnToBoole`); with `normalizeChooseProduct` this covers
+    multi-binder spec-fn chooses too.
+  - Still erased: choose in non-argument expression positions (e.g.
+    nested inside arithmetic), the `expToBoole` `.Choose` fallback.
+    Remaining Verus examples: `state_machines/refinement.rs:81`,
     `state_machines/refinement_labels.rs:91`,
-    `summer_school/chapter-6-1.rs:117`.  Fix sketch: pre-pass in
-    `Boole/Normalize.lean` that hoists choose-bearing sub-
-    expressions to fresh-temp `Stm.Assign`s, exposing the
-    statement-level path.
+    `summer_school/chapter-6-1.rs:117` (all argument-adjacent shapes that
+    should route through the hoist when those suites are exercised).
+  - **Known semantic divergence of the statement lowering** (visible in
+    `quants.rs`'s `test_choose_same`, ⌛ not ❌): Verus's choose is a
+    function of the predicate — two chooses of the same predicate are
+    equal, and an unsatisfiable predicate yields an arbitrary value with
+    no obligation.  `choose_assign` havocs per occurrence (so `x == y`
+    across two chooses is not derivable) and asserts the existential at
+    each site (an obligation Verus does not have).  Spec-fn chooses get
+    the functional semantics exactly via the choice axiom; choose-lets
+    whose witnesses must coincide would need the same function-level
+    encoding.
 
 ### `[TRANS-float-unsupported]` Floating-point types/operations not yet translated
 - Source `f64`/`f32` literals lower to `Unsupported.Float64`/`Unsupported.Float32`
