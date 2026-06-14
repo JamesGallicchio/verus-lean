@@ -835,7 +835,23 @@ private def decodeVarNameJson (j : Json) : m String := do
     match arr[1].getObjVal? "VirRenumbered" with
     | .ok renObj => return s!"tmp_ren{← renObj.getNatUnderKeyM "id"}"
     | .error _ => return "tmp_ren"
-  | _ => return ident
+  | _ =>
+    -- Verus renumbers shadowing rebindings of a source name
+    -- (`VirRenumbered { does_shadow := true, id }`).  Distinct rebindings
+    -- must stay distinct Boole locals — they can carry different types
+    -- (dalek's ghost `verus_tmp` has 17 nat rebindings and one bool one),
+    -- and collapsing them aliases unrelated values — so the renumbering id
+    -- is folded into the name.  The original binding
+    -- (`does_shadow := false`) keeps the bare source name.
+    match arr[1].getObjVal? "VirRenumbered" with
+    | .ok renObj =>
+      let doesShadow :=
+        (renObj.getObjVal? "does_shadow" |>.bind Json.getBool?).toOption.getD false
+      if doesShadow then
+        return s!"{ident}_ren{← renObj.getNatUnderKeyM "id"}"
+      else
+        return ident
+    | .error _ => return ident
 
 def VarBinder.fromJson (j : Json) (key : String := "typ") : m (String × Typ) := do
   -- Decode binder names through `Var.fromJson` so renumbered temporaries like
