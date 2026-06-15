@@ -94,11 +94,11 @@ Stage options:
 - `--all`: run `--verus --boole --verify`
 
 Other options:
-- `--solver <name>` (default: `cvc5`)
-- `--solver-timeout <sec>`
 - `--out <path>` output file path for single-target runs
   (supported for single-target `--boole` runs)
 - `--verbose`
+- `--synth-disable <names>` disables selected synthesized verification aids
+  during Boole generation
 
 `target_path` is optional. If provided, it should be a file path:
 - `.rs` for Verus export and downstream Boole generation/verification

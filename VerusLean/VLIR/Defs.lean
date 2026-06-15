@@ -522,6 +522,11 @@ structure SpecFn where
   -- Opaque spec functions will be emitted declaration-only (no body)
   -- unless a `reveal` makes them visible.
   isOpaque : Bool := false
+  -- When this decl is a trait-method *impl* (Verus JSON `kind.TraitMethodImpl`),
+  -- the path of the abstract trait method it implements (its `kind` `method`).
+  -- Lets the translator pair the impl's resolved return type with the abstract
+  -- declaration's associated-type projection (`<Self as Trait>::Assoc`).
+  traitImplMethod? : Option Ident := none
 deriving Repr, Inhabited, Hashable
 
 structure ProofFn where
@@ -554,6 +559,9 @@ structure ExecFn where
       Same shape as `ProofFn.decreases`. -/
   decreases : List Stm := []
   locals : List LocalDeclInfo := []
+  /-- Trait method this exec fn implements, when it is a `TraitMethodImpl`.
+      See `SpecFn.traitImplMethod?`. -/
+  traitImplMethod? : Option Ident := none
 deriving Repr, Inhabited, Hashable
 
 structure Struct where

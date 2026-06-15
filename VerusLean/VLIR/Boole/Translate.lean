@@ -151,7 +151,15 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
       let pTy ← typToBooleType p
       pure (arrowTy pTy acc)) retTy
   | .Decorated _ inner => typToBooleType inner
-  | .Struct name params =>
+  | .Struct name params => do
+    -- A trait associated-type projection (`<Self as Trait>::Assoc`) is parsed as
+    -- a nominal `Struct` whose Boole type name (e.g. `Ops_Arith_mul_Output`) no
+    -- declaration backs.  When the in-program trait impl pins it to a concrete
+    -- type, lower to that type instead (`assocTypeResolution`, built in
+    -- `declsToBooleProgram`).
+    match (← get).assocTypeResolution.get? (datatypeNameOf name) with
+    | some resolved => typToBooleType resolved
+    | none =>
     -- `vec2seq` branch: translate `Vec<T>` directly to Strata's native
     -- `Sequence T`. This avoids the Vec prelude's view-axioms (expensive
     -- quantifier instantiation for `Vec_view` / `Vec_len` / `Vec_index`)
@@ -3103,8 +3111,60 @@ private def declsHaveForLoop (decls : List Decl) : Bool :=
     | .proofFn f => f.body.map stmHasForLoop |>.getD false
     | _ => false
 
+/-- Pair each abstract trait-method declaration whose return type is an
+    associated-type projection (`<Self as Trait>::Assoc`, parsed as a
+    `Typ.Struct` the program never declares as a type) with its concrete
+    `TraitMethodImpl`, mapping the projection's Boole type name to the impl's
+    resolved return type — e.g. `Ops_Arith_mul_Output` → `montgomeryPoint`.
+    `typToBooleType` consults the result so the projection lowers to the
+    concrete impl type rather than an undeclared nominal type.
+
+    Single impl per trait method is assumed (true for the operator traits these
+    benchmarks use): with several impls the last-seen return type wins, so a
+    genuinely polymorphic associated type would need a per-instantiation
+    encoding instead. -/
+private def buildAssocTypeResolution (decls : List Decl) : Std.HashMap String Typ := Id.run do
+  let returnTyp? : Decl → Option Typ
+    | .specFn f => some f.returnType
+    | .execFn f => some f.returnType
+    | _ => none
+  let implMethod? : Decl → Option Ident
+    | .specFn f => f.traitImplMethod?
+    | .execFn f => f.traitImplMethod?
+    | _ => none
+  -- Names the program declares as types: a projection carrier never appears
+  -- here, so this guards against rewriting a real (generic) datatype that a
+  -- trait method happens to return.
+  let declaredTypeNames : List String := decls.filterMap fun d =>
+    match d with
+    | .struct s => some (datatypeNameOf s.name)
+    | .enum e => some (datatypeNameOf e.name)
+    | _ => none
+  -- Index decls by name so an impl can find the abstract method it implements.
+  let mut byName : Std.HashMap Ident Typ := {}
+  for d in decls do
+    match returnTyp? d with
+    | some rt => byName := byName.insert (Decl.name d) rt
+    | none => pure ()
+  let mut resolution : Std.HashMap String Typ := {}
+  for d in decls do
+    match implMethod? d, returnTyp? d with
+    | some method, some implRet =>
+      match byName.get? method with
+      | some (.Struct projName _) =>
+        let booleName := datatypeNameOf projName
+        if !declaredTypeNames.contains booleName && !isVecTypeName projName then
+          resolution := resolution.insert booleName implRet
+      | _ => pure ()
+    | _, _ => pure ()
+  return resolution
+
 def declsToBooleProgram (decls : List Decl) :
     BuildM (Array BCmd) := do
+  -- Resolve trait associated-type projections to their concrete impl types
+  -- before any decl is lowered.  Built from the full decl set, since pruning
+  -- below may drop the impl decls the resolution reads from.
+  modify fun c => { c with assocTypeResolution := buildAssocTypeResolution decls }
   -- `vec2seq` branch: Verus emits stub `proc Vec_*` / `proc Slice_into_vec`
   -- wrappers (and a few other Vec-named procedures) to cover the Rust Vec
   -- surface — `Vec_new`, `Vec_len`, `Vec_push`, `Vec_from_elem`,

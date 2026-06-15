@@ -28,6 +28,7 @@ tests/VerusFiles/mutual_recursion.rs
 tests/VerusFiles/proof_fn.rs
 tests/VerusFiles/recursion.rs
 tests/VerusFiles/sha256_compact_indexed.rs
+tests/VerusFiles/test_array.rs
 tests/VerusFiles/test_opaque_reveal.rs
 tests/VerusFiles/test_requires.rs
 tests/VerusFiles/test_specfn.rs
@@ -44,6 +45,7 @@ tests/adopted_rust_verify_test/integer_ring.rs
 ../verus/examples/fun_ext.rs
 ../verus/examples/generics.rs
 ../verus/examples/imo_1988_6.rs
+../verus/examples/integers.rs
 ../verus/examples/modules.rs
 ../verus/examples/quantifiers.rs
 ../verus/examples/statements.rs
@@ -58,6 +60,7 @@ tests/adopted_rust_verify_test/integer_ring.rs
 ../verus/examples/guide/getting_started.rs
 ../verus/examples/guide/nonlinear_bitvec.rs
 ../verus/examples/guide/opaque.rs
+../verus/examples/guide/pervasive_example.rs
 ../verus/examples/guide/overflow.rs
 ../verus/examples/guide/recursion.rs
 ../verus/examples/guide/references.rs

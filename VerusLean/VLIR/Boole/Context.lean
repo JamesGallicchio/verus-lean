@@ -7,12 +7,15 @@
   context.
 -/
 import Std.Data.HashSet
+import Std.Data.HashMap
 import StrataBoole.Boole
+import VerusLean.VLIR.Defs
 
 namespace VerusLean.Boole.Context
 
 open Strata
 open StrataDDM (SourceRange)
+open VerusLean (Typ)
 
 structure BuildScope where
   boundVars : Array String := #[]
@@ -107,6 +110,13 @@ structure BuildCtx where
   /-- Feature toggles for synthesized verification aids; all-on by default
       (current behavior).  See `SynthConfig`. -/
   synthConfig : SynthConfig := {}
+  /-- Resolution table for trait associated-type projections.  Verus lowers
+      `<Self as Trait>::Assoc` to a nominal type carrier (parsed as `Typ.Struct`)
+      that no Boole declaration backs; this maps that carrier's Boole type name
+      (e.g. `Ops_Arith_mul_Output`) to the concrete type the in-program trait
+      impl resolves it to (e.g. `montgomeryPoint`).  Built once from the decl set
+      in `declsToBooleProgram`; consulted by `typToBooleType`. -/
+  assocTypeResolution : Std.HashMap String Typ := {}
 
 abbrev BuildM := StateT BuildCtx (Except String)
 

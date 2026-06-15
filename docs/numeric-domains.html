@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>VLIR → Boole: Numeric Domain Classification</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    max-width: 920px;
+    margin: 2em auto;
+    padding: 0 1.5em;
+    line-height: 1.55;
+    color: #222;
+  }
+  h1 { border-bottom: 2px solid #444; padding-bottom: 0.3em; }
+  h2 { color: #114; margin-top: 2em; border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }
+  h3 { color: #335; margin-top: 1.5em; }
+  h4 { color: #557; margin-top: 1.2em; margin-bottom: 0.3em; }
+  code, pre {
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 0.9em;
+  }
+  code {
+    background: #f3f3f3;
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+  }
+  pre {
+    background: #f7f7f7;
+    padding: 0.8em 1em;
+    border-radius: 4px;
+    border-left: 3px solid #888;
+    overflow-x: auto;
+    line-height: 1.4;
+  }
+  pre code { background: none; padding: 0; }
+  table {
+    border-collapse: collapse;
+    margin: 1em 0;
+    width: 100%;
+  }
+  th, td {
+    border: 1px solid #ccc;
+    padding: 0.55em 0.7em;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #eef; font-weight: 600; }
+  tr:nth-child(even) td { background: #fafafa; }
+  .ok { color: #060; font-weight: 600; }
+  .reject { color: #a00; font-weight: 600; }
+  .neutral { color: #555; }
+  .callout {
+    background: #fffbe6;
+    border-left: 4px solid #c9a000;
+    padding: 0.7em 1em;
+    margin: 1em 0;
+    border-radius: 4px;
+  }
+  .filepath {
+    color: #336;
+    font-style: italic;
+  }
+  ul, ol { padding-left: 1.5em; }
+  li { margin: 0.2em 0; }
+  .small { font-size: 0.88em; color: #555; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 2em 0; }
+</style>
+</head>
+<body>
+
+<h1>VLIR → Boole: Numeric Domain Classification</h1>
+
+<p>
+When the VLIR pipeline lowers a Rust/Verus program to Boole, every numeric value and
+every arithmetic operation is emitted in exactly one of <strong>three domains</strong>:
+</p>
+
+<ul>
+  <li><strong><code>bv</code></strong> — a fixed-width bitvector (<code>bv1</code>,
+      <code>bv8</code>, <code>bv16</code>, <code>bv32</code>, <code>bv64</code>). Wrapping
+      arithmetic; overflow is a separate proof obligation.</li>
+  <li><strong><code>int</code></strong> — a mathematical integer. Unbounded, never wraps.</li>
+  <li><strong><code>nat</code></strong> — a non-negative integer. Unbounded above, with
+      source-level preconditions (no division by zero, no negative subtraction) surfaced
+      explicitly.</li>
+</ul>
+
+<p>
+The domain is never chosen for convenience — it is chosen to be <strong>faithful</strong>
+to Verus semantics. The discriminator is simple to state:
+</p>
+
+<div class="callout">
+<strong>The ground-truth rule.</strong>
+A Verus arithmetic op's <em>result type</em> decides its domain. An <code>int</code> or
+<code>nat</code> result means the operation is mathematical and <em>never wraps</em>; it is
+lowered in the <code>int</code>/<code>nat</code> domain. A <code>uN</code>/<code>iN</code>
+result (exec-mode, fixed width) is lowered in the <code>bv</code> domain, where overflow is
+handled as a separate obligation rather than by wrap-around in the model.
+</div>
+
+<p>
+Variable promotion — the <code>usize</code>/<code>isize</code> story documented in the
+sibling <span class="filepath">docs/int-promotion.html</span> — is <em>one pass within
+this system</em>. It moves selected source variables from the <code>bv</code> side onto the
+<code>int</code> side so that index reasoning stays in a single domain; the classification
+machinery described here is what decides, for every other value and operation, which domain
+applies.
+</p>
+
+<hr>
+
+<h2>1 · Spec-arithmetic result type drives the domain</h2>
+
+<p>
+Verus spec-mode arithmetic (<code>+ - * / %</code>) on finite-width operands is modeled as
+mathematical <code>int</code>/<code>nat</code> and <em>never wraps</em>. The mechanism is an
+explicit <code>Clip</code> marker that routes the operands through int-domain lowering with
+<code>as_int</code> widening.
+</p>
+
+<p>
+The <code>Binary</code> arm of the parser captures the VLIR wrapper's result type via
+<code>getTyp</code>. For an <code>.Arith</code> op whose result type is <code>.Int</code> or
+<code>.Nat</code>, the parser wraps the binary node with <code>.Unary (.Clip .Int/.Nat
+false)</code>. That <code>Clip</code> reaches <code>Boole/Translate.lean</code>, where
+<code>arithRunsInInt</code> detects spec-mode int/nat arithmetic and directs operands through
+<code>prepScalarOperands</code> at <code>Typ.Int</code> (widening each operand via the native
+<code>as_int</code>, the same coercion used in <code>Sequence.select</code> index handling).
+The domain is then set to <code>.int</code>, so <code>numBinopEmit</code> dispatches to
+<code>applyBinaryOp</code>, which emits the unbounded int <code>+</code> (faithfully summing
+without wrap). Exec-mode arithmetic keeps a finite-width <code>uN</code>
+result type, lacks the <code>Clip</code>, and stays in the <code>bv</code> domain where
+overflow is a separate obligation.
+</p>
+
+<pre><code>-- Parser.lean Binary arm:
+    match op, resultTy with
+    | .Arith _ _, .Int => return .Unary (.Clip .Int false) binExp
+    | .Arith _ _, .Nat => return .Unary (.Clip .Nat false) binExp
+
+-- Boole/Translate arithRunsInInt:
+    let arithRunsInInt :=
+      match op with
+      | .Arith _ _ =>
+        match expectedKind? with
+        | some .int | some .nat => true
+    if arithRunsInInt then
+      let (l, r) ← prepScalarOperands env bound Typ.Int lhs rhs
+      match ← numBinopEmit .int op l r with
+
+-- Sequence.select index coercion:
+        let intIdx ← expToBoole env bound (some .Int) iArg</code></pre>
+
+<p class="filepath">VerusLean/VLIR/Parser.lean:1139–1161 · VerusLean/VLIR/Boole/Translate.lean:949–960, 774–778, 1015–1023, 1065–1073</p>
+
+<h4>Example</h4>
+
+<p>
+Source spec <code>fe1.limbs[i] + fe2.limbs[i] &lt; bound</code> — both operands are
+<code>u64</code> limb values, but the add's result type is marked <code>.Int</code> in VLIR.
+</p>
+
+<ul>
+  <li><strong>Parser emits:</strong>
+      <code>Clip .Int false (Binary (.Arith .Add …) (limbs[i] fe1) (limbs[i] fe2))</code></li>
+  <li><strong>Boole routing:</strong> <code>arithRunsInInt</code> fires; both operands are
+      translated at <code>Typ.Int</code> via <code>prepScalarOperands</code>, yielding
+      <code>Sequence.select(…) as_int</code> on each side.</li>
+  <li><strong>Domain dispatch:</strong> <code>numBinopEmit .int</code> fires, emitting the
+      int <code>+</code> (unbounded add, no wrap) — the mathematical sum
+      <code>select(…) as_int + select(…) as_int &lt; bound as_int</code>.</li>
+  <li><strong>Exec-mode contrast:</strong> a wrapping add such as <code>wrapping_add</code>
+      keeps its <code>uN</code> result type (no <code>Clip</code>), stays in the
+      <code>bv</code> domain, and uses bv <code>+</code> at width 64 (wrapping).</li>
+</ul>
+
+<div class="callout">
+<strong>What the <code>Clip</code> does and does not do.</strong>
+The <code>.Clip</code> node performs no arithmetic itself — it is a marker that causes the
+inner expression to be evaluated in the int domain. The actual operand widening
+(<code>as_int</code>) happens while translating the operands at <code>Typ.Int</code> inside
+<code>prepScalarOperands</code> and the subsequent <code>expToBoole</code> calls. Dropping or
+mis-routing this marker would silently turn a never-wrapping spec sum into wrapping bv
+arithmetic.
+</div>
+
+<hr>
+
+<h2>2 · Three domains &amp; <code>numKindOfTyp?</code> (Rule ①)</h2>
+
+<p>
+<code>numKindOfTyp?</code> is the single source of truth for numeric-domain classification.
+It folds <strong>Rule ①</strong>: integers whose width is outside the Boole-supported set
+<code>{1, 8, 16, 32, 64}</code> are faithfully modeled as mathematical integers, not
+bitvectors, because there is no native <code>bv128</code> backend.
+</p>
+
+<p>
+The function uses <code>isSupportedBvWidth</code> to test the width. For <code>.UInt w</code>
+and <code>.SInt w</code>, a supported width returns <code>.bv w signed</code> (the bitvector
+domain); otherwise it returns <code>.int</code>. Thus <code>u128</code> and <code>i128</code>
+fail the support check and are classified as <code>.int</code>. <code>USize</code>/<code>ISize</code>
+map to a <code>bv</code> at <code>usizeBitWidth</code>; bare <code>.Int</code>/<code>.Nat</code>
+map to <code>.int</code>/<code>.nat</code>; <code>Decorated</code> wrappers recurse on the
+payload.
+</p>
+
+<pre><code>def numKindOfTyp? : Typ → Option NumKind
+  | .Int => some .int
+  | .Nat => some .nat
+  | .UInt w => if isSupportedBvWidth w then some (.bv w false) else some .int
+  | .SInt w => if isSupportedBvWidth w then some (.bv w true) else some .int
+  | .USize => some (.bv usizeBitWidth false)
+  | .ISize => some (.bv usizeBitWidth true)
+  | .Decorated _ ty => numKindOfTyp? ty
+  | _ => none</code></pre>
+
+<p class="filepath">VerusLean/VLIR/Boole/Coercions.lean:81–98</p>
+
+<h4>Example</h4>
+
+<p>
+For <code>u128</code>, the pattern <code>.UInt 128</code> matches the fourth clause;
+<code>isSupportedBvWidth 128</code> returns <code>false</code> (128 ∉ {1,8,16,32,64}), so the
+function returns <code>some .int</code> rather than <code>some (.bv 128 false)</code>. This
+causes field-mul products of two 64-bit limbs (which sum to ~128 bits) to be modeled as
+mathematical integers, where overflow is represented explicitly through side conditions
+rather than as automatic wrap-around.
+</p>
+
+<div class="callout">
+<strong>Soundness side condition.</strong>
+Modeling <code>u128</code>/<code>i128</code> as <code>int</code> drops wrap-around semantics;
+it is faithful <em>only</em> when the value provably never wraps. Verus discharges this as a
+side condition (e.g. the field-mul boundary lemmas ensure products of 64-bit limbs stay in
+range). The defining comment marks this explicitly — if a computation actually wraps, the
+mapping is unsound.
+</div>
+
+<hr>
+
+<h2>3 · Arithmetic footprint — source-domain classification</h2>
+
+<p>
+<code>arithFootprint</code> walks an arithmetic subtree and classifies each node as a
+mathematical integer or a bitvector; <code>expHasMixedIntBvArith</code> detects when both
+domains coexist in the same tree, which triggers int-space lowering with explicit
+<code>bv→int</code> casts.
+</p>
+
+<p>
+<code>arithFootprint</code> recurses over the subtree, classifying each node via:
+<code>Unbox</code> (extracts the type from a boxed value), <code>Clip</code> (a <code>Clip</code>
+on <code>Int</code>/<code>Nat</code> yields <code>hasMathInt</code>), <code>Const</code> (a
+bv-typed literal yields <code>hasBv</code>; a fixed-width int literal yields
+<code>hasMathInt</code>), and leaf inference (variables/expressions delegated to
+<code>inferNumKind</code>). The <code>merge</code> operation OR-combines the two independent
+flags as the tree is traversed, and <code>ArithFootprint.isMixed</code> is true exactly when
+both flags are set. When mixed, <code>expHasMixedIntBvArith</code> signals the translation
+layer; <code>arithRunsInInt</code> becomes true, both operands are coerced to <code>Int</code>
+via <code>prepScalarOperands</code>, and the binary op runs in int-space. <code>coerceNumeric</code>
+then applies the explicit <code>bv→int</code> cast (<code>bvToInt</code> with width and
+signedness) to each bv operand. Pure-bv arithmetic stays in <code>bv</code>; pure-int stays
+in <code>int</code>; only mixed trees force int-space lowering and bv-operand casting.
+</p>
+
+<pre><code>-- ArithFootprint classification and merge
+private structure ArithFootprint where
+  hasMathInt : Bool := false
+  hasBv : Bool := false
+
+private def ArithFootprint.merge (lhs rhs : ArithFootprint) : ArithFootprint :=
+  { hasMathInt := lhs.hasMathInt || rhs.hasMathInt
+    hasBv := lhs.hasBv || rhs.hasBv }
+
+private def ArithFootprint.isMixed (f : ArithFootprint) : Bool :=
+  f.hasMathInt && f.hasBv</code></pre>
+
+<p class="filepath">VerusLean/VLIR/Boole/Inference.lean:440–508, 514–538 · VerusLean/VLIR/Boole/Translate.lean:949–960 · VerusLean/VLIR/Boole/Cast.lean:132–157</p>
+
+<h4>Example</h4>
+
+<p>
+<code>u128_literal + bv64</code>, where <code>u128</code> is unsupported and modeled as
+<code>int</code>:
+</p>
+
+<ul>
+  <li><code>arithFootprint</code> enters the <code>Binary(.Arith, …)</code> node and analyzes
+      both children.</li>
+  <li><strong>Left</strong> (<code>u128_literal</code>): the <code>Const</code> case hits with
+      <code>UInt 128</code> → <code>hasMathInt := true</code>.</li>
+  <li><strong>Right</strong> (<code>bv64</code> var): <code>inferNumKind</code> →
+      <code>some (.bv 64 unsigned)</code> → <code>hasBv := true</code>.</li>
+  <li><code>merge</code> → <code>{hasMathInt: true, hasBv: true}</code>; <code>isMixed</code>
+      is true and <code>expHasMixedIntBvArith</code> detects it.</li>
+  <li>In <code>Translate</code>, <code>arithRunsInInt</code> becomes true;
+      <code>prepScalarOperands</code> coerces both operands to <code>Int</code>;
+      <code>numBinopEmit</code> runs <code>+</code> in the int domain; <code>coerceNumeric</code>
+      applies <code>.bvToInt 64 unsigned</code> to the <code>bv64</code> operand before the
+      addition.</li>
+</ul>
+
+<p class="small">
+Literals of bare <code>.Int</code>/<code>.Nat</code> type do not contribute to the footprint
+unless they are explicitly fixed-width (<code>UInt</code>/<code>SInt</code>/<code>USize</code>/<code>ISize</code>)
+or have magnitude ≥ 2⁶⁴. This keeps them context-determined, so they do not force a mixed
+classification when paired with bv operands.
+</p>
+
+<hr>
+
+<h2>4 · Rule ③ — narrowing casts in int-modeled context wrap</h2>
+
+<p>
+A cast to a fixed-width integer type in the int domain applies wrapping formulas
+<em>unless</em> the inner source type syntactically fits the target. This prevents a real
+narrowing from being silently elided, which would change the meaning of the statement.
+</p>
+
+<p>
+When lowering a <code>Clip</code> (numeric cast) to a fixed-width target in the int domain,
+<code>clipWrapIntModeled</code> first asks whether the inner's source type fits the target via
+<code>fixedWidthInfoOfTyp</code> and <code>fitsFixedWidth</code> (an unsigned cast to the same
+or larger width, or a signed cast to the same or larger width, always fits). If it fits, the
+inner passes through unchanged and the cast is elided. If it does not fit, wrapping is
+applied: for unsigned targets, <code>inner mod 2^w</code>; for signed targets,
+<code>(inner + 2^(w-1)) mod 2^w − 2^(w-1)</code> (Euclidean mod, implementing two's-complement
+reinterpretation). For expressions whose source type cannot be read syntactically (arithmetic
+trees, function calls returning <code>nat</code>/<code>int</code>) the fit check returns false
+and wrapping is applied conservatively, so a narrowing is never silently dropped (e.g. it
+would otherwise change companion lemmas such as <code>lemma_u128_shr_is_div</code>).
+</p>
+
+<pre><code>private def clipWrapIntModeled (env : VarEnv) (bound : BoundEnv)
+    (target : Nat × Bool) (e : Exp) (inner : BExpr) : BExpr :=
+  let srcTy? := inferComparableTyp? env bound e &lt;|&gt;
+    (match e with | .Const _ t => some t | _ => none)
+  let fits := match srcTy?.bind fixedWidthInfoOfTyp with
+    | some src => fitsFixedWidth src target
+    | none => false
+  if fits then inner
+  else
+    let (tw, tsigned) := target
+    let full := Bld.intConst ((2 : Int) ^ tw)
+    if tsigned then
+      let half := Bld.intConst ((2 : Int) ^ (tw - 1))
+      Bld.intSub (Bld.intMod (Bld.intAdd inner half) full) half
+    else
+      Bld.intMod inner full</code></pre>
+
+<p class="filepath">VerusLean/VLIR/Boole/Translate.lean:609–634, 1043–1087 · VerusLean/VLIR/Boole/Coercions.lean:43–59</p>
+
+<h4>Examples</h4>
+
+<table>
+  <thead>
+    <tr><th>Cast</th><th>Result</th><th>Why</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>(x : u64) as u64</code></td>
+      <td><code>inner</code></td>
+      <td>Source width 64 fits target width 64; <code>fitsFixedWidth</code> is true, cast elided.</td>
+    </tr>
+    <tr>
+      <td><code>(x : u128) as u64</code></td>
+      <td><code>inner mod 2^64</code></td>
+      <td>Source width 128 does not fit target width 64; unsigned wrap.</td>
+    </tr>
+    <tr>
+      <td><code>(x : i128) as i64</code></td>
+      <td><code>(inner + 2^63) mod 2^64 − 2^63</code></td>
+      <td>Source width 128 does not fit; signed two's-complement reinterpretation.</td>
+    </tr>
+    <tr>
+      <td><code>(x + y) as u64</code></td>
+      <td><code>inner mod 2^64</code></td>
+      <td>Arithmetic inner has no syntactically readable source type; <code>srcTy?</code> is <code>none</code>, <code>fits</code> false, wrap applied conservatively.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+<strong>Scope and asymmetry.</strong>
+The rule applies only to fixed-width targets in the int domain (those that
+<code>fixedWidthInfoOfTyp</code> annotates). Width-less targets like <code>as int</code> or
+<code>as nat</code> bypass the wrapping gate. <code>fitsFixedWidth</code> is asymmetric: a
+signed value never fits an unsigned target, but an unsigned value can fit a signed target if
+the widths align (e.g. <code>u63</code> fits <code>i64</code>, but <code>u64</code> does not).
+</div>
+
+<hr>
+
+<h2>5 · Rule ④ — variable-amount shifts on int-modeled operands</h2>
+
+<p>
+Int-modeled bit-shifts with a non-constant amount lower to int division/multiplication via
+<code>int_pow2</code>, a prelude function carrying guard axioms for non-negative exponents.
+</p>
+
+<p>
+Rule ④ fires when the <em>value</em> operand of a shift is modeled in the <code>int</code>
+domain (not bitvector). For a constant amount <code>k</code>, the shift rewrites directly to
+arithmetic: <code>x &gt;&gt; k</code> → <code>x / 2^k</code> and <code>x &lt;&lt; k</code> →
+<code>x * 2^k</code>. For a non-constant amount <code>e</code> (a variable or expression),
+<code>intShiftViaPow2</code> emits <code>x div int_pow2(e)</code> and <code>x * int_pow2(e)</code>.
+<code>int_pow2</code> is defined in the <span class="filepath">Nat.boole.st</span> prelude as
+an uninterpreted function with three guarded axioms: <code>int_pow2(0) = 1</code>,
+<code>int_pow2(e+1) = 2·int_pow2(e)</code> for <code>e ≥ 0</code>, and <code>1 ≤ int_pow2(e)</code>
+for <code>e ≥ 0</code>. The gate <code>shiftValueIntModeled?</code> checks the value operand's
+domain, so ordinary bitvector shifts are unaffected.
+</p>
+
+<pre><code>/-- Extract a constant non-negative shift amount, peeling Box/Unbox/Clip
+    wrappers.  Used by rule ④ to lower an int-modeled `x >> k` / `x << k` to
+    int `x / 2^k` / `x * 2^k`. -/
+private partial def constShiftAmount? : Exp → Option Nat
+  | .Const (.Int k) _ => if k ≥ 0 then some k.toNat else none
+  | .Unary (.Box _) e | .Unary (.Unbox _) e | .Unary (.Clip _ _) e =>
+    constShiftAmount? e
+  | _ => none
+
+private partial def intShiftViaPow2 (env : VarEnv) (bound : BoundEnv)
+    (expected? : Option Typ) (arithOp : ArithOp) (mode : Mode) (lhs rhs : Exp) :
+    BuildM BExpr := do
+  let (l, r) ← prepScalarOperands env bound Typ.Int lhs rhs
+  let powIdx ← resolveFreeVar "int_pow2"
+  let powR := Bld.app (Bld.fvar powIdx) r
+  match ← numBinopEmit .int (.Arith arithOp mode) l powR with
+  | some result => coerceNumeric (some .int) (expected?.bind numKindOfTyp?) result</code></pre>
+
+<p class="filepath">VerusLean/VLIR/Boole/Translate.lean:600–617, 641–645, 788–796, 895–917 · prelude/Nat.boole.st:56–68</p>
+
+<h4>Example</h4>
+
+<p>
+Constant shift: <code>x &gt;&gt; 51</code> (where <code>x</code> is an int-modeled
+<code>u128</code>) becomes <code>x div 2^51</code>. Non-constant shift: <code>x &gt;&gt;
+shift</code> becomes <code>x div int_pow2(shift)</code>.
+</p>
+
+<p>From <code>b1_full.boole.st</code>, the <code>lemma_u128_shr_is_div</code> procedure:</p>
+
+<pre><code>procedure Bits_lemma_u128_shr_is_div (x : int, shift : int) returns ()
+spec {
+  requires 0 &lt;= shift &amp;&amp; shift &lt; 128;
+  ensures x div int_pow2(shift) == x div nat.toInt(Arithmetic_Power2_pow2(nat.fromInt(shift)));
+}</code></pre>
+
+<p>The lemma is called with concrete amounts after the divisions have been computed:</p>
+
+<pre><code>call Bits_lemma_u128_shr_is_div(c0_0, 51);
+call Bits_lemma_u128_shr_is_div(c1, 51);
+call Bits_lemma_u128_shr_is_div(c2, 51);
+call Bits_lemma_u128_shr_is_div(c3, 51);
+call Bits_lemma_u128_shr_is_div(c4, 51);</code></pre>
+
+<div class="callout">
+<strong>Soundness window.</strong>
+<code>int_pow2</code> is uninterpreted with guarded axioms defined only for <code>e ≥ 0</code>;
+negative exponents are unconstrained. The lowering is sound only for non-negative, in-range
+shift amounts — exactly matching the source language. The gate
+<code>shiftValueIntModeled?</code> deliberately inspects the <em>value</em> operand's domain,
+not the shift amount, so ordinary bitvector shifts keep their native bv semantics.
+</div>
+
+<hr>
+
+<h2>6 · Exec overflow via <code>HasType</code> ranges</h2>
+
+<p>
+Verus materializes arithmetic overflow obligations as <code>assert HasType(τ, e)</code>
+(paired with <code>assume HasType(τ, e)</code>) around clipped assignments. The translator
+lowers numeric <code>HasType</code> to a range predicate; non-numeric <code>HasType</code> is
+dropped as a typing tautology.
+</p>
+
+<p>
+<code>hasTypeRangeCond</code> converts a numeric <code>HasType</code> into a range by
+extracting the type's bit-width or nat classification: for unsigned width <code>w</code>,
+<code>0 ≤ e ≤ 2^w − 1</code>; for signed width <code>w</code>, <code>−2^(w−1) ≤ e ≤ 2^(w−1) −
+1</code>; for <code>nat</code>, <code>0 ≤ e</code> (no upper bound). The result compiles to a
+conjunction of integer comparisons. Asserts emit the range obligation directly; assumes
+re-inject the checked-range fact to the solver. Non-numeric types (bool, datatypes,
+sequences, width-less <code>int</code>) return <code>none</code> and are dropped — the Boole
+type system enforces their membership by typing alone. This is what prevents silent discharge
+of overflow obligations under int-model wrap-around.
+</p>
+
+<pre><code>private def hasTypeRangeCond (env : VarEnv) (t : Typ) (inner : Exp) :
+    BuildM (Option BExpr) := do
+  let range? : Option (Option Int × Option Int) :=
+    match fixedWidthInfoOfTyp t with
+    | some (w, false) => some (some 0, some ((2 : Int) ^ w - 1))
+    | some (w, true)  => some (some (-((2 : Int) ^ (w - 1))), some ((2 : Int) ^ (w - 1) - 1))
+    | none => if numKindOfTyp? t == some .nat then some (some 0, none) else none
+  match range? with
+  | none => pure none
+  | some (lo?, hi?) =>
+    let x ← expToBooleFlat env (some .Int) inner
+    let conds := (lo?.map (fun lo => Bld.intLe (Bld.intConst lo) x)).toList ++
+      (hi?.map (fun hi => Bld.intLe x (Bld.intConst hi))).toList
+    match conds with
+    | [c] => pure (some c)
+    | [c1, c2] => pure (some (Bld.boolAnd c1 c2))
+    | _ => pure none
+
+-- In assertion handling:
+| .Unary (.HasType t) inner =>
+  match ← hasTypeRangeCond env t inner with
+  | some c => return [assertStmt "" c]
+  | none => return []</code></pre>
+
+<p class="filepath">VerusLean/VLIR/Boole/Translate.lean:1619–1635, 1855–1861, 1878–1884</p>
+
+<h4>Examples</h4>
+
+<ul>
+  <li><code>HasType(u8, x)</code> in an assert → range <code>(0, 255)</code> compiles to
+      <code>0 ≤ x ≤ 255</code> as the overflow condition.</li>
+  <li><code>HasType(i32, y)</code> → <code>−2147483648 ≤ y ≤ 2147483647</code>.</li>
+  <li><code>HasType(int, z)</code> or <code>HasType(bool, b)</code> → returns
+      <code>none</code>; the assert is dropped.</li>
+  <li>In <em>assumes</em>, the same range predicate reinstates the post-check invariant, so
+      the int model's unbounded arithmetic remains constrained by the verified bitvector
+      width.</li>
+</ul>
+
+<div class="callout">
+<strong>Classification dependency.</strong>
+The mechanism relies on <code>fixedWidthInfoOfTyp</code> and <code>numKindOfTyp?</code> to
+classify types. Unsupported widths (e.g. an unhandled <code>u128</code>) fall through to
+<code>none</code> and are silently dropped, and the int-model translation of the inner
+expression must itself be faithful — if <code>expToBooleFlat env (some .Int) inner</code>
+does not preserve the arithmetic, the range obligation can be under-constrained.
+</div>
+
+<hr>
+
+<h2>7 · Nat-native lowering — the third domain</h2>
+
+<p>
+Arithmetic and comparison in nat-space emit prelude functions (<code>nat.add</code>,
+<code>nat.sub</code>, <code>nat.mul</code>, <code>nat.div</code>, <code>nat.mod</code>,
+<code>nat.le</code>, <code>nat.lt</code>, <code>nat.ge</code>, <code>nat.gt</code>) that carry
+the source-level preconditions directly, rather than hiding them behind <code>int</code>
+round-trips.
+</p>
+
+<p>
+When the expected type is <code>Nat</code> (propagated from <code>.Unary (.Clip .Nat _)</code>),
+or operands are inferred nat-kinded, or it is a <code>EuclideanMod</code> with nat operands,
+the translator routes to nat-native prelude functions. <code>natCmpFn</code> maps inequalities
+to <code>nat.le</code>/<code>nat.lt</code>/<code>nat.ge</code>/<code>nat.gt</code>;
+<code>natArithFn?</code> maps <code>Add→nat.add</code>, <code>Sub→nat.sub</code>,
+<code>Mul→nat.mul</code>, <code>EuclideanDiv→nat.div</code>, <code>EuclideanMod→nat.mod</code>.
+<code>numBinopEmit</code> dispatches on the <code>.nat</code> domain by resolving the prelude
+name and applying it. Operands are translated at <code>Nat</code> type, so preconditions
+surface directly: <code>nat.sub</code> requires <code>nat.toInt(b) ≤ nat.toInt(a)</code>;
+<code>nat.div</code> and <code>nat.mod</code> require <code>nat.toInt(b) ≠ 0</code> — exactly
+the obligations Verus discharges at the source.
+</p>
+
+<pre><code>-- natArithFn? (Translate.lean):
+def natArithFn? : BinaryOp → Option String
+  | .Arith .Add _          => some "nat.add"
+  | .Arith .Sub _          => some "nat.sub"
+  | .Arith .Mul _          => some "nat.mul"
+  | .Arith .EuclideanDiv _ => some "nat.div"
+  | .Arith .EuclideanMod _ => some "nat.mod"
+  | _                      => none
+
+-- Prelude function signatures (Nat.boole.st):
+function nat.add (a : nat, b : nat) : nat { nat.fromInt(nat.toInt(a) + nat.toInt(b)) }
+function nat.sub (a : nat, b : nat) : nat
+  requires nat.toInt(b) &lt;= nat.toInt(a);
+{ nat.fromInt(nat.toInt(a) - nat.toInt(b)) }
+function nat.div (a : nat, b : nat) : nat
+  requires nat.toInt(b) != 0;
+{ nat.fromInt(nat.toInt(a) div nat.toInt(b)) }
+function nat.mod (a : nat, b : nat) : nat
+  requires nat.toInt(b) != 0;
+{ nat.fromInt(nat.toInt(a) mod nat.toInt(b)) }</code></pre>
+
+<p class="filepath">VerusLean/VLIR/Boole/Translate.lean:481–947 · prelude/Nat.boole.st:30–54</p>
+
+<h4>Example</h4>
+
+<p>
+Translating a Verus spec with nat arithmetic — e.g. <code>n − m</code> where both are
+nat-typed, or <code>x % p</code> where <code>x</code> and <code>p</code> are operand-inferred
+nat — emits <code>nat.sub</code> or <code>nat.mod</code> with the precondition appearing in
+the Boole output. For instance, <code>n − m</code> emits <code>nat.sub(n, m)</code> with
+precondition <code>nat.toInt(m) ≤ nat.toInt(n)</code>, faithfully surfacing the Verus source
+obligation rather than implicitly lowering to <code>nat.fromInt(nat.toInt(n) −
+nat.toInt(m))</code>.
+</p>
+
+<div class="callout">
+<strong>Operand-driven exception for <code>mod</code>.</strong>
+<code>EuclideanMod</code> (<code>nat.mod</code>) additionally fires on <em>operand</em> types
+when both operands are inferred nat, not just on the expected type. This is restricted to
+<code>mod</code>, to preserve expected-driven firing for <code>nat.sub</code> and
+<code>nat.div</code>.
+</div>
+
+<hr>
+
+<h2>8 · Emission &amp; comparison-domain selection</h2>
+
+<p>
+Three pieces cooperate at emission time: <code>numBinopEmit</code> dispatches
+<code>(domain, op)</code> to domain-specific operators; <code>inferComparisonNumKind</code>
+joins arithmetic-tree operands to recover a domain when the leaves alone are opaque; and
+<code>comparisonPrelude</code> reconciles the two sides of a comparison onto a single domain
+before emission.
+</p>
+
+<p>
+<code>numBinopEmit</code> accepts a <code>NumDomain</code> and a <code>BinaryOp</code> and emits
+the matching operator: for <code>.int</code> it applies the standard operators; for
+<code>.nat</code> it resolves prelude names via <code>natCmpFn</code>/<code>natArithFn?</code>;
+for <code>.bv</code> it maps to signed/unsigned comparison opcodes
+(<code>SLe</code>/<code>ULe</code>/<code>SLt</code>/<code>ULt</code> …) and width-tracked
+arithmetic/bitwise operators. <code>inferComparisonNumKind</code> solves the gap that
+<code>inferNumKind</code> has no <code>.Binary</code> case, so a tree like <code>a % p</code>
+initially infers <code>none</code>; on a <code>.Binary(.Arith _ _)</code> node it recursively
+joins both operands via <code>joinArithNumKind</code>, making the tree's kind visible so both
+comparison sides pick a consistent domain. <code>comparisonPrelude</code> orchestrates the
+reconciliation: it collects bitvector shape and numeric kind for both operands, calls
+<code>chooseBitArgTyForCmp</code> to prefer bv space only if both operands are naturally
+bv-shaped or constants fit; if bv is rejected and either side carries a numeric signal it
+falls back to int space, translating both at <code>some Typ.Int</code> and post-coercing via
+<code>coerceNumeric</code>; otherwise it coerces both sides to the target bv shape via
+<code>coerceBvBv</code>, so both operands share a domain before emission.
+</p>
+
+<pre><code>-- numBinopEmit dispatcher:
+def numBinopEmit (domain : NumDomain) (op : BinaryOp) (l r : BExpr) :
+    BuildM (Option BExpr) := do
+  match domain with
+  | .int => pure (applyBinaryOp op l r)
+
+-- inferComparisonNumKind joins an arithmetic tree:
+match e with
+| .Binary (.Arith _ _) l r =>
+  joinArithNumKind (inferComparisonNumKind env bound l)
+    (inferComparisonNumKind env bound r)
+
+-- comparisonPrelude int fallback:
+if fallbackToInt then
+  let l0 ← expToBoole env bound (some Typ.Int) lhs
+  let r0 ← expToBoole env bound (some Typ.Int) rhs
+  let l ← if exprHonorsExpectedInt lhs then pure l0
+          else coerceNumeric lhsNum? (some .int) l0</code></pre>
+
+<p class="filepath">VerusLean/VLIR/Boole/Translate.lean:553–598, 722–767 · VerusLean/VLIR/Boole/Inference.lean:551–569</p>
+
+<h4>Example</h4>
+
+<p>
+Comparing <code>(n : nat) + 1</code> (an arithmetic tree) against a bitvector:
+</p>
+
+<ol>
+  <li><code>inferComparisonNumKind</code> recursively joins the operands of the
+      <code>.Binary</code> node, discovers both are nat-kinded, and infers <code>.nat</code>
+      for the tree.</li>
+  <li><code>comparisonPrelude</code> collects this signal; <code>chooseBitArgTyForCmp</code>
+      rejects bv space because the arithmetic side is non-constant;
+      <code>fallbackToInt</code> triggers because <code>lhsNum?</code>/<code>rhsNum? == some
+      .nat</code>.</li>
+  <li>Both sides translate at <code>some Typ.Int</code>; the bv side coerces through
+      <code>coerceNumeric</code> to match <code>.int</code>.</li>
+  <li><code>numBinopEmit</code> receives <code>domain = .int</code> and emits the standard
+      <code>applyBinaryOp</code>. Both sides are reconciled to the int domain before the
+      comparison.</li>
+</ol>
+
+<p class="small">
+The reconciliation relies on <code>exprHonorsExpectedInt</code> to avoid double-wrapping:
+arithmetic expressions that already honor the expected type are not post-coerced. Likewise,
+bv coercion assumes <code>coerceBvBv</code> infers widths correctly when both sides are
+already bv.
+</p>
+
+<hr>
+
+<h2>Implementation pointers</h2>
+
+<ul>
+  <li><span class="filepath">VerusLean/VLIR/Boole/Coercions.lean:81–98</span> —
+      <code>numKindOfTyp?</code>, the single source of truth for domain classification (Rule
+      ①); <code>fitsFixedWidth</code> at 43–59.</li>
+  <li><span class="filepath">VerusLean/VLIR/Parser.lean:1139–1161</span> — the
+      <code>Binary</code> arm wraps <code>.Arith</code> with <code>int</code>/<code>nat</code>
+      result type in a <code>Clip</code> marker.</li>
+  <li><span class="filepath">VerusLean/VLIR/Boole/Inference.lean:440–508, 514–538</span> —
+      <code>arithFootprint</code>, <code>ArithFootprint.merge</code>/<code>.isMixed</code>,
+      <code>expHasMixedIntBvArith</code>; <code>inferComparisonNumKind</code> at 551–569.</li>
+  <li><span class="filepath">VerusLean/VLIR/Boole/Cast.lean:132–157</span> —
+      <code>coerceNumeric</code> and the explicit <code>bv→int</code> cast.</li>
+  <li><span class="filepath">VerusLean/VLIR/Boole/Translate.lean</span> —
+    <ul>
+      <li><code>arithRunsInInt</code> / <code>prepScalarOperands</code> at 949–960, 774–778.</li>
+      <li><code>numBinopEmit</code> at 553–598; <code>comparisonPrelude</code> at 722–767.</li>
+      <li><code>clipWrapIntModeled</code> at 609–634, 1043–1087 (Rule ③).</li>
+      <li><code>constShiftAmount?</code> / <code>intShiftViaPow2</code> at 600–617, 641–645,
+          788–796, 895–917 (Rule ④).</li>
+      <li><code>natArithFn?</code> / <code>natCmpFn</code> and nat dispatch at 481–947.</li>
+      <li><code>hasTypeRangeCond</code> and assert/assume handling at 1619–1635, 1855–1861,
+          1878–1884.</li>
+    </ul>
+  </li>
+  <li><span class="filepath">prelude/Nat.boole.st:30–68</span> — <code>nat.*</code> function
+      definitions and <code>int_pow2</code> with its three guarded axioms.</li>
+</ul>
+
+<p class="small">
+See also the sibling <span class="filepath">docs/int-promotion.html</span>, which documents
+the <code>usize</code>/<code>isize</code> variable-promotion pass that runs as one stage
+within this classification system.
+</p>
+
+</body>
+</html>

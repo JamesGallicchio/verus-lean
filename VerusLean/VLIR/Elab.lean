@@ -766,7 +766,7 @@ def ProofFn.toCommand (f : ProofFn) : CoreM (TSyntax `command) := do
       auto? )
 
 def ExecFn.toCommand (f : ExecFn) : CoreM (TSyntax `command) := do
-  let ⟨name, inputs, _retName, returnType, _requires, _ensures, _body, _decreases, _locals⟩ := f
+  let ⟨name, inputs, _retName, returnType, _requires, _ensures, _body, _decreases, _locals, _traitImplMethod?⟩ := f
   let ident ← name.toIdent
   let args ← makeBracketedBinders inputs.toArray
   let returnType ← returnType.toTerm

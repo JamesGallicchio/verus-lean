@@ -92,6 +92,19 @@ Sequence boundary. Layer 2 is more invasive — it changes the variable's lowere
 contract, so it has to be conservative.
 </p>
 
+<div class="callout">
+<strong>Scope.</strong> This document covers only the <code>usize</code>/<code>isize</code>
+variable-promotion story. It is one optimization layer within a larger
+<strong>numeric-domain classification</strong> system that decides, for every value and
+operation, whether it is lowered in the <code>bv</code>, <code>int</code>, or
+<code>nat</code> domain — including the rule that spec-mode arithmetic with an
+<code>int</code>/<code>nat</code> result type is mathematical (never wraps), the
+unsupported-width (<code>u128</code>) modeling, narrowing-cast wrap, variable-amount
+shifts, and exec overflow checks. That machinery is documented in the sibling
+<span class="filepath">docs/numeric-domains.html</span>; variable promotion runs as one
+pass <em>within</em> it.
+</div>
+
 <hr>
 
 <h2>Layer 1: Sequence-index slots are always <code>int</code></h2>
@@ -136,8 +149,8 @@ expression is built depends on the source shape:
     </tr>
     <tr>
       <td><code>k</code> where <code>k</code> stays bv (env says <code>bv64</code>)</td>
-      <td><code>bv64_to_int_u(k)</code></td>
-      <td><code>coerceNumeric</code> wraps the bv value with an uninterpreted cast.</td>
+      <td><code>k as_int</code></td>
+      <td><code>coerceNumeric</code> applies Strata's native, <em>interpreted</em> <code>as_int</code> cast.</td>
     </tr>
     <tr>
       <td><code>i + 1</code> on a promoted <code>i</code></td>
@@ -146,20 +159,23 @@ expression is built depends on the source shape:
     </tr>
     <tr>
       <td><code>i + 1</code> on an un-promoted bv <code>i</code></td>
-      <td><code>bv64_to_int_u(i + bv{64}(1))</code></td>
-      <td>Arithmetic stays bv, then the result is coerced to int at the slot.</td>
+      <td><code>(i + bv{64}(1)) as_int</code></td>
+      <td>Arithmetic stays bv, then the result is cast to int at the slot via the native <code>as_int</code>.</td>
     </tr>
   </tbody>
 </table>
 
 <div class="callout">
 <strong>Faithfulness vs. solver visibility.</strong>
-The <code>bv64_to_int_u</code> cast makes the required domain crossing explicit
-without changing the source variable's lowered type. The cost is that the cast is
-opaque to the SMT solver: <code>0 ≤ k &lt; len(s)</code> on the bv side
-can't be related to <code>0 ≤ bv64_to_int_u(k) &lt; Sequence.length(s)</code> on the
-int side without explicit axioms. Eliminating those casts — by getting the variable
-itself onto the int side — is exactly the job of Layer 2.
+The <code>as_int</code> cast makes the required domain crossing explicit without
+changing the source variable's lowered type. Unlike the older <code>bv64_to_int_u</code>
+(an <em>uninterpreted</em> function), <code>as_int</code> is Strata's <em>native,
+interpreted</em> cast (PR #1217 / <code>pr/casts-boole</code>): cvc5's bitvector theory
+reasons about it directly, so <code>0 ≤ k &lt; len(s)</code> on the bv side
+<em>can</em> be related to <code>0 ≤ k as_int &lt; Sequence.length(s)</code> on the
+int side without explicit axioms. The cast is therefore no longer opaque. Layer 2
+still removes even these casts — by getting the variable itself onto the int side —
+which avoids the cast entirely and keeps the loop's index reasoning in one domain.
 </div>
 
 <hr>
@@ -277,6 +293,10 @@ the rest of the lowering runs.
     <tr>
       <td>Inside an <code>AssertBitVector</code> block</td>
       <td><code>assert by bit_vector { k &gt; 0 &amp;&amp; k &lt; N }</code> — bv-only by definition.</td>
+    </tr>
+    <tr>
+      <td>Operand of a <code>CallLambda</code></td>
+      <td>The lambda body <em>and</em> all of its arguments are visited with <code>reject</code> context — the lambda is opaque, like a user-procedure call.</td>
     </tr>
   </tbody>
 </table>
@@ -502,9 +522,12 @@ while k &lt; blocks.len() {
     <ul>
       <li><code>typToBooleType</code>: <code>USize | ISize → bvTy 64</code>.</li>
       <li><code>expToBoole</code>'s <code>Clip .USize</code>, <code>Clip .ISize</code>, and
-          <code>Box</code> arms short-circuit when <code>expected? = some Int</code>;
-          <code>Unbox</code> preserves the same expected type when translating its
-          payload.</li>
+          <code>Box</code> arms short-circuit when <code>expected? = some Int</code> (the
+          <code>Box</code> short-circuit avoids a wasteful <code>int_to_bv64_u</code> /
+          <code>as_int</code> round-trip on an already-int operand). The <code>Unbox</code>
+          arm does <em>not</em> short-circuit: it translates its payload at the Unbox's own
+          declared type <code>t</code> and then <code>coerceNumeric</code>s the result to the
+          outer <code>expected?</code> — a single cast, no round-trip.</li>
       <li>The four sequence-index arms unified to pass
           <code>expected = some .Int</code> directly.</li>
       <li><code>tryForLoopRecovery</code> consults <code>BuildCtx.promotedLocals</code>

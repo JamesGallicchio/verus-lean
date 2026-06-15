@@ -39,6 +39,11 @@ private def isVstdName (name : Ident) : Bool :=
 -/
 structure ParserState where
   expectedType : Typ := .Bool
+  /-- Set while parsing the direct child of an `as int` / `as nat` `Clip`.
+      Suppresses the synthesized arithmetic-promotion `Clip` on that child:
+      the source already coerces it to the int/nat domain, so the existing
+      lowering handles the operands (and keeps `nat.sub`/`nat.add` native). -/
+  parentIntNatClip : Bool := false
   freeVars : VarMap := {}
   locVars : VarMap := {}
   -- Acts like a stack?
@@ -68,6 +73,18 @@ def getTyp : VParser Typ :=
 
 def setTyp (t : Typ) : VParser Unit :=
   modify fun st => { st with expectedType := t }
+
+/-- Signal that the next-parsed child expression is the direct child of an
+    `as int` / `as nat` `Clip` (see `ParserState.parentIntNatClip`). -/
+def setParentIntNatClip : VParser Unit :=
+  modify fun st => { st with parentIntNatClip := true }
+
+/-- Read and clear the `parentIntNatClip` flag, so it applies to exactly one
+    node (the direct child of the numeric `Clip`) and not its descendants. -/
+def getAndClearParentIntNatClip : VParser Bool := do
+  let st ← get
+  modify fun st => { st with parentIntNatClip := false }
+  return st.parentIntNatClip
 
 def getFreeVars : VParser VarMap :=
   do let st ← get; return st.freeVars
@@ -300,6 +317,19 @@ def pathedNameFromJson (j : Json) (pathKey : String := "path") : m Ident := do
 def pathedNameFromNameJson (j : Json) (nameKey : String := "name") (pathKey : String := "path") : m Ident := do
   let nameObj ← j.getObjValM nameKey
   pathedNameFromJson nameObj pathKey
+
+/-- When a declaration's `kind` is `TraitMethodImpl`, return the abstract trait
+    method it implements (`kind.TraitMethodImpl.method.path`).  `none` for
+    abstract `TraitMethodDecl`s, inherent methods, and free functions.  The
+    translator uses this to pair a trait-method impl's resolved return type with
+    the abstract declaration's associated-type projection (`<Self as Trait>::Assoc`). -/
+def traitImplMethodFromJson? (j : Json) : m (Option Ident) := do
+  match Lean.Json.getObjValByPath j ["kind", "TraitMethodImpl"] with
+  | .ok tmi =>
+    match Lean.Json.getObjValByPath tmi ["method", "path"] with
+    | .ok _ => some <$> pathedNameFromNameJson tmi "method" "path"
+    | .error _ => pure none
+  | .error _ => pure none
 
 /--
   Parse a type from an already-parsed type and a decoration.
@@ -965,6 +995,9 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
   | s => throw s!"unexpected: {s}"
 
 partial def Exp.fromJson (j : Json) : VParser Exp := do
+  -- True iff this node is the direct child of an `as int`/`as nat` Clip.
+  -- Read-and-cleared here so it scopes to this node only, not its children.
+  let parentIntNatClip ← getAndClearParentIntNatClip
   -- Expect that exactly one of the enumerated options will be true
   match ← j["Const", "Var", "VarLoc", "VarAt", "StaticVar", "Loc", "Call", "CallLambda", "ExecFnByName", "Ctor", "Unary", "UnaryOpr", "Binary", "BinaryOpr", "If", "Bind", "WithTriggers", "ArrayLiteral", "MatchBlock"] with
   | ("Const", obj) =>
@@ -1107,6 +1140,15 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     -- A unary object should be an array with an op and a data element
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
     let op   ← UnaryOp.fromJson arr[0]
+    -- An `as int` / `as nat` Clip already coerces its child to the int/nat
+    -- domain, so flag the child arithmetic not to synthesize its own
+    -- promotion Clip (which would force a redundant int round-trip and
+    -- displace the native `nat.sub`/`nat.add` lowering).  `as uN` casts do
+    -- NOT set the flag: there the int value must still be computed before the
+    -- narrowing wrap.
+    match op with
+    | .Clip .Int _ | .Clip .Nat _ => setParentIntNatClip
+    | _ => pure ()
     let data ← fromJsonSpanned arr[1] Exp.fromJson
     return .Unary op data
 
@@ -1137,12 +1179,36 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
     return .Unary op data
 
   | ("Binary", obj) =>
+    -- Capture this Binary's own result type (the VLIR wrapper, set by the
+    -- enclosing `fromJsonSpanned`) before the children overwrite it.
+    let resultTy ← getTyp
     -- A binary object should be an array with an op and two data elements
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 3
     let op    ← BinaryOp.fromJson arr[0]
     let data₁ ← fromJsonSpanned arr[1] Exp.fromJson
     let data₂ ← fromJsonSpanned arr[2] Exp.fromJson
-    return .Binary op data₁ data₂
+    let binExp := Exp.Binary op data₁ data₂
+    -- Verus spec-mode `+ - * / %` on finite-width operands is *mathematical*
+    -- `int`/`nat` arithmetic — it never wraps (wrapping is the distinct
+    -- `wrapping_add`/`add()`), and the VLIR records that as the op's result
+    -- type even though the operands stay finite-width.  Make the implicit
+    -- promotion explicit: clip an int/nat-result arithmetic op to its result
+    -- type, so the int/nat lowering fires (operands widened `as_int`, faithful
+    -- to the unbounded sum) instead of a wrapping `bv +`.  Exec arithmetic
+    -- keeps a finite-width (`uN`) result type and is left in the bv domain,
+    -- where its overflow obligation is handled separately.
+    --
+    -- Skip the synthesized Clip when this arithmetic is the direct child of an
+    -- enclosing `as int`/`as nat` (`parentIntNatClip`): the source already
+    -- coerces it, so the existing int/nat lowering applies — and a redundant
+    -- inner Clip would force an int round-trip that displaces the native
+    -- `nat.sub`/`nat.add`.  Bare contexts (where the arith would otherwise
+    -- lower as wrapping bv) and `as uN` casts still get the promotion.
+    if parentIntNatClip then return binExp
+    match op, resultTy with
+    | .Arith _ _, .Int => return .Unary (.Clip .Int false) binExp
+    | .Arith _ _, .Nat => return .Unary (.Clip .Nat false) binExp
+    | _, _ => return binExp
 
   | ("BinaryOpr", obj) =>
     -- Complex binary operators (currently observed: `ExtEq`).
@@ -1629,6 +1695,8 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
     | .ok (.str "Opaque") => true
     | _ => false
 
+  let traitImplMethod? ← traitImplMethodFromJson? j
+
   try
     -- let termCheckKind ← j.getObjValByPathM ["axioms", "spec_axioms", "termination_check", "post_condition", "kind"]
     -- if termCheckKind != "DecreasesImplicitLemma" then
@@ -1646,6 +1714,7 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       isRecursive := isRecursive
       recursiveCasesIdxHint := recursiveCasesIdxHint
       isOpaque := isOpaque
+      traitImplMethod? := traitImplMethod?
     }
   catch _ =>
     return some <| {
@@ -1657,6 +1726,7 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       isRecursive := isRecursive
       recursiveCasesIdxHint := none
       isOpaque := isOpaque
+      traitImplMethod? := traitImplMethod?
     }
 
 private def localDeclOriginOfKind? (kind : Json) : Option LocalDeclOrigin :=
@@ -1863,7 +1933,8 @@ def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
       decreasesFromExecProofCheck j
     else
       pure []
-  return some <| ExecFn.mk name args retName returnType requires.toList ensures bodyStm decreases locals
+  let traitImplMethod? ← traitImplMethodFromJson? j
+  return some <| ExecFn.mk name args retName returnType requires.toList ensures bodyStm decreases locals traitImplMethod?
 
 
 def typeParamsFromJson (j : Json) : m (List String) := do

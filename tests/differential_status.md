@@ -1,13 +1,42 @@
 # Differential Status
 
 This file tracks three things separately:
-- raw Core regression outcomes from `regress_examples.sh`
-- Boole smoke/elaboration status for selected cases
+- automated Boole pipeline outcomes from `regress_examples.sh`
+- targeted Boole smoke/elaboration/verification diagnostics
 - manual faithfulness judgments for reviewed cases
 
 Solver success is **not** used to classify faithfulness.
 
 ## Data Sources
+- **2026-06-15 automated refresh** (`verus-boogie @ f959ae7` plus the
+  associated-type-resolution working-tree changes; `Strata`
+  `pr/casts-boole @ fff49d4e3` plus its current working-tree fixes; solver:
+  `cvc5`):
+  - `lake build`: success (443 jobs; warnings only).
+  - `./tests/check_working_tests.sh`: **46 passed · 2 skipped (Strata gap:
+    `generics`, `guide/overflow`) · 1 failed (`crypto_noref`) · 0 generation
+    failures** after adding `test_array`, `integers`, and
+    `guide/pervasive_example` to `working_tests.txt`. This supersedes the
+    39/1/7 and 44/1/1 gate snapshots below.
+  - `./tests/check_regression_gate.sh` / `regress_examples.sh --all-suites`:
+    **67 verify passed · 0 skipped (Sequence) · 6 skipped (Strata gap) ·
+    1 known translator bug · 53 verify failures · 0 generation failures ·
+    0 missing JSON · 4 ignored**. Total accounted: **131 tests**.
+    The gate exits nonzero because it requires zero verify failures, while the
+    broad differential set currently has 53 failing cases (many already
+    documented as unsupported/unfaithful); use `check_working_tests.sh` as the
+    stable regression gate.
+  - The all-suites scan has expanded since the 2026-05-19 124-test refresh,
+    notably including the Dalek B1-B5 files now present under
+    `tests/VerusFiles/`. `b1_full` still fails at Lean elaboration (stack
+    overflow). `b5_minimal` now type-checks and reaches verification:
+    **329 obligations: 241 passed · 1 SMT encoding error · 87 timeouts**; the
+    encoding error is `Ops_Arith_Mul_mul_ensures_8_3047`, matching the
+    documented unresolved abstract-trait dispatch gap.
+  - `guide/quants` no longer matches its 2026-06-11 zero-error claim:
+    **149 obligations: 129 passed · 7 SMT encoding errors · 13 timeouts**.
+    The encoding errors are the `assert_81` / `assume_82`
+    `Sequence.update`/`Sequence.select` obligations.
 - Full run (`./tests/regress_examples.sh --all-suites`):
   - run id: `20260430_204358` (historical baseline; per-test classifications below are anchored to this run unless explicitly updated)
   - solver: `cvc5`
@@ -309,16 +338,33 @@ Solver success is **not** used to classify faithfulness.
     reverse examples),
     `verus-examples:exec_termination_example` (residual iterator/ghost state),
     `verus-examples:guide/invariants` (`bv64` where `int` expected)
-  - the raw summary below is still based on Core output plus `strata verify`
+  - the manual faithfulness buckets below were refreshed against the current
+    Boole output on 2026-06-15; historical automated snapshots remain below
+    for comparison
 
-## Boole Regression Summary (base full run `20260430_204358` plus mirrored tests)
-Tests in regression and classified in this doc: **122**.
+## Automated Boole Regression Summary (2026-06-15)
+`regress_examples.sh --all-suites` currently scans 131 tests:
+- generation failures: 0
+- missing json: 0
+- verify passed: 67
+- verify skipped (Sequence): 0
+- verify skipped (Strata gap): 6
+- known translator bugs: 1
+- verify failures: 53
+- ignored: 4
+
+These are automated pipeline outcomes, not faithfulness judgments. The manual
+classification below has been refreshed against all 131 currently scanned
+tests, including the newly scanned Dalek cases.
+
+## Manual Differential Classification (refreshed 2026-06-15)
+Tests in regression and classified in this doc: **131**.
 `regress_examples.sh --all-suites` scans `tests/VerusFiles/`,
 `tests/adopted_rust_verify_test/`, `verus/examples/`, and
 `verus/examples/guide/` at `find -maxdepth 1`.
 
-Bucket totals: 16 (faithful and same) + 48 (faithful but different) +
-58 (not faithful) = **122**, matching the regression test count.
+Bucket totals: 21 (faithful and same) + 54 (faithful but different) +
+56 (not faithful) = **131**, matching the current regression test count.
 
 Classification rule (faithfulness-first): a test is placed in a bucket by
 asking, in order, (1) is the emitted Boole faithful to the source — i.e. it
@@ -334,9 +380,8 @@ or this doc.
 
 Primary verify statuses from the **base regression run `20260430_204358`**
 (historical) plus the two mirrored `vlir-tests` entries above (sum to 122).
-**See the 2026-05-19 all-suites refresh at the top of "Data Sources" for
-current `main2`-pin numbers (45/4/1/1/69/0-missing/4-ignored on 124 tests)**;
-the breakdown below is kept for the historical baseline only:
+See the 2026-06-15 automated summary above for current results; the breakdown
+below is kept for the historical baseline only:
 - generation failures: 0
 - missing json: 8
 - verify passed: 17
@@ -412,25 +457,38 @@ to repeat them.
   condition is still not faithful because `[TRANS-reveal-with-fuel]` still
   changes the source-level behavior.
 
-## faithful and same as Verus output (16)
+The 2026-06-15 manual pass review retained the following currently passing
+tests in `not faithful translation`: `verus-examples:modules`,
+`verus-examples:recommends`, `verus-examples:recursion`,
+`verus-examples:syntax_attr`, `verus-examples:test_expand_errors`,
+`verus-examples:guide/const`, and `verus-examples:guide/recursion`. Passing
+does not repair their documented visibility, reveal/fuel, hide, wrapper
+erasure, or name-collision semantics.
+
+## faithful and same as Verus output (21)
 - `verus-examples:adts_eq`
 - `verus-examples:assertions` (fail as expected)
 - `verus-examples:debug` (fail as expected)
+- `verus-examples:external` (`external_body` follows the standard trusted-spec convention; erased `Ghost<int>` and `println!` body do not change verification meaning; native `as_int` preserves and discharges the mixed `u64`/`int` precondition)
 - `verus-examples:fun_ext`
 - `verus-examples:guide/calc`
 - `verus-examples:guide/datatypes`
 - `verus-examples:guide/equality`
 - `verus-examples:guide/getting_started`
+- `verus-examples:guide/pervasive_example` (sequence literal, length, and indexing lower directly through the native `Sequence` model; 12/12 obligations pass)
 - `verus-examples:imo_1988_6`
+- `verus-examples:integers` (native integer/bitvector casts preserve the source assertions; 35/35 obligations pass)
 - `verus-examples:structural`
 - `vlir-tests:basic_failure` (fail as expected)
 - `vlir-tests:binder_cast_regressions`
 - `vlir-tests:by_lean` (fail as expected)
 - `vlir-tests:matching`
+- `vlir-tests:sha256_compact_indexed` (indexed loops, `Sequence` accesses, wrapping bitvector additions, and mutable-reference state output are preserved)
+- `vlir-tests:test_array` (array literals and inequality lower directly to concrete `Sequence` construction and equality; 6/6 obligations pass)
 - `vlir-tests:test_opaque_reveal` (opaque function declaration-only + reveal as assume)
 - `vlir-tests:test_specfn`
 
-## faithful but different from Verus output (48)
+## faithful but different from Verus output (54)
 - `verus-examples:adts` (datatypes, variant checks, structural equality; `matches` clauses correctly desugar to `..is<ctor>(o) && ..field(o) == val` form)
 - `verus-examples:assorted_demo` (`#[verifier::external]` fn dropped from translation entirely; `external_body` follows the standard `assume false;` convention)
 - `verus-examples:basic_failure` (translation is source-close; the test's `external_span(s: Seq<nat>)` proof procedure lowers to `procedure external_span (s : Sequence nat)` and is blocked by Strata's current Sequence frontend/indexing support. **2026-05-19:** previously missing-JSON because the upstream `.rs` lacks `fn main()`; the local `fn main(){}` source edit (uncommitted, in `verus/examples/basic_failure.rs`) unblocks Verus export so the file now reaches Stage 3 and surfaces this pre-existing Sequence-frontend failure rather than hiding behind `E0601`)
@@ -445,7 +503,7 @@ to repeat them.
 - `verus-examples:guide/modes` (`Tuple` type declared by translator when referenced; `[TRANS-coercion-uninterpreted]` in mixed `nat`/`bv8`/`int` arithmetic — uninterpreted `nat_to_int` and `bv8_to_int_u` block obligations like `bv8_to_int_u(u) < i && i < nat_to_int(n)`)
 - `verus-examples:guide/nonlinear_bitvec` (translation faithful: `[bitvector_query]`/`[nonlinear_query]`/`[compute]` proof-mode labels emitted; `[TRANS-trigger-annotation]` strips `#[trigger]` annotations on De-Morgan quantifiers but preserves logical content. Verify SKIP — Strata-side dispatch for the proof-mode labels is incomplete on this case)
 - `verus-examples:guide/opaque` (faithful empty Boole export: source `pub open spec fn` opaque-with-`reveal_with_fuel` declarations have no exec procedures to verify. **2026-05-19:** moved to `tests/ignored_tests.txt` as `EMPTY-EXPORT`. Even after appending `fn main(){}` to the source, Verus reports `0 verified, 0 errors` and emits no JSON because there are no Verus-mode declarations to serialize — consistent with the historical "nothing for Strata to discharge" classification)
-- `verus-examples:guide/overflow` (`[MODEL-missing-types]`: `Arithmetic_overflow` not modelled in Strata; `Num_checked_add` lowers to a procedure with `assume false;` body per the external-body convention)
+- `verus-examples:guide/overflow` (`[MODEL-missing-types]`: `Arithmetic_overflow` not modelled in Strata; `Num_checked_add` lowers to a procedure with `assume false;` body per the external-body convention. **2026-06-15:** currently classified `skip_gap` earlier in elaboration because native `as_int` is applied to an unmonomorphized type variable `V`; this is the same Strata generic-monomorphization gap as `verus-examples:generics`)
 - `verus-examples:guide/references` (`[TRANS-coercion-uninterpreted]` in the loop's `decreases bv32_to_int_u(b_out)` — Strata cannot discharge the decrement because `bv32_to_int_u` has no body; immutable/mutable references erase to plain values, which is verification-equivalent)
 - `verus-examples:guide/requires_ensures_edit` (source `i8` with signed comparisons `-16 <= x1 < 16` lowers to `<=s`/`<s` (`bvsle`/`bvslt`) Boole AST — blocked by Strata Verify lacking dispatch arms for these signed-bv-comparison constructors; tracked in the strata-bv-lowering issue draft)
 - `verus-examples:guide/requires_ensures` (same signed-bv-comparison gap as `requires_ensures_edit`; `print_two_digit_number` is `external_body` and follows the `assume false;` convention)
@@ -471,6 +529,12 @@ to repeat them.
 - `vlir-tests:FindMax` (`Vec<i32>` find-max via `Sequence bv32`; loop-index uses now lower through `[TRANS-loop-counter-int]`; value comparisons remain signed bv32 comparisons such as `>=s`)
 - `vlir-tests:integer_ring` (Strata type error on intentionally-failing `type_fail`; cvc5 also times out on `wide_mul` ensures — non-linear bv64 multiplication beyond solver default budget)
 - `vlir-tests:LoopSimple` (`i32` summation loop; `[TRANS-coercion-uninterpreted]` in `decreases bv32_to_int_s(n - i)`; signed comparisons `<s`/`<=s` use `bvslt`/`bvsle` Boole AST nodes that lack dispatch arms in Strata Verify (per the strata-bv-lowering issue draft); intentionally fails as a stable verify-mismatch baseline)
+- `vlir-tests:LoopSimpleWithSpec` (source-close nat recursive specification, loop invariant/decreases, overflow assertions, and proof procedure; Strata still times out on hard obligations, so its outcome differs from Verus)
+- `vlir-tests:b1_boundary_proved` (source-close Dalek boundary variant, including its trusted source assumptions; Strata leaves obligations open while Verus passes)
+- `vlir-tests:b1_full` (emission is source-close, but the generated Lean/Strata program currently hits a stack overflow before verification completes)
+- `vlir-tests:b1_minimal` (source-close Dalek B1 reduction, including source `admit`/trusted assumptions; Strata leaves obligations open while Verus passes)
+- `vlir-tests:b2_minimal` (source-close Dalek B2 reduction, including source trusted assumptions; Strata leaves obligations open while Verus passes)
+- `vlir-tests:b2_minimal_upstream` (source-close upstream-style Dalek B2 reduction; Strata leaves obligations open while Verus passes)
 - `vlir-tests:mutual_recursion` (Boole output is a source-close `rec function is_odd ... function is_even ...` block. **2026-05-18 (resolved):** the `.mutualBlock` Boole-translation arm now threads the source `decreases abs(i)` measure (was hardcoded `(ann none)`); regenerated Boole emits `rec function is_odd … decreases abs(i)` and Strata's int-termination checker passes all `is_even_terminates_*` obligations.  Translation faithful and termination-clean.  The only residual `even_odd_mod2_ensures_*` failures are an *expected Strata encoding limitation*: int-recursive fns are pure UFs with no definitional axiom, so the solver cannot prove the inductive `is_even(i) <==> i%2==0` ensures — not a translator defect)
 - `vlir-tests:nonlinear` (`[TRANS-coercion-uninterpreted]`: `nat`-typed nonlinear obligations like `bv32_to_int_u(x) * bv32_to_int_u(z) <= nat_to_int(65535 * 65535)` and `nat_to_int(x * x + x) == nat_to_int(x * (x + 1))` go through uninterpreted `nat_to_int`/`bv32_to_int_u` that cvc5 cannot reason through; same flavor as `nevd_script`)
 - `vlir-tests:proof_fn` (translation faithful: `function p (u : bv64) : bool` and `function min (x : int, y : int) : int` declared with bodies, lemma-style procedures lower to spec-only `procedure ... ensures ... { exit ... }` shape. Verify SKIP — Strata-side dispatch gap, no translator defect)
@@ -480,7 +544,7 @@ to repeat them.
 - `vlir-tests:test_requires` (translation faithful: `[bitvector_query]` and `[nonlinear_query]` proof-mode labels preserved on the `test_success` and `bound_check` assertions. Verify SKIP — Strata-side dispatch for these proof-mode labels is incomplete on this case, mirroring `guide/nonlinear_bitvec`)
 - `vlir-tests:vec_ops` (verify SKIP (Sequence): Vec operations lower through Sequence prelude; blocked by Strata's Sequence frontend/indexing support)
 
-## not faithful translation (58)
+## not faithful translation (56)
 - `verus-examples:assert_by_compute` (`[VERIFY-lambda-encoding]` for lambdas in `Seq::new`-style spec functions; `[TRANS-coercion-uninterpreted]` for `nat_to_int(Fib_fib(...))` and friends; `assert(...) by (compute_only)` lowers to `assume <pre-computed-result>;` directly. `Compute_all_spec` stubs surface in `guide__assert_by_compute`, not here. **2026-05-19:** 6 of 11 originally-untyped `Sequence.empty` references now correctly emit `Sequence.empty_bool` (the `bits_of_int` family) after the bool patch; the remaining 5 are polymorphic-`T` in `Sequences_reverse<T>` / `Sequences_compute_seq_symbolic<T>` and still skip under `[VERIFY-sequence-empty-polymorphic]`)
 - `verus-examples:atomics` (`[TRANS-atomic-ghost-scaffolding]`: `struct_with_invariants!` / `atomic_with_ghost!` still lower to low-level `Invariant_*`, `Atomic_*`, and `assume` scaffolding; `[MODEL-missing-types]` (`Atomic_ghost`))
 - `verus-examples:basic_lock1` (`[TRANS-atomic-ghost-scaffolding]`: `InvariantPredicate` impl + `open_local_invariant!` lower to `Invariant_*`/`Atomic_*`/`Cell_*` helper scaffolding; `[MODEL-missing-types]` — `Atomic`, `Cell`, `Invariant`)
@@ -494,13 +558,12 @@ to repeat them.
 - `verus-examples:even_cell` (`[TRANS-atomic-ghost-scaffolding]`: `open_local_invariant!` flattened to `Invariant_create_open_invariant_credit`/etc. helpers; `[MODEL-missing-types]` — `Cell`, `LocalInvariant`)
 - `verus-examples:exec_termination_example` (source has basic recursive `exec` fns and while loops with `decreases` clauses on bare `int`. **2026-05-18:** verify previously failed on iterator/range desugaring artifacts (`error: Undeclared type or category Ops_Range_range`, `Unknown expr identifier VERUS_iter`) from the `exec_for_loop` arms — orthogonal to `[CORE-decreases]`. **2026-05-19:** also previously missing-JSON because the upstream `.rs` lacks `fn main()`; the local `fn main(){}` source edit (uncommitted, in `verus/examples/exec_termination_example.rs`) unblocks Verus export — Stage 1 now reports `14 verified, 0 errors` — and Stage 3 surfaces the same iterator-lowering gap rather than hiding behind `E0601`)
 - `verus-examples:extensionality` (`[TRANS-extensional-eq]` expands `assert_seqs_equal!`, `assert_maps_equal!`, and `assert_sets_equal!` into low-level proof scaffolding and explicit formulas; `[VERIFY-lambda-encoding]` and `[TRANS-higher-order-collection-stubs]` still affect `Map::total`, `Map::new`, and `Set::new`; raw Core also currently hits a Strata-side `Sequence` indexing type error in `are_equal`)
-- `verus-examples:external` (`Ghost<int>` erased to plain `int`; `println!` in `external_body` fn not translated; the `s >= n` precondition becomes `s >= bv64_to_int_u(n)` which cvc5 can't prove because `bv64_to_int_u` is uninterpreted — `[TRANS-coercion-uninterpreted]`. **2026-06-01:** RESOLVED by #1217 — `bv64_to_int_u` is now native `e as_int`; verifies, 5✅)
 - `verus-examples:float` (`[TRANS-float-unsupported]`: source `f64`/`f32` literals lower to `Unsupported.Float64` placeholders in emitted Boole; floating-point types/operations not yet translated)
 - `verus-examples:guide/assert_by_compute` (`range_property` still uses uninterpreted `Compute_all_spec` plus `[VERIFY-lambda-encoding]`; nat/int literal typing still leaks into recursive nat functions such as `pow`. **2026-05-19:** also affected by `[VERIFY-sequence-empty-polymorphic]` — 1 untyped `Sequence.empty` from a polymorphic-`T` context the bool fix can't handle)
 - `verus-examples:guide/bst_map_generic` (BST-as-map with generic key/value; emits `Map_empty`, `Map_lib_union_prefer_right`, `Map_insert` cleanly — `[TRANS-fuel-parameter-leakage]` no longer applies here. Remaining gap: classification holds via solver-side reasoning about generic recursive datatypes — `[VERIFY-generic-typevar-ddm]`-adjacent issues likely)
 - `verus-examples:guide/bst_map_type_invariant` (BST-as-map with type-invariant constraint; same Map operations emitted cleanly — Fuel-leakage claim was stale; remaining gap is solver-side reasoning about the type invariant under recursive operations)
 - `verus-examples:guide/bst_map` (concrete BST-as-map for `u64 -> bool`; emits `Map_empty`, `Map_lib_union_prefer_right`, `Map_insert` and `Impl__0_as_map`/`Impl__0_optional_as_map` accessors cleanly — `[TRANS-fuel-parameter-leakage]` no longer applies. Remaining gap is solver-side reasoning about recursive structural properties)
-- `verus-examples:guide/const` (`Layout::size_of` lowers to `Layout_size_of` symbol that is undeclared in the emitted Boole; `[MODEL-missing-types]` for `Layout`; output also relies on the `sorry` axiom, indicating an `assume false`-style fallback)
+- `verus-examples:guide/const` (the source exec constant `E` calls `const fn e()`, but both lower to the same Boole procedure name `e`; the emitted wrapper recursively calls itself instead of the source const function, so the currently passing output is not faithful)
 - `verus-examples:guide/exec_attr` (`test_for_loop` still has `[VERIFY-lambda-encoding]` in the loop invariant; `proof_decl!` / `proof_with!` / `Ghost` / `Tracked` wrappers are flattened under `[TRANS-ghost-tracked-erasure]`. **2026-05-19:** previously missing-JSON because the upstream `.rs` lacks `fn main()`; the local `fn main(){}` source edit (uncommitted, in `verus/examples/guide/exec_attr.rs`) unblocks Verus export — Stage 1 now reports `8 verified, 0 errors`)
 - `verus-examples:guide/exec_spec_unverified` (`[TRANS-exec-spec-helper-leakage]`: the `exec_spec_unverified!` example lowers through internal `View_deep_view` / `exec_*` helper stubs and a distorted `Map int execPoint` representation rather than preserving the source macro structure)
 - `verus-examples:guide/exec_spec_verified` (`[TRANS-exec-spec-helper-leakage]`: the `exec_spec_verified!` example leaks internal `View_deep_view`, `View_V`, `Contrib_Exec_spec_*`, and slice/array helper stubs instead of source-like `deep_view` / `as_slice` reasoning)
@@ -509,10 +572,8 @@ to repeat them.
 - `verus-examples:guide/higher_order_fns` (`[TRANS-exec-closure-scaffolding]`; `[SURFACE-sequence-empty]` in the captured-closure example)
 - `verus-examples:guide/invariants` (`[TRANS-extensional-eq]`: source `assert(operations@.take(i as int) =~= ...)` is expanded to plain `==`; `[TRANS-coercion-uninterpreted]` in fib-loop invariants like `bv64_to_int_u(prev) == nat_to_int(fib(i - bv{64}(1)))`)
 - `verus-examples:guide/lib_examples` (`[VERIFY-lambda-encoding]` in returned/captured function values and collection constructors; `[SURFACE-sequence-empty]`; the current Vec translation itself is now the datatype-based path)
-- `verus-examples:guide/pervasive_example` (current output uses `Sequence.length(s) == 5` cleanly — the older `[TRANS-seq-len-literal-typing]` nat/bv64 mismatch claim no longer applies after recent translator work. Remaining gap is Strata's current `Sequence` frontend/indexing support)
-- `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; `[SURFACE-sequence-empty]`. **2026-06-11:** the multi-binder choose-let (`quants.rs:325`) and choose-in-argument (`quants.rs:452`) shapes now emit faithfully — see `[TRANS-choose]` — and the file runs end-to-end: cvc5 129 ✅ / 26 ⌛ / 0 ❌, previously failed elaboration on the unbound choose binders)
+- `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; `[SURFACE-sequence-empty]`. **2026-06-11:** the multi-binder choose-let (`quants.rs:325`) and choose-in-argument (`quants.rs:452`) shapes now emit faithfully — see `[TRANS-choose]` — and the file reached cvc5 instead of failing elaboration on unbound choose binders. **2026-06-15:** current result is 149 obligations: 129 ✅ / 7 SMT encoding errors / 13 ⌛; the encoding errors are the `assert_81` / `assume_82` `Sequence.update`/`Sequence.select` obligations)
 - `verus-examples:guide/recursion` (`[TRANS-reveal-with-fuel]`: `M_test_even`/`M_test_odd` lower their `reveal(M_is_even)`/`reveal(M_is_odd)` calls to globally-scoped `assume ∀ i :: M_is_even(i) == ...` — fuel amount discarded; older "test_triangle_*" procedure names are stale)
-- `verus-examples:integers` (`[TRANS-coercion-uninterpreted]`: heavy use of `bv8_to_int_u`, `bv8_to_nat_u`, `bv8_to_bv16_u`, `nat_to_int` coercions in call arguments and assertions like `nat_to_int(add1_nat(bv8_to_nat_u(u))) == bv8_to_int_u(u + bv{8}(1))`; cvc5 cannot reason through the uninterpreted coercions)
 - `verus-examples:invariants` (`[TRANS-atomic-ghost-scaffolding]`: `open_atomic_invariant!` flattened to helper-call scaffolding; `[MODEL-missing-types]` — `AtomicInvariant`)
 - `verus-examples:mergesort` (source `=~=` proof steps are flattened under `[TRANS-extensional-eq]`; the final `lemma_sorted_unique(..., |a, b| a <= b)` call still hits `[VERIFY-lambda-encoding]`)
 - `verus-examples:modules` (`[TRANS-closed-visibility]`)
@@ -532,7 +593,9 @@ to repeat them.
 - `verus-examples:trait_for_fn` (`[TRANS-trait-unsupported]`: the `impl IntFn for spec_fn(int) -> int` body `self(x)` is dropped; `[VERIFY-lambda-encoding]` then blocks the call site `f.call_int(2)`)
 - `verus-examples:vectors` (`datatype Vec` path is now source-close; `pusher` still hits `[VERIFY-lambda-encoding]` and `[TRANS-extensional-eq]`)
 - `verus-examples:verified_vec` (**2026-05-19:** cause confirmed and test moved to `tests/ignored_tests.txt` as `UPSTREAM-IGNORE`. Verus errors with `E0432: unresolved import vstd::ptr` — upstream Verus marked this example `ignore` (line 1 of the source: *"intending to deprecate PPtr, should update this to raw_ptr"*) because vstd no longer exposes `vstd::ptr`; the example uses the deprecated `PPtr` API. Either port to `vstd::simple_pptr` or wait for upstream port to `vstd::raw_ptr`)
-- `vlir-tests:LoopSimpleWithSpec` (mirrored from `verus/tests/LoopSimpleWithSpec.rs` into `tests/VerusFiles/`; generates clean Boole but Strata-side verify reports `Expression has type int when nat expected` — a translator-side missed-coercion bug rather than a Strata gap, classified by the runner as translator-bug-shape rather than `[TRANS-coercion-uninterpreted]`)
+- `vlir-tests:b3_minimal` (currently verifies, but source `pub closed spec fn edwards_{x,y,z,t}` bodies are emitted globally visible; `[TRANS-closed-visibility]`)
+- `vlir-tests:b4_minimal` (currently verifies and preserves native `choose`, but source `pub closed spec fn edwards_{x,y,z,t}` bodies are emitted globally visible; `[TRANS-closed-visibility]`)
+- `vlir-tests:b5_minimal` (abstract trait calls are translated as resolved implementation calls, changing source dispatch semantics; current verification reaches 329 obligations but retains the documented abstract-trait dispatch gap)
 - `vlir-tests:maps` (`[VERIFY-lambda-encoding]` in `mk_map` lambdas; `[TRANS-higher-order-collection-stubs]` currently distorts `Set_mk_map`; raw Core map equalities are still emitted as plain `==` rather than source-like map extensional equality)
 - `vlir-tests:mini_c` (mirrored from `verus/tests/mini_c.rs` into `tests/VerusFiles/`; generates Boole but emits malformed tuple projection `Tuple.._2` while lowering match tuple temporaries — translator-side malformed-output bug)
 - `vlir-tests:seqs` (`[VERIFY-lambda-encoding]` in `Seq::new`, `Seq::map`, `Seq::filter`, and `seq![x; n]`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; raw Core also currently hits `[SURFACE-sequence-empty]` and nat/int mismatches`)
