@@ -5,14 +5,15 @@ through the Verus → VLIR → verus-lean → Boole → Strata pipeline, as of 2
 
 Re-validated 2026-06-15 on `Strata` branch `pr/casts-boole` @ `fff49d4e3` (the
 StrataBoole type-arg read-back fix below is carried in the working tree): the
-working-suite gate holds 43 ✅ / 2 skips / 1 fail (`crypto_noref`), and every B1–B5
+working-suite gate holds 46 ✅ / 2 skips / 1 fail (`crypto_noref`), and every B1–B5
 type-check / generation state below reproduces.
 
 2026-06-14: **B5 now type-checks** — the trait associated-type projection blocker
 is resolved in the translator (fixed-bugs table). `check_working_tests.sh`
 (`SKIP_STRATA_VERIFY=1`) still reports "Generation: all working tests passed"; the
-Strata type-check of `b1_minimal` / `b1_boundary_proved` is unchanged (the
-resolution map is empty for every non-B5 test, so their output is byte-identical).
+Strata type-check of `b1_minimal` / `b1_boundary_proved` is unchanged. The
+resolution map also applies to existing `View::V` / `DeepView::V` projections in
+the BST-map and exec-spec examples; those remained stable in the all-suites refresh.
 B5 verification now reaches cvc5 and confirms the operator-dispatch faithfulness
 gap in the open-gaps B5 row.
 
@@ -37,8 +38,9 @@ heavy/curve lemmas admitted as `/// TRUSTED AXIOM` stubs, per file headers.
 
 ## Translator (verus-lean) bugs found and fixed
 
-All fixed in `VerusLean/VLIR/Boole/{Translate,Inference}.lean`; full suite held
-at the 40 ✅ / 5 ❌ baseline after each fix.
+The fixes span `VerusLean/VLIR/{Parser,Defs}.lean` and
+`VerusLean/VLIR/Boole/{Translate,Inference,Context}.lean`; the current
+working-suite gate holds at 46 ✅ / 2 skips / 1 fail.
 
 | Bug | Surfaced by | Fix |
 |-----|-------------|-----|
@@ -67,7 +69,7 @@ at the 40 ✅ / 5 ❌ baseline after each fix.
 | Support tuple datatype named `Tuple` — a cvc5 **builtin sort**: the emitted `(declare-datatype Tuple (par …))` parses but sort applications resolve to cvc5's native tuple, so selector applications fail every obligation (`matching failed for selector argument of parameterized datatype`); invisible until B3 became the first program to reach cvc5 with tuples | B3 (unmasked once the StrataBoole type-arg fix let B3 reach the solver) | Support datatype renamed `Tuple2` (`Tuple2_ctor_2`, `Tuple2.._0/_1`), centralized in `Names.lean` with the rationale; user datatypes can't collide (parsed names are decapitalized) |
 | A tuple `IsVariant(x, tuple%N)` test is parsed as `Proj' N N` (the field index is read off the `tuple%N` variant string = the arity), which `tupleProjChain`'s bounds check rejected as out-of-range — generation aborted (`tuple projection out of range: field 2 of a 2-tuple`) | B5 (only Dalek target with a tuple variant test) | The `.Proj'` arm emits `boolConst true` when `field == size`: a tuple is single-constructor, so its variant test is always true (the projection encoding is a parser artifact). Inert for every other program — no working test has a tuple `IsVariant` |
 | A spec fn whose whole body is `choose \|v\| pred` had the binder erased (`[TRANS-choose]` fallback translates the body verbatim), leaving a free `b` — `Unknown expr identifier b` | B4 (`u8_32_from_nat`, the nat → 32-byte inverse) | `specFnToBoole` emits Boole's native choose-function declaration (`function f(args) : R := choose v : T :: pred;`, Strata #1365), which Strata lowers to an uninterpreted `f` + a choice axiom. Multi-binder chooses normalize to a single product binder first (`normalizeChooseProduct`); a fixed-size-array binder folds its `Sequence.length == N` fact into the predicate so the chosen value carries its `[T; N]` type; the predicate is translated under the (params, v) de Bruijn context the construct's scope chain expects. Soundness: Strata's lowering is unguarded — sound for predicates with a witness at every argument (the general guard is requested on #1365) |
-| Trait associated-type projection `<Self as Trait>::Assoc` (parsed into `Typ.Struct` by `Parser.lean`, since VLIR reuses `Struct` for it) reached BooleDDM as an undeclared nominal type — `Undeclared type or category Ops_Arith_mul_Output` for `<&MontgomeryPoint as Mul<&Scalar>>::Output` from the `MulSpecImpl`/`Mul` trait machinery | B5 (only Dalek target using an operator trait with `MulSpecImpl`) | Verus already resolves the impl's return type concretely (`impl&%13::mul`, `impl&%12::mul_spec` both return `MontgomeryPoint`). The parser now records each `TraitMethodImpl`'s implemented method (`kind.TraitMethodImpl.method`, new `traitImplMethod?` field on `SpecFn`/`ExecFn`); `declsToBooleProgram.buildAssocTypeResolution` pairs each abstract `TraitMethodDecl` whose return is a projection-`Struct` with its impl, mapping the projection's Boole name (`Ops_Arith_mul_Output`) to the impl's concrete return type. `typToBooleType` consults this `assocTypeResolution` map (on `BuildCtx`) at the single type-lowering chokepoint, so the projection lowers to `montgomeryPoint`. Guard: only carriers no declared type backs (and not `Vec`) are rewritten, so a real datatype a trait method returns is never hijacked. Assumes one impl per trait method (true for these operator traits); the map is empty for every other suite test (b1's `View::V` projection has no impl; `clone` returns `Self`, a `TypParam`), so output there is byte-identical |
+| Trait associated-type projection `<Self as Trait>::Assoc` (parsed into `Typ.Struct` by `Parser.lean`, since VLIR reuses `Struct` for it) reached BooleDDM as an undeclared nominal type — `Undeclared type or category Ops_Arith_mul_Output` for `<&MontgomeryPoint as Mul<&Scalar>>::Output` from the `MulSpecImpl`/`Mul` trait machinery | B5 (only Dalek target using an operator trait with `MulSpecImpl`) | Verus already resolves the impl's return type concretely (`impl&%13::mul`, `impl&%12::mul_spec` both return `MontgomeryPoint`). The parser now records each `TraitMethodImpl`'s implemented method (`kind.TraitMethodImpl.method`, new `traitImplMethod?` field on `SpecFn`/`ExecFn`); `declsToBooleProgram.buildAssocTypeResolution` pairs each abstract `TraitMethodDecl` whose return is a projection-`Struct` with its impl, mapping the projection's Boole name (`Ops_Arith_mul_Output`) to the impl's concrete return type. `typToBooleType` consults this `assocTypeResolution` map (on `BuildCtx`) at the single type-lowering chokepoint, so the projection lowers to `montgomeryPoint`. Guard: only carriers no declared type backs (and not `Vec`) are rewritten, so a real datatype a trait method returns is never hijacked. Assumes one impl per trait method (true for these operator traits). The map also resolves existing `View::V` / `DeepView::V` projections in the BST-map and exec-spec examples; those tests remained stable in the all-suites refresh. |
 
 ## Open translator gaps (current B1/B3/B4/B5 blockers)
 

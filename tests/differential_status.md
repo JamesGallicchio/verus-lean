@@ -492,35 +492,35 @@ erasure, or name-collision semantics.
 - `verus-examples:adts` (datatypes, variant checks, structural equality; `matches` clauses correctly desugar to `..is<ctor>(o) && ..field(o) == val` form)
 - `verus-examples:assorted_demo` (`#[verifier::external]` fn dropped from translation entirely; `external_body` follows the standard `assume false;` convention)
 - `verus-examples:basic_failure` (translation is source-close; the test's `external_span(s: Seq<nat>)` proof procedure lowers to `procedure external_span (s : Sequence nat)` and is blocked by Strata's current Sequence frontend/indexing support. **2026-05-19:** previously missing-JSON because the upstream `.rs` lacks `fn main()`; the local `fn main(){}` source edit (uncommitted, in `verus/examples/basic_failure.rs`) unblocks Verus export so the file now reaches Stage 3 and surfaces this pre-existing Sequence-frontend failure rather than hiding behind `E0601`)
-- `verus-examples:bitvector_basic` (`[TRANS-coercion-uninterpreted]` blocks several `bitvector_query` / `compute` obligations that depend on `bv8_to_bv16_u`, `bv8_to_bv32_s`, `bv8_to_int_u`, `bv8_to_int_s`. **2026-06-01:** #1217 native casts make these interpreted — `compute`/`assert_32` now verify; only `bitvector_query` remains (cvc5-hard, times out): 42✅/1⌛)
+- `verus-examples:bitvector_basic` (width-changing and bv↔int casts now use native interpreted `as_bv` / `as_int` / `as_sint`; `compute`/`assert_32` verify, and only the genuinely cvc5-hard `bitvector_query` remains: 42✅/1⌛)
 - `verus-examples:bitvector_equivalence` (bitvector proofs with triggers and decreases; cvc5 times out on the `equivalence_proof_bv` ensures — large bit-blasted query)
 - `verus-examples:broadcast_proof` (translation uses Sequence prelude faithfully. **2026-05-19:** moved to `tests/ignored_tests.txt` as `EMPTY-EXPORT` — the source is `broadcast use`-only with no top-level Verus-mode declarations, so Verus reports `verified` but emits no JSON. Skipped silently rather than counted as missing-JSON. The historical Sequence-frontend blocker is moot because Stage 1 never produces output)
 - `verus-examples:calc` (`calc!` steps lower to explicit assertion chains; the remaining mismatch is Strata's current `Sequence` frontend/indexing support plus nat/bv64 typing in the sequence-extensionality steps)
 - `verus-examples:cells` (translation is source-close; the current difference is the missing `Cell` model type in Strata)
 - `verus-examples:generics` (`[TRANS-generic-reveal]`; `[VERIFY-generic-typevar-ddm]` raises SMT encoding errors on type-var-using obligations, and downstream asserts depending on those obligations also fail. **2026-06-01:** post-#1217 the type-var cast surfaces as a Strata *elaboration* error (`as_int` on a `tvar`) rather than an SMT encoding error; reclassified `skip_gap` — non-monomorphized generics, the fix is Strata-side monomorphization)
-- `verus-examples:guide/integers` (`[TRANS-coercion-uninterpreted]`: widening casts emit uninterpreted coercions like `bv8_to_bv16_u`, `bv16_to_int_u`, `int_to_bv8_u`; cvc5 cannot reason through these)
+- `verus-examples:guide/integers` (integer-domain crossings lower to native interpreted `as_bv` / `as_int` casts and the modeled nat API; the output is semantically faithful but expands source casts and range checks)
 - `verus-examples:guide/interior_mutability` (translation is source-close; the current difference is the missing `Cell` model type in Strata)
-- `verus-examples:guide/modes` (`Tuple` type declared by translator when referenced; `[TRANS-coercion-uninterpreted]` in mixed `nat`/`bv8`/`int` arithmetic — uninterpreted `nat_to_int` and `bv8_to_int_u` block obligations like `bv8_to_int_u(u) < i && i < nat_to_int(n)`)
+- `verus-examples:guide/modes` (`Tuple2` support is declared when referenced; mixed `nat`/`bv8`/`int` arithmetic lowers through modeled `nat.toInt` / `nat.fromInt` and native `as_int` casts)
 - `verus-examples:guide/nonlinear_bitvec` (translation faithful: `[bitvector_query]`/`[nonlinear_query]`/`[compute]` proof-mode labels emitted; `[TRANS-trigger-annotation]` strips `#[trigger]` annotations on De-Morgan quantifiers but preserves logical content. Verify SKIP — Strata-side dispatch for the proof-mode labels is incomplete on this case)
 - `verus-examples:guide/opaque` (faithful empty Boole export: source `pub open spec fn` opaque-with-`reveal_with_fuel` declarations have no exec procedures to verify. **2026-05-19:** moved to `tests/ignored_tests.txt` as `EMPTY-EXPORT`. Even after appending `fn main(){}` to the source, Verus reports `0 verified, 0 errors` and emits no JSON because there are no Verus-mode declarations to serialize — consistent with the historical "nothing for Strata to discharge" classification)
 - `verus-examples:guide/overflow` (`[MODEL-missing-types]`: `Arithmetic_overflow` not modelled in Strata; `Num_checked_add` lowers to a procedure with `assume false;` body per the external-body convention. **2026-06-15:** currently classified `skip_gap` earlier in elaboration because native `as_int` is applied to an unmonomorphized type variable `V`; this is the same Strata generic-monomorphization gap as `verus-examples:generics`)
-- `verus-examples:guide/references` (`[TRANS-coercion-uninterpreted]` in the loop's `decreases bv32_to_int_u(b_out)` — Strata cannot discharge the decrement because `bv32_to_int_u` has no body; immutable/mutable references erase to plain values, which is verification-equivalent)
+- `verus-examples:guide/references` (the loop decrease and overflow guards use native interpreted `as_int`; immutable/mutable references erase to plain values, which is verification-equivalent)
 - `verus-examples:guide/requires_ensures_edit` (source `i8` with signed comparisons `-16 <= x1 < 16` lowers to `<=s`/`<s` (`bvsle`/`bvslt`) Boole AST — blocked by Strata Verify lacking dispatch arms for these signed-bv-comparison constructors; tracked in the strata-bv-lowering issue draft)
 - `verus-examples:guide/requires_ensures` (same signed-bv-comparison gap as `requires_ensures_edit`; `print_two_digit_number` is `external_body` and follows the `assume false;` convention)
 - `verus-examples:guide/strings` (translation is source-close; the current difference is the missing `String_string` / string-library model support in Strata. **2026-05-19:** previously missing-JSON because the upstream `.rs` lacks `fn main()`; the local `fn main(){}` source edit (uncommitted, in `verus/examples/guide/strings.rs`) unblocks Verus export — Stage 1 now reports `5 verified, 0 errors` — and Stage 3 surfaces the documented `Expression has type String_string when string expected` failure)
 - `verus-examples:impl_basic` (structs, methods, generics, ensures clauses preserved)
-- `verus-examples:nevd_script` (`[TRANS-coercion-uninterpreted]`: `nat`-typed parameters and `nat_to_int`-coerced bodies (e.g. `rec function fibo (n : nat) : nat` with `if nat_to_int(n) == 0 then 0 else ...`); int literals in the body trigger `int`-where-`nat`-expected typecheck errors)
+- `verus-examples:nevd_script` (`nat`-typed recursive functions, measures, and call boundaries lower through the modeled `nat.toInt` / `nat.fromInt` / `nat.*` API; scalar crossings use native `as_int`)
 - `verus-examples:overflow` (`[MODEL-missing-types]`: `Arithmetic_overflow` not modelled in Strata; the translator preserves source-level checked-overflow operations like `checked_u64_constants`/`checked_u64_calculations` and emits `var w : Arithmetic_overflow` parameters that Strata cannot resolve)
 - `verus-examples:power_of_2` (Strata type error: `int` literals where `nat` expected)
 - `verus-examples:prelude` (`seq!` now lowers through `Sequence.empty`/`Sequence.build`; the remaining mismatch is Strata's current `Sequence` frontend/indexing support)
-- `verus-examples:proposal-rw2022` (`[TRANS-coercion-uninterpreted]` in `rec function fibo (n : nat) : nat` body and the `bv64_to_int_u(result) == nat_to_int(fibo(bv64_to_nat_u(n)))` ensures clause; termination-check artifacts (`decrease%init*`, `CheckDecrease*`) correctly stripped from translation. **2026-05-19:** previously misclassified as missing-JSON due to a harness path bug — Verus writes `proposal_rw2022.json` (underscored crate name, since Rust forbids `-`), but the harness's `${base}.json` lookup retained the hyphen. Fixed in `run_tests.sh::run_verus_export` by also trying the underscore-normalized filename; the test now reaches Stage 3 and surfaces the documented coercion gap)
-- `verus-examples:quantifiers` (typing now flows through via `nat_to_int` coercion; the universal `∀ i : nat :: nat_to_int(i) >= 0 && ...` fails because `nat_to_int` is declared without a body, so cvc5 cannot prove `nat_to_int(i) >= 0` — `[TRANS-coercion-uninterpreted]`)
+- `verus-examples:proposal-rw2022` (`fibo` and its scalar call boundaries now use the modeled nat API plus native `as_int`; termination-check artifacts (`decrease%init*`, `CheckDecrease*`) are correctly stripped. **2026-05-19:** previously misclassified as missing-JSON due to a harness path bug — Verus writes `proposal_rw2022.json` (underscored crate name, since Rust forbids `-`), but the harness's `${base}.json` lookup retained the hyphen; `run_tests.sh::run_verus_export` now also tries the underscore-normalized filename)
+- `verus-examples:quantifiers` (typing flows through modeled `nat.toInt` and native `as_int`; `nat_nonneg` proves the non-negativity half of the universal assertion, while the remaining `tr(nat.toInt(i))` predicate stays uninterpreted and cvc5-hard)
 - `verus-examples:recursive_types` (translation appears source-close; Strata-side blocker is nested datatype shape unsupported in current Strata typechecker)
-- `verus-examples:rw2022_script` (`[TRANS-coercion-uninterpreted]`: `is_prime` and `fibo` use `nat` arithmetic via uninterpreted `nat_to_int`; prime-testing quantifier/trigger structure preserved, `rec function fibo` with implicit decreases preserved)
-- `verus-examples:statements` (mixed-width bitvector arithmetic with explicit width extension; `[TRANS-coercion-uninterpreted]` causes the `b1 == i * 2` loop entry-invariant to fail — `bv8_to_bv64_u(b1)` is uninterpreted so cvc5 can't establish the relation. **2026-06-01:** RESOLVED by #1217 — native `as_int`/`as_bv` make the widening interpreted, the loop invariant discharges; 23✅ (only ⌛ `measure_decrease_0`, a hard nonlinear measure))
+- `verus-examples:rw2022_script` (`is_prime` and `fibo` use the modeled nat API; prime-testing quantifier/trigger structure and `rec function fibo` with its decreases clause are preserved)
+- `verus-examples:statements` (mixed-width bitvector arithmetic uses native interpreted `as_int`/`as_bv`, so the widened loop invariant discharges; 23✅ with only the hard nonlinear `measure_decrease_0` timing out)
 - `verus-examples:test` (translation faithful: small bv64 procedure `foo` with `requires a < bv{64}(100)` and `_pct_return := a + bv{64}(1)`, plus a `main` that exercises it. Verify SKIP — Strata-side dispatch gap on this shape, no translator defect)
 - `verus-examples:trigger_loops` (uninterpreted fns + multi-trigger quantifier patterns preserved; `[TRANS-choose]`: source `choose|z| g(z)` in `choose_example`/`quantifier_example` is parsed as `Bind.Lambda [z]` with the predicate erased. **2026-05-19:** moved to `tests/ignored_tests.txt` as `UPSTREAM-IGNORE + HANG` — file is upstream-marked `ignore`, was previously the cause of silent all-suites run truncations; now skipped silently)
-- `vlir-tests:crypto_noref` (translation uses `Sequence.empty`/`Sequence.build`. **2026-05-19:** still verify SKIP — the bool fix that added typed `Sequence.empty_bool` did not help here because the remaining bare `Sequence.empty` is polymorphic-`T`. Now classified under `[VERIFY-sequence-empty-polymorphic]` (Strata has no `Sequence.empty[A]` for type-variable element types). Also affected by `[VERIFY-lambda-encoding]` for lambdas in `Seq::new`-style spec functions. **2026-06-05:** `[VERIFY-sequence-empty-polymorphic]` resolved — the polymorphic seed now emits as `Sequence.empty<T>()` via the Core `seq_empty<A>()` production (`Bld.seqEmpty` / `seqEmptyExpr` fall back to it for non-concrete element types), and the `Sequence.empty` parse error is gone. crypto_noref still FAILs verify, now solely on the generic tuple selectors: `Tuple.._0/._1` type as the uninstantiated `T0`/`T1`, so `Tuple.._0(kv) ^ Tuple.._1(kv)` in `encrypt_spec`/`decrypt_spec` is rejected (`crypto_noref.lean:68: Expression has type T1 when T0 expected`) — the malformed-tuple-projection issue also seen at `vlir-tests:mini_c`)
+- `vlir-tests:crypto_noref` (concrete and polymorphic empty sequences emit typed forms, including `Sequence.empty<T>()`. Verification now fails solely on generic tuple selectors: `Tuple2.._0/_1` retain distinct uninstantiated `T0`/`T1`, so the symmetric XOR in `encrypt_spec` / `decrypt_spec` is rejected with `Expression has type T1 when T0 expected`)
 - `vlir-tests:datatypes` (current difference is only that Strata still type-fails later in the pipeline)
 - `vlir-tests:demo_for` (verify SKIP (Sequence): Boole output recovers the source-level `for` loop shape; blocked by Strata's Sequence frontend/indexing support)
 - `vlir-tests:demo_while_loop_isolation` (`Vec<u64>` find-max with explicit `loop_isolation` enabled; loop-index uses now lower through `[TRANS-loop-counter-int]`, so indexing is expressed directly over `Sequence.length`/`Sequence.select`; structurally identical to `demo_while`)
@@ -528,7 +528,7 @@ erasure, or name-collision semantics.
 - `vlir-tests:demo` (verify SKIP (Sequence): Boole output is source-close and elaborates cleanly; blocked by Strata's Sequence frontend/indexing support)
 - `vlir-tests:FindMax` (`Vec<i32>` find-max via `Sequence bv32`; loop-index uses now lower through `[TRANS-loop-counter-int]`; value comparisons remain signed bv32 comparisons such as `>=s`)
 - `vlir-tests:integer_ring` (Strata type error on intentionally-failing `type_fail`; cvc5 also times out on `wide_mul` ensures — non-linear bv64 multiplication beyond solver default budget)
-- `vlir-tests:LoopSimple` (`i32` summation loop; `[TRANS-coercion-uninterpreted]` in `decreases bv32_to_int_s(n - i)`; signed comparisons `<s`/`<=s` use `bvslt`/`bvsle` Boole AST nodes that lack dispatch arms in Strata Verify (per the strata-bv-lowering issue draft); intentionally fails as a stable verify-mismatch baseline)
+- `vlir-tests:LoopSimple` (`i32` summation loop; decreases and invariant arithmetic use native interpreted `as_sint`; signed comparisons `<s`/`<=s` still use `bvslt`/`bvsle` Boole AST nodes that lack dispatch arms in Strata Verify, so it remains an intentional verify-mismatch baseline)
 - `vlir-tests:LoopSimpleWithSpec` (source-close nat recursive specification, loop invariant/decreases, overflow assertions, and proof procedure; Strata still times out on hard obligations, so its outcome differs from Verus)
 - `vlir-tests:b1_boundary_proved` (source-close Dalek boundary variant, including its trusted source assumptions; Strata leaves obligations open while Verus passes)
 - `vlir-tests:b1_full` (emission is source-close, but the generated Lean/Strata program currently hits a stack overflow before verification completes)
@@ -536,7 +536,7 @@ erasure, or name-collision semantics.
 - `vlir-tests:b2_minimal` (source-close Dalek B2 reduction, including source trusted assumptions; Strata leaves obligations open while Verus passes)
 - `vlir-tests:b2_minimal_upstream` (source-close upstream-style Dalek B2 reduction; Strata leaves obligations open while Verus passes)
 - `vlir-tests:mutual_recursion` (Boole output is a source-close `rec function is_odd ... function is_even ...` block. **2026-05-18 (resolved):** the `.mutualBlock` Boole-translation arm now threads the source `decreases abs(i)` measure (was hardcoded `(ann none)`); regenerated Boole emits `rec function is_odd … decreases abs(i)` and Strata's int-termination checker passes all `is_even_terminates_*` obligations.  Translation faithful and termination-clean.  The only residual `even_odd_mod2_ensures_*` failures are an *expected Strata encoding limitation*: int-recursive fns are pure UFs with no definitional axiom, so the solver cannot prove the inductive `is_even(i) <==> i%2==0` ensures — not a translator defect)
-- `vlir-tests:nonlinear` (`[TRANS-coercion-uninterpreted]`: `nat`-typed nonlinear obligations like `bv32_to_int_u(x) * bv32_to_int_u(z) <= nat_to_int(65535 * 65535)` and `nat_to_int(x * x + x) == nat_to_int(x * (x + 1))` go through uninterpreted `nat_to_int`/`bv32_to_int_u` that cvc5 cannot reason through; same flavor as `nevd_script`)
+- `vlir-tests:nonlinear` (bv operands use native interpreted `as_int`, while nat obligations use the modeled nat API; remaining open obligations are nonlinear solver-hard rather than blocked by opaque coercions)
 - `vlir-tests:proof_fn` (translation faithful: `function p (u : bv64) : bool` and `function min (x : int, y : int) : int` declared with bodies, lemma-style procedures lower to spec-only `procedure ... ensures ... { exit ... }` shape. Verify SKIP — Strata-side dispatch gap, no translator defect)
 - `vlir-tests:quant` (mixed `int`/`nat` quantifier patterns like `∀ x : int, y : nat :: x + y == y + x` produce direct `+` on mismatched types that Strata's typechecker rejects; also affected by `[TRANS-trigger-annotation]` (source `#[trigger]` annotations stripped) and `[TRANS-assert-label]` (source `as a1`/`a2`/`a3` labels dropped))
 - `vlir-tests:recursion` (Boole-side translation faithful.  **2026-05-18:** the mutual-block decreases fix lands here too — `rec function M_is_odd … decreases M_abs(i)` is now emitted and most `*_terminates_*` obligations pass.  Residual `M_is_odd_terminates_1` fails: source uses a *lexicographic* measure (`decreases abs(i), 0int`) to break the same-argument `M_is_odd(i) → M_is_even(i)` edge, but the translator collapses lex-decreases to the head term, leaving that edge with no strict decrease under #1167's per-call-site obligation.  Pre-existing lex-collapse limitation exposed by enforced int-termination; full fix waits on Strata tuple-measure support.  Same applies to `verus-examples:guide__recursion`)
@@ -545,7 +545,7 @@ erasure, or name-collision semantics.
 - `vlir-tests:vec_ops` (verify SKIP (Sequence): Vec operations lower through Sequence prelude; blocked by Strata's Sequence frontend/indexing support)
 
 ## not faithful translation (56)
-- `verus-examples:assert_by_compute` (`[VERIFY-lambda-encoding]` for lambdas in `Seq::new`-style spec functions; `[TRANS-coercion-uninterpreted]` for `nat_to_int(Fib_fib(...))` and friends; `assert(...) by (compute_only)` lowers to `assume <pre-computed-result>;` directly. `Compute_all_spec` stubs surface in `guide__assert_by_compute`, not here. **2026-05-19:** 6 of 11 originally-untyped `Sequence.empty` references now correctly emit `Sequence.empty_bool` (the `bits_of_int` family) after the bool patch; the remaining 5 are polymorphic-`T` in `Sequences_reverse<T>` / `Sequences_compute_seq_symbolic<T>` and still skip under `[VERIFY-sequence-empty-polymorphic]`)
+- `verus-examples:assert_by_compute` (`[VERIFY-lambda-encoding]` for lambdas in `Seq::new`-style spec functions; `assert(...) by (compute_only)` lowers to `assume <pre-computed-result>;` directly. Nat expressions use the modeled nat API, and concrete and polymorphic empty sequences now emit typed forms)
 - `verus-examples:atomics` (`[TRANS-atomic-ghost-scaffolding]`: `struct_with_invariants!` / `atomic_with_ghost!` still lower to low-level `Invariant_*`, `Atomic_*`, and `assume` scaffolding; `[MODEL-missing-types]` (`Atomic_ghost`))
 - `verus-examples:basic_lock1` (`[TRANS-atomic-ghost-scaffolding]`: `InvariantPredicate` impl + `open_local_invariant!` lower to `Invariant_*`/`Atomic_*`/`Cell_*` helper scaffolding; `[MODEL-missing-types]` — `Atomic`, `Cell`, `Invariant`)
 - `verus-examples:basic_lock2` (`[TRANS-atomic-ghost-scaffolding]`: `struct_with_invariants!` flattens to `Atomic_ghost_*`/`Cell_*` helpers; `[MODEL-missing-types]` — `Atomic_ghost`, `PCell`)
@@ -559,7 +559,7 @@ erasure, or name-collision semantics.
 - `verus-examples:exec_termination_example` (source has basic recursive `exec` fns and while loops with `decreases` clauses on bare `int`. **2026-05-18:** verify previously failed on iterator/range desugaring artifacts (`error: Undeclared type or category Ops_Range_range`, `Unknown expr identifier VERUS_iter`) from the `exec_for_loop` arms — orthogonal to `[CORE-decreases]`. **2026-05-19:** also previously missing-JSON because the upstream `.rs` lacks `fn main()`; the local `fn main(){}` source edit (uncommitted, in `verus/examples/exec_termination_example.rs`) unblocks Verus export — Stage 1 now reports `14 verified, 0 errors` — and Stage 3 surfaces the same iterator-lowering gap rather than hiding behind `E0601`)
 - `verus-examples:extensionality` (`[TRANS-extensional-eq]` expands `assert_seqs_equal!`, `assert_maps_equal!`, and `assert_sets_equal!` into low-level proof scaffolding and explicit formulas; `[VERIFY-lambda-encoding]` and `[TRANS-higher-order-collection-stubs]` still affect `Map::total`, `Map::new`, and `Set::new`; raw Core also currently hits a Strata-side `Sequence` indexing type error in `are_equal`)
 - `verus-examples:float` (`[TRANS-float-unsupported]`: source `f64`/`f32` literals lower to `Unsupported.Float64` placeholders in emitted Boole; floating-point types/operations not yet translated)
-- `verus-examples:guide/assert_by_compute` (`range_property` still uses uninterpreted `Compute_all_spec` plus `[VERIFY-lambda-encoding]`; nat/int literal typing still leaks into recursive nat functions such as `pow`. **2026-05-19:** also affected by `[VERIFY-sequence-empty-polymorphic]` — 1 untyped `Sequence.empty` from a polymorphic-`T` context the bool fix can't handle)
+- `verus-examples:guide/assert_by_compute` (`range_property` still uses uninterpreted `Compute_all_spec` plus `[VERIFY-lambda-encoding]`; recursive nat functions now use the modeled nat API, and the former polymorphic-empty-sequence blocker is resolved)
 - `verus-examples:guide/bst_map_generic` (BST-as-map with generic key/value; emits `Map_empty`, `Map_lib_union_prefer_right`, `Map_insert` cleanly — `[TRANS-fuel-parameter-leakage]` no longer applies here. Remaining gap: classification holds via solver-side reasoning about generic recursive datatypes — `[VERIFY-generic-typevar-ddm]`-adjacent issues likely)
 - `verus-examples:guide/bst_map_type_invariant` (BST-as-map with type-invariant constraint; same Map operations emitted cleanly — Fuel-leakage claim was stale; remaining gap is solver-side reasoning about the type invariant under recursive operations)
 - `verus-examples:guide/bst_map` (concrete BST-as-map for `u64 -> bool`; emits `Map_empty`, `Map_lib_union_prefer_right`, `Map_insert` and `Impl__0_as_map`/`Impl__0_optional_as_map` accessors cleanly — `[TRANS-fuel-parameter-leakage]` no longer applies. Remaining gap is solver-side reasoning about recursive structural properties)
@@ -568,11 +568,11 @@ erasure, or name-collision semantics.
 - `verus-examples:guide/exec_spec_unverified` (`[TRANS-exec-spec-helper-leakage]`: the `exec_spec_unverified!` example lowers through internal `View_deep_view` / `exec_*` helper stubs and a distorted `Map int execPoint` representation rather than preserving the source macro structure)
 - `verus-examples:guide/exec_spec_verified` (`[TRANS-exec-spec-helper-leakage]`: the `exec_spec_verified!` example leaks internal `View_deep_view`, `View_V`, `Contrib_Exec_spec_*`, and slice/array helper stubs instead of source-like `deep_view` / `as_slice` reasoning)
 - `verus-examples:guide/external_trait_specs` (`[TRANS-trait-unsupported]`; raw Core also currently hits a bv64/int comparison mismatch in `test_hasher`)
-- `verus-examples:guide/ext_equal` (`[VERIFY-lambda-encoding]`; direct `Seq`/`Set`/struct extensionality now lowers to explicit formulas, but raw Core still expands away source `=~=`/`=~~=` syntax. **2026-05-19:** the legacy `[SURFACE-sequence-empty]` reference here is the same issue now tracked as `[VERIFY-sequence-empty-polymorphic]` — 5 polymorphic-`T` `Sequence.empty` references the bool fix can't handle)
-- `verus-examples:guide/higher_order_fns` (`[TRANS-exec-closure-scaffolding]`; `[SURFACE-sequence-empty]` in the captured-closure example)
-- `verus-examples:guide/invariants` (`[TRANS-extensional-eq]`: source `assert(operations@.take(i as int) =~= ...)` is expanded to plain `==`; `[TRANS-coercion-uninterpreted]` in fib-loop invariants like `bv64_to_int_u(prev) == nat_to_int(fib(i - bv{64}(1)))`)
-- `verus-examples:guide/lib_examples` (`[VERIFY-lambda-encoding]` in returned/captured function values and collection constructors; `[SURFACE-sequence-empty]`; the current Vec translation itself is now the datatype-based path)
-- `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; `[SURFACE-sequence-empty]`. **2026-06-11:** the multi-binder choose-let (`quants.rs:325`) and choose-in-argument (`quants.rs:452`) shapes now emit faithfully — see `[TRANS-choose]` — and the file reached cvc5 instead of failing elaboration on unbound choose binders. **2026-06-15:** current result is 149 obligations: 129 ✅ / 7 SMT encoding errors / 13 ⌛; the encoding errors are the `assert_81` / `assume_82` `Sequence.update`/`Sequence.select` obligations)
+- `verus-examples:guide/ext_equal` (`[VERIFY-lambda-encoding]`; direct `Seq`/`Set`/struct extensionality lowers to explicit formulas, but raw Core still expands away source `=~=`/`=~~=` syntax; polymorphic empty sequences now emit `Sequence.empty<T>()`)
+- `verus-examples:guide/higher_order_fns` (`[TRANS-exec-closure-scaffolding]`; the former polymorphic-empty-sequence blocker in the captured-closure example is resolved)
+- `verus-examples:guide/invariants` (`[TRANS-extensional-eq]`: source `assert(operations@.take(i as int) =~= ...)` is expanded to plain `==`; fib-loop invariants now use native scalar casts and the modeled nat API)
+- `verus-examples:guide/lib_examples` (`[VERIFY-lambda-encoding]` in returned/captured function values and collection constructors; the current Vec translation is the datatype-based path, and empty sequences emit typed forms)
+- `verus-examples:guide/quants` (`[TRANS-reveal-with-fuel]`; the multi-binder choose-let and choose-in-argument shapes now emit faithfully. **2026-06-15:** current result is 149 obligations: 129 ✅ / 7 SMT encoding errors / 13 ⌛; the encoding errors are the `assert_81` / `assume_82` `Sequence.update`/`Sequence.select` obligations)
 - `verus-examples:guide/recursion` (`[TRANS-reveal-with-fuel]`: `M_test_even`/`M_test_odd` lower their `reveal(M_is_even)`/`reveal(M_is_odd)` calls to globally-scoped `assume ∀ i :: M_is_even(i) == ...` — fuel amount discarded; older "test_triangle_*" procedure names are stale)
 - `verus-examples:invariants` (`[TRANS-atomic-ghost-scaffolding]`: `open_atomic_invariant!` flattened to helper-call scaffolding; `[MODEL-missing-types]` — `AtomicInvariant`)
 - `verus-examples:mergesort` (source `=~=` proof steps are flattened under `[TRANS-extensional-eq]`; the final `lemma_sorted_unique(..., |a, b| a <= b)` call still hits `[VERIFY-lambda-encoding]`)
@@ -595,10 +595,13 @@ erasure, or name-collision semantics.
 - `verus-examples:verified_vec` (**2026-05-19:** cause confirmed and test moved to `tests/ignored_tests.txt` as `UPSTREAM-IGNORE`. Verus errors with `E0432: unresolved import vstd::ptr` — upstream Verus marked this example `ignore` (line 1 of the source: *"intending to deprecate PPtr, should update this to raw_ptr"*) because vstd no longer exposes `vstd::ptr`; the example uses the deprecated `PPtr` API. Either port to `vstd::simple_pptr` or wait for upstream port to `vstd::raw_ptr`)
 - `vlir-tests:b3_minimal` (currently verifies, but source `pub closed spec fn edwards_{x,y,z,t}` bodies are emitted globally visible; `[TRANS-closed-visibility]`)
 - `vlir-tests:b4_minimal` (currently verifies and preserves native `choose`, but source `pub closed spec fn edwards_{x,y,z,t}` bodies are emitted globally visible; `[TRANS-closed-visibility]`)
-- `vlir-tests:b5_minimal` (abstract trait calls are translated as resolved implementation calls, changing source dispatch semantics; current verification reaches 329 obligations but retains the documented abstract-trait dispatch gap)
+- `vlir-tests:b5_minimal` (the associated output type resolves to
+  `montgomeryPoint`, so the program type-checks, but calls still target abstract
+  `Ops_Arith_Mul_mul` rather than VLIR's resolved `Impl__13_mul`; current
+  verification reaches 329 obligations and retains `[TRANS-trait-unsupported]`)
 - `vlir-tests:maps` (`[VERIFY-lambda-encoding]` in `mk_map` lambdas; `[TRANS-higher-order-collection-stubs]` currently distorts `Set_mk_map`; raw Core map equalities are still emitted as plain `==` rather than source-like map extensional equality)
 - `vlir-tests:mini_c` (mirrored from `verus/tests/mini_c.rs` into `tests/VerusFiles/`; generates Boole but emits malformed tuple projection `Tuple.._2` while lowering match tuple temporaries — translator-side malformed-output bug)
-- `vlir-tests:seqs` (`[VERIFY-lambda-encoding]` in `Seq::new`, `Seq::map`, `Seq::filter`, and `seq![x; n]`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; raw Core also currently hits `[SURFACE-sequence-empty]` and nat/int mismatches`)
+- `vlir-tests:seqs` (`[VERIFY-lambda-encoding]` in `Seq::new`, `Seq::map`, `Seq::filter`, and `seq![x; n]`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; empty sequences now emit typed forms, while other generic/nat typing gaps remain)
 - `vlir-tests:sets` (`[VERIFY-lambda-encoding]` in `Set::new`, `Set::filter`, `Set::map`, `set_map`, and `fold`; `[TRANS-higher-order-collection-stubs]` distorts `Set_new`, `Set_filter`, `Set_lib_map`, and `Set_Fold_fold`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; `s.choose()` is currently just uninterpreted `Set_choose` without witness semantics`)
 - `vlir-tests:test_vstd` (`[VERIFY-lambda-encoding]` in `Set_new(fun i => ...)`, `Map_new(fun i => ..., fun i => ...)`, `Seq_new(5, fun i => ...)`; fixed-size array literals now lower to concrete `Sequence.empty`/`Sequence.build` chains)
 
@@ -701,9 +704,15 @@ erasure, or name-collision semantics.
   `verus-examples:imo_1988_6`, `verus-examples:guide/invariants`,
   `verus-examples:set_from_vec`), the Boole output is faithful.
 
-### `[TRANS-hastype-overflow]` `HasType` overflow guards dropped
-- Verus `HasType(U32, e)` assertions silently skipped in Core output.
-- Affects: many exec-mode integer arithmetic tests
+### `[TRANS-hastype-overflow]` Numeric `HasType` overflow guards (RESOLVED)
+- Historical: numeric `HasType(τ, e)` assertions and assumptions were silently
+  dropped, so exec arithmetic could wrap without preserving Verus's overflow
+  obligations.
+- Resolved: `hasTypeRangeCond` lowers numeric `HasType` to explicit int-domain
+  range predicates for both asserts and assumes, preserving overflow VCs and
+  the checked-range facts used by later obligations.
+- Non-numeric `HasType` remains omitted as a typing tautology.
+- Validated on `b1_full`; see `docs/numeric-domains.html`.
 
 ### `[TRANS-extensional-eq]` Extensional / deep-equality surface syntax not preserved
 - Source-level extensionality syntax such as `===`, `=~=`, `=~~=`, and
@@ -728,37 +737,27 @@ erasure, or name-collision semantics.
 
 ### `[TRANS-widening-casts]` Widening casts partially inserted
 - Verus erases widening casts (`nat as int`, `u16 as int`) at SST level.
-- Type-directed coercion insertion now adds `bv*_to_nat_u`/`bv*_to_int_u`
+- Type-directed coercion insertion now adds interpreted bv→nat/int conversions
   at function/procedure call sites.
 - Type-directed coercion insertion now also preserves source-typed quantifier
-  binders and inserts `int_to_bv64_u` at plain variable use sites when the
+  binders and inserts native `as_bv64` casts at plain variable use sites when the
   current `usize`/indexing context expects `bv64`.
 - **Remaining gaps**: richer non-call contexts beyond plain variables
   (for example larger arithmetic expressions, projections, and other composite
   terms that still need result-side coercion insertion).
 
-### `[TRANS-coercion-uninterpreted]` Coercion functions emitted without semantics
-- Coercion helpers such as `bv64_to_int_u`, `bv8_to_bv64_u`, `bv16_to_int_u`,
-  `nat_to_int`, `int_to_nat`, and `int_to_bv64_u` are emitted as
-  declaration-only Boole functions (e.g. `function bv64_to_int_u (x : bv64) : int;`).
-  No body, no axiom set.
-- Consequence: cvc5 treats each as an arbitrary function, so any obligation
-  whose proof needs the coercion's value (`bv8_to_bv64_u(20) == 20`,
-  `bv64_to_int_u(15) == 15`, `bv16_to_int_u(i) >= 0`) is unprovable from the
-  declaration alone, even when the source-level reasoning is trivial.
-- Most visible after upstream Strata fixed earlier-pipeline typing/elaboration
-  errors: tests that previously stopped at a Strata-side type error now reach
-  the solver, where uninterpreted coercions become the binding constraint.
-- Two viable fixes:
-  - Translator-side: emit axioms alongside each declaration
-    (`assume forall x : bv64. 0 <= bv64_to_int_u(x) && bv64_to_int_u(x) < 2^64`,
-    `assume forall x : bv8. bv8_to_bv64_u(x) == ...`, etc.).
-  - Strata-side: add native bv↔int / nat↔int conversions with built-in
-    semantics so the translator can target them directly.
-- Affects: `verus-examples:bitvector_basic`, `verus-examples:external`,
-  `verus-examples:quantifiers`, `verus-examples:statements`,
-  and any test where the solver must reason about a value that flows
-  through a width-changing coercion.
+### `[TRANS-coercion-uninterpreted]` Legacy uninterpreted coercions (RESOLVED)
+- Historical: bv↔int, bv-width, and nat↔int coercions were emitted as
+  declaration-only helper functions such as `bv64_to_int_u` and
+  `bv8_to_bv64_u`.
+- Resolved: bv↔int and bv-width casts now use Strata's interpreted `as_int`,
+  `as_sint`, and `as_bv<w>` constructs. Nat↔int uses the modeled
+  `nat.toInt` / `nat.fromInt` prelude functions and round-trip axioms.
+- Remaining coercion work is type-directed insertion in composite contexts and
+  generic type-variable casts, tracked under `[TRANS-widening-casts]` and
+  `[VERIFY-generic-typevar-ddm]`.
+- Older per-test notes using legacy helper names are historical unless
+  explicitly refreshed.
 
 ### `[VERIFY-generic-typevar-ddm]` Strata still rejects some generic typed operations
 - The translator now emits faithful generic helper bodies such as
@@ -770,39 +769,15 @@ erasure, or name-collision semantics.
 - Affects: `vlir-tests:FindMax`, `vlir-tests:demo_while`,
   `vlir-tests:demo_while_loop_isolation`, `verus-examples:generics`
 
-### `[VERIFY-sequence-empty-polymorphic]` No polymorphic `Sequence.empty[A]` in Strata Boole
-- Strata's Boole grammar (`Strata/Languages/Boole/Grammar.lean`) exposes
-  the typed empty-sequence constants `seq_empty_bv8`/`bv16`/`bv32`/`bv64`/
-  `int`/`bool` (the last added 2026-05-19), each printing as
-  `Sequence.empty_<elem>`.  There is **no 0-ary polymorphic
-  `Sequence.empty[A]`**; the matching translator helper
-  (`VerusLean/VLIR/Boole/Inference.lean::seqEmptyTokenName`) can only pick
-  a token when the element type is statically concrete.
-- In generic spec functions such as
-  `rec function Sequences_reverse<T> (s : Sequence T) : Sequence T` or
-  `procedure Sequences_compute_seq_symbolic<T> (a : T, b : T, ...)`, the
-  element type is a *type variable* and the translator falls through to
-  the bare `Sequence.empty` literal, which Strata's DDM rejects with
-  `Unknown expr identifier Sequence.empty`.
-- Related: even when the empty-constant resolves, generic spec-fn bodies
-  can still trip Strata's typed-operator dispatch with `Expected bitvector
-  type, got: ... tvar "T"` on other sequence operations (see e.g.
-  `adopted_rust_verify_test:seqs` after the bool fix).  This sits at the
-  boundary of `[VERIFY-generic-typevar-ddm]`; tracked here as the
-  specifically-Sequence-shaped manifestation.
-- **Waiting on upstream**: Strata DDM growing 0-ary polymorphic
-  resolution (Grammar.lean's own TODO references tracking issue #1157).
-  Translator-side monomorphization is a possible workaround but doesn't
-  cover truly generic call sites with unknown instantiations.
-- Affects (current `main2` pin, after the 2026-05-19 bool fix):
-  `verus-examples:assert_by_compute` (5 of 11 `Sequence.empty` references
-  are polymorphic-`T`; 6 of 11 now correctly emit `_bool`),
-  `verus-examples:guide__assert_by_compute`,
-  `verus-examples:guide__ext_equal`,
-  `vlir-tests:crypto_noref`,
-  `vlir-tests:tests__adopted_rust_verify_test__seqs` (no longer
-  Sequence.empty-blocked but exposes the related tvar-bitvector issue
-  noted above).
+### `[VERIFY-sequence-empty-polymorphic]` Polymorphic `Sequence.empty<A>` (RESOLVED)
+- Historical: concrete element types used typed empty-sequence tokens, but a
+  type-variable element fell through to bare `Sequence.empty`, which Strata's
+  DDM rejected.
+- **Resolved 2026-06-05:** `Bld.seqEmpty` / `seqEmptyExpr` now fall back to
+  Core's polymorphic `seq_empty<A>()` production, printing
+  `Sequence.empty<T>()` for generic element types.
+- Remaining generic typed-operator failures are unrelated to the empty
+  constant and are tracked under `[VERIFY-generic-typevar-ddm]`.
 
 ### `[VERIFY-lambda-encoding]` Strata SMT encoder rejects lambdas
 - Per Strata PR #1049, the Boole/Core grammar accepts `fun x : T => body`
@@ -1011,33 +986,26 @@ erasure, or name-collision semantics.
 - Affects: `verus-examples:guide/lib_examples`, `verus-examples:rfmig_script`,
   `verus-examples:syntax`, `verus-examples:vectors`
 
-### `[TRANS-for-loop-empty-range]` For-loop `to` bound underflows on empty ranges
-- The translator (and `synthesizeVecFromElemBody`) lowers Verus's exclusive
-  range `0..n` to Boole's inclusive `for i := 0 to n-1`. The subtraction is
-  done in `bv64` (e.g. `int_to_bv64_u(Sequence.length(text)) - bv{64}(1)`),
-  which underflows to `2^64 - 1` when `n == 0`.
+### `[TRANS-for-loop-empty-range]` Remaining bv-domain `to` bounds underflow on empty ranges
+- The translator lowers Verus's exclusive range `0..n` to Boole's inclusive
+  `for i := 0 to n - 1`. When a recovered loop is promoted to `int` by
+  `[TRANS-loop-counter-int]`, an empty range has the faithful bound `0 to -1`.
+  The remaining gap is in bv-domain loops, including
+  `synthesizeVecFromElemBody`, where `n - bv{64}(1)` underflows to
+  `2^64 - 1` when `n == 0`.
 - Boole's `for ... to limit` is inclusive, so a limit of `bv{64}(2^64 - 1)`
   would attempt up to `2^64` iterations — silently divergent rather than
   the empty iteration the source intends.
-- Today this is masked because callers typically `requires len > 0` or the
-  surrounding spec guarantees non-empty input, so the `len == 0` path is
-  unreachable in practice. There is no test that exercises the empty-range
-  case end-to-end.
-- Three viable fixes, in order of cheapness:
+- Two viable fixes:
   - **Use an exclusive-bound for-loop syntax** if Strata Boole exposes one
     (`for i := 0 < limit` style); cheapest, deterministic.
   - **Guard the loop**: emit `if n > 0 { for i := 0 to n - 1 { ... } }` at
     every for-loop reconstruction site (and in `synthesizeVecFromElemBody`).
-  - **Axiomatize the coercion**: orthogonal — doesn't fix the divergence,
-    just makes it provably stuck rather than silently wrong.
-- Choice between `int_to_bv64_u(n) - bv{64}(1)` (current) and
-  `int_to_bv64_u(n - 1)` is solver-side: bv subtraction is more concrete
-  for cvc5; int subtraction goes through an extra uninterpreted-coercion
-  layer. Current form is preferred until the empty-range guard is in place.
-- Affects: every test that uses a for-loop reconstruction or
-  `Vec_from_elem`. Concrete instance: `vlir-tests:crypto_noref`'s
-  `encrypt`/`decrypt` loops at `for i : bv64 := bv{64}(0) to
-  int_to_bv64_u(Sequence.length(text)) - bv{64}(1)`.
+- Affects: `Vec_from_elem` and any recovered loop that must remain bv-typed and
+  can receive a zero end bound. Concrete current instance:
+  `vlir-tests:crypto_noref`'s synthesized `Vec_from_elem` body emits
+  `for i : bv64 := bv{64}(0) to n - bv{64}(1)`. Its `encrypt` / `decrypt`
+  loops are now int-promoted and emit `0 to Sequence.length(text) - 1`.
 
 ### `[VERIFY-datatype-tester-ordering]` Strata: datatype tester resolves as free variable when its datatype is declared first
 - **Filed against Strata.**  Trigger conditions bisected: program
@@ -1084,9 +1052,9 @@ erasure, or name-collision semantics.
   hits this pre-existing bug instead.
 - Likely fix: either coerce binders to `int` for arithmetic
   contexts (matching how scalars are handled elsewhere in the
-  pipeline) or wrap each use of the binder in `nat_to_int(...)`.
+  pipeline) or wrap each use of the binder in `nat.toInt(...)`.
 - Affects: `verus-examples:trigger_loops` (line 36's
-  `bad_loop` requires).  Adjacent to `[TRANS-coercion-uninterpreted]`
+  `bad_loop` requires). Adjacent to `[TRANS-widening-casts]`
   but the failure is at type-check rather than at solver time.
 
 ### `[SURFACE-sequence-empty]` typed `Sequence.empty_<T>` resolved
@@ -1115,13 +1083,11 @@ erasure, or name-collision semantics.
   down to `Sequence.empty_<T>` literals at the leaves.
 - **Validation**: `verus-examples:guide/lib_examples`,
   `verus-examples:guide/quants`, and `vlir-tests:test_vstd` now
-  emit zero untyped `Sequence.empty` tokens.  Each test still fails
-  for a different (pre-existing) reason — `lib_examples` on
-  int-vs-nat coercion in `Seq_new(5, fun i: int => …)`,
-  `quants` on the multi-binder / expression-level `[TRANS-choose]`
-  gaps, `test_vstd` on `Unknown variable Map_new` — but the
-  `Sequence.empty` typed-dispatch issue itself is resolved across
-  all reachable contexts.
+  emit zero untyped `Sequence.empty` tokens.
+- **2026-06-05 — polymorphic fallback resolved.** For an element type variable,
+  `Bld.seqEmpty` / `seqEmptyExpr` use Core's `seq_empty<A>()` production and
+  print `Sequence.empty<T>()`. The former generic empty-sequence parse errors
+  in `crypto_noref`, `assert_by_compute`, and related tests are gone.
 
 ### `[SURFACE-sequence-literal]` typed `Sequence.of_<T>[…]` literal emission
 - **2026-05-14 — adopt upstream `seq_of_*` syntax** (Strata
@@ -1140,7 +1106,7 @@ erasure, or name-collision semantics.
   as `Unknown variable Sequence.of_bv32`).  Both `seqLiteralExpr` and
   `seqRepeatExpr` route through it; polymorphic element types
   (`TypParam`, `Struct`, unrecognised) fall back to the older
-  `Sequence.build` chain over `Sequence.empty_<T>`.
+  `Sequence.build` chain over typed `Sequence.empty<T>()`.
 - **Validation**: `sha256_compact_indexed`'s `K32` constant emits as a
   single `Sequence.of_bv32[bv{32}(0x428a2f98), bv{32}(0x71374491), …]`
   literal instead of a 64-deep nested `Sequence.build(Sequence.build(…
@@ -1148,9 +1114,8 @@ erasure, or name-collision semantics.
   literal drops from ~3 KB to ~700 bytes.  The `[0u32; 16]` init in
   `to_u32s` similarly compacts.  Obligation count goes 24 → 26 for the
   SHA test (two additional well-formedness obligations the typed-literal
-  node generates), all passing; full
-  `tests/check_working_tests.sh` regression is unchanged (31 pass /
-  9 fail).
+  node generates), all passing; the current working-suite gate remains
+  46 pass / 2 skips / 1 fail.
 - Affects (emission shape only, no verification-outcome changes):
   every test that previously emitted a `Sequence.build(…)` chain on a
   bv8/16/32/64/int element type.  Visible in

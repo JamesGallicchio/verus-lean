@@ -105,34 +105,36 @@ emitted — the built-in call appears directly in the output expression.
 | `Seq_lib_drop_last` | `Sequence.take(s, Sequence.length(s) - 1)`               |
 | `Seq_lib_remove`    | `Sequence.append(Sequence.take(s,i), Sequence.drop(s,i+1))` |
 
-### Declared in Seq Prelude
+### On-Demand Support Declarations
 
-Functions that cannot be expressed as Strata built-in calls are declared in
-`prelude/Seq.boole.st`.  Some have concrete bodies; others are abstract.
+Functions that cannot be expressed as Strata built-in calls are emitted on
+demand by `VerusLean/VLIR/Boole/SupportEmit.lean`. They are abstract.
+`prelude/Seq.boole.st` is intentionally almost empty; emitting polymorphic
+helpers only when referenced avoids unused-type-variable encoding failures.
 
-| Function              | Body                                         | Why abstract?                        |
-|-----------------------|----------------------------------------------|--------------------------------------|
-| `Seq_len(s)`          | `int_to_nat(Sequence.length(s))` (concrete)  | —                                    |
-| `Seq_lib_insert(s,i,v)` | `Sequence.append(Sequence.build(Sequence.take(s,i),v), Sequence.drop(s,i))` (concrete) | — |
-| `Seq_new(len, f)`     | abstract                                     | Requires iteration — not expressible in first-order Boole function syntax |
-| `Seq_lib_map(s, f)`   | abstract                                     | Higher-order iteration               |
-| `Seq_lib_map_values`  | abstract                                     | Higher-order iteration               |
-| `Seq_lib_filter`      | abstract                                     | Higher-order iteration               |
-| `Seq_lib_sort_by`     | abstract                                     | Higher-order iteration               |
-| `Seq_lib_to_set`      | abstract                                     | No Strata Set built-in               |
-| `Set_finite`          | abstract                                     | No Strata Set built-in               |
+| Function              | Why abstract?                        |
+|-----------------------|--------------------------------------|
+| `Seq_new(len, f)`     | Requires higher-order iteration      |
+| `Seq_lib_map(s, f)`   | Higher-order iteration               |
+| `Seq_lib_map_values`  | Higher-order iteration               |
+| `Seq_lib_filter`      | Higher-order iteration               |
+| `Seq_lib_sort_by`     | Higher-order iteration               |
+| `Seq_lib_zip_with`    | Higher-order iteration               |
+| `Seq_lib_to_set`      | No native Strata Set conversion      |
+| `Set_finite`          | No native Strata Set finiteness test |
 
-The Seq prelude also provides:
+The on-demand support layer also provides:
 - `type Set (T: Type);` — used by `Seq_lib_to_set`
 
-The translator-managed numeric support layer provides:
+The always-loaded Nat prelude provides:
 - `type nat;`
-- `function nat_to_int(n: nat): int;`
-- `function int_to_nat(i: int): nat;`
+- `function nat.toInt(n: nat): int;`
+- `function nat.fromInt(i: int): nat requires 0 <= i;`
+- round-trip and non-negativity axioms for those conversions
 
-Those declarations are emitted from the same support assembly as the other
-translator-generated cast helpers, so later nat-using features do not depend
-on the Seq prelude just to get the `nat` bridge functions.
+`Seq_len`, `Seq_lib_insert`, and `Seq_subrange` no longer need declarations:
+current translation paths inline or lower those operations before a standalone
+helper declaration is needed.
 
 ### Missing Prelude Files
 
