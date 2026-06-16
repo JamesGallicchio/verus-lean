@@ -13,15 +13,18 @@ Solver success is **not** used to classify faithfulness.
   `pr/casts-boole @ fff49d4e3` plus its current working-tree fixes; solver:
   `cvc5`):
   - `lake build`: success (443 jobs; warnings only).
-  - `./tests/check_working_tests.sh`: **46 passed · 2 skipped (Strata gap:
+  - `./tests/check_working_tests.sh`: **47 passed · 2 skipped (Strata gap:
     `generics`, `guide/overflow`) · 1 failed (`crypto_noref`) · 0 generation
-    failures** after adding `test_array`, `integers`, and
-    `guide/pervasive_example` to `working_tests.txt`. This supersedes the
-    39/1/7 and 44/1/1 gate snapshots below.
+    failures** after adding `test_array`, `integers`, `guide/pervasive_example`,
+    and the `for_empty_bv_range` regression to `working_tests.txt`. This
+    supersedes the 39/1/7 and 44/1/1 gate snapshots below.
   - `./tests/check_regression_gate.sh` / `regress_examples.sh --all-suites`:
     **67 verify passed · 0 skipped (Sequence) · 6 skipped (Strata gap) ·
     1 known translator bug · 53 verify failures · 0 generation failures ·
-    0 missing JSON · 4 ignored**. Total accounted: **131 tests**.
+    0 missing JSON · 4 ignored**. Total accounted in that full run:
+    **131 tests**. `vlir-tests:for_empty_bv_range` was added afterward and
+    passes both targeted verification and the stable gate, bringing the current
+    all-suites inventory to **132 tests**; a new full all-suites run is pending.
     The gate exits nonzero because it requires zero verify failures, while the
     broad differential set currently has 53 failing cases (many already
     documented as unsupported/unfaithful); use `check_working_tests.sh` as the
@@ -343,10 +346,12 @@ Solver success is **not** used to classify faithfulness.
     for comparison
 
 ## Automated Boole Regression Summary (2026-06-15)
-`regress_examples.sh --all-suites` currently scans 131 tests:
+`regress_examples.sh --all-suites` currently scans 132 tests. The latest full
+all-suites run covered the first 131; the newly added
+`vlir-tests:for_empty_bv_range` was run separately and passed:
 - generation failures: 0
 - missing json: 0
-- verify passed: 67
+- verify passed: 68 (67 in the full run + `for_empty_bv_range`)
 - verify skipped (Sequence): 0
 - verify skipped (Strata gap): 6
 - known translator bugs: 1
@@ -354,17 +359,17 @@ Solver success is **not** used to classify faithfulness.
 - ignored: 4
 
 These are automated pipeline outcomes, not faithfulness judgments. The manual
-classification below has been refreshed against all 131 currently scanned
-tests, including the newly scanned Dalek cases.
+classification below covers all 132 currently scanned tests, including the
+newly scanned Dalek cases and the exclusive-range regression.
 
 ## Manual Differential Classification (refreshed 2026-06-15)
-Tests in regression and classified in this doc: **131**.
+Tests in regression and classified in this doc: **132**.
 `regress_examples.sh --all-suites` scans `tests/VerusFiles/`,
 `tests/adopted_rust_verify_test/`, `verus/examples/`, and
 `verus/examples/guide/` at `find -maxdepth 1`.
 
-Bucket totals: 21 (faithful and same) + 54 (faithful but different) +
-56 (not faithful) = **131**, matching the current regression test count.
+Bucket totals: 22 (faithful and same) + 54 (faithful but different) +
+56 (not faithful) = **132**, matching the current regression test count.
 
 Classification rule (faithfulness-first): a test is placed in a bucket by
 asking, in order, (1) is the emitted Boole faithful to the source — i.e. it
@@ -465,7 +470,7 @@ tests in `not faithful translation`: `verus-examples:modules`,
 does not repair their documented visibility, reveal/fuel, hide, wrapper
 erasure, or name-collision semantics.
 
-## faithful and same as Verus output (21)
+## faithful and same as Verus output (22)
 - `verus-examples:adts_eq`
 - `verus-examples:assertions` (fail as expected)
 - `verus-examples:debug` (fail as expected)
@@ -482,6 +487,7 @@ erasure, or name-collision semantics.
 - `vlir-tests:basic_failure` (fail as expected)
 - `vlir-tests:binder_cast_regressions`
 - `vlir-tests:by_lean` (fail as expected)
+- `vlir-tests:for_empty_bv_range` (bv64 range recovery preserves Rust's empty-range semantics with a signedness-aware `start < end` guard; Verus and Strata both verify)
 - `vlir-tests:matching`
 - `vlir-tests:sha256_compact_indexed` (indexed loops, `Sequence` accesses, wrapping bitvector additions, and mutable-reference state output are preserved)
 - `vlir-tests:test_array` (array literals and inequality lower directly to concrete `Sequence` construction and equality; 6/6 obligations pass)
@@ -986,26 +992,22 @@ erasure, or name-collision semantics.
 - Affects: `verus-examples:guide/lib_examples`, `verus-examples:rfmig_script`,
   `verus-examples:syntax`, `verus-examples:vectors`
 
-### `[TRANS-for-loop-empty-range]` Remaining bv-domain `to` bounds underflow on empty ranges
-- The translator lowers Verus's exclusive range `0..n` to Boole's inclusive
-  `for i := 0 to n - 1`. When a recovered loop is promoted to `int` by
-  `[TRANS-loop-counter-int]`, an empty range has the faithful bound `0 to -1`.
-  The remaining gap is in bv-domain loops, including
-  `synthesizeVecFromElemBody`, where `n - bv{64}(1)` underflows to
-  `2^64 - 1` when `n == 0`.
-- Boole's `for ... to limit` is inclusive, so a limit of `bv{64}(2^64 - 1)`
-  would attempt up to `2^64` iterations — silently divergent rather than
-  the empty iteration the source intends.
-- Two viable fixes:
-  - **Use an exclusive-bound for-loop syntax** if Strata Boole exposes one
-    (`for i := 0 < limit` style); cheapest, deterministic.
-  - **Guard the loop**: emit `if n > 0 { for i := 0 to n - 1 { ... } }` at
-    every for-loop reconstruction site (and in `synthesizeVecFromElemBody`).
-- Affects: `Vec_from_elem` and any recovered loop that must remain bv-typed and
-  can receive a zero end bound. Concrete current instance:
-  `vlir-tests:crypto_noref`'s synthesized `Vec_from_elem` body emits
-  `for i : bv64 := bv{64}(0) to n - bv{64}(1)`. Its `encrypt` / `decrypt`
-  loops are now int-promoted and emit `0 to Sequence.length(text) - 1`.
+### `[TRANS-for-loop-empty-range]` Bv-domain exclusive ranges (RESOLVED)
+- Historical: lowering Rust's exclusive `start..end` to Boole's inclusive
+  `for i := start to end - 1` allowed `end - 1` to wrap in the bitvector
+  domain. Empty ranges such as `0..0` could therefore become a loop ending at
+  `2^64 - 1`; mathematical-`int` loops already represented emptiness faithfully
+  with a negative inclusive limit.
+- **Resolved 2026-06-15:** every recovered bv-domain range is wrapped in a
+  signedness-aware `if start < end` guard before the inclusive loop. The same
+  helper guards the synthesized `Vec_from_elem` loop with `if bv{64}(0) < n`.
+  This handles both zero-bound and reversed ranges without changing int-domain
+  loop output.
+- Regression coverage:
+  - `vlir-tests:for_empty_bv_range` keeps a recovered `usize` loop in bv64 and
+    emits `if (start < end) { for i : bv64 := start to end - bv{64}(1) ... }`.
+  - `vlir-tests:crypto_noref` emits the corresponding guard around synthesized
+    `Vec_from_elem`.
 
 ### `[VERIFY-datatype-tester-ordering]` Strata: datatype tester resolves as free variable when its datatype is declared first
 - **Filed against Strata.**  Trigger conditions bisected: program

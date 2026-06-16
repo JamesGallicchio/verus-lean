@@ -1778,6 +1778,19 @@ private def hoistChooseArg (env : VarEnv) (idx : Nat) (arg : Exp) :
           chooseAssignStmt tmpName (sanitizeVarName v) vTy' pred'], tmpName)
   return none
 
+private def guardExclusiveBvForLoop (loopTy : Typ) (startExpr endExpr : BExpr)
+    (loopStmt : BStmt) : BStmt :=
+  match bitInfoOfTyp loopTy with
+  | some (w, signed) =>
+    -- Boole's `for ... to ...` limit is inclusive, so lowering Rust's
+    -- exclusive `start..end` subtracts one from `end`.  In a bitvector domain
+    -- that subtraction wraps for an empty range; guard the loop before forming
+    -- an executable path through the wrapped limit.
+    let nonempty :=
+      if signed then bvSlt w startExpr endExpr else bvUlt w startExpr endExpr
+    iteStmt nonempty #[loopStmt] #[]
+  | none => loopStmt
+
 mutual
 
 partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
@@ -2186,6 +2199,7 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
       pure (invExprs, measureExpr?, bodyStms)
     let loopStmt := forToStmt loopVarSan loopVarTy startExpr limitExpr
       measureExpr? invExprs bodyStms.toArray
+    let loopStmt := guardExclusiveBvForLoop loopBinderTy startExpr endE loopStmt
     let preBoole ← loop.preStms.mapM (stmToBoole env projLayouts mutArgMap retVar? procName)
     pure (some (preBoole.flatten ++ [loopStmt], loop.postStms))
 
@@ -2619,8 +2633,9 @@ private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
       pure (boolImplies inRange (eqTyped elemTy' selectExpr elemExpr))
     let invElems := forallExpr #[("j", intTy)] invElemsBody
     let nextRet := Bld.appN (Bld.fvar seqBuildIdx) [retExpr, elemExpr]
-    pure (forToStmt loopVarName nTy' zeroBv limitExpr none #[invBounds, invLen, invElems]
-      #[setStmtTyped retTy (sanitizeVarName f.retName) nextRet])
+    let loopStmt := forToStmt loopVarName nTy' zeroBv limitExpr none
+      #[invBounds, invLen, invElems] #[setStmtTyped retTy (sanitizeVarName f.retName) nextRet]
+    pure (guardExclusiveBvForLoop nTy zeroBv nExpr loopStmt)
   pure (BooleDDM.Block.block default (ann #[initStmt, loopStmt]))
 
 def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
