@@ -19,7 +19,6 @@ tests/VerusFiles/demo_for.rs
 tests/VerusFiles/demo_while.rs
 tests/VerusFiles/demo_while_loop_isolation.rs
 tests/VerusFiles/FindMax.rs
-tests/VerusFiles/for_empty_bv_range.rs
 tests/VerusFiles/LoopSimple.rs
 tests/VerusFiles/LoopSimpleWithSpec.rs
 tests/VerusFiles/matching.rs

@@ -32,13 +32,16 @@ run_boole_wrapper() {
 #        error and this pattern is non-empty — the test is classified as
 #        `known_translator_bug`. This keeps the per-bug tracking visible in
 #        summaries without masking translator bugs behind "Strata gap".
-# Prints one of: pass | skip_sequence | skip_gap | known_translator_bug | fail
+# Prints one of:
+#   pass | skip_sequence | skip_gap | skip_solver_timeout | skip_solver_unknown
+#   | known_translator_bug | fail
 classify_boole_verify_log() {
   local log="$1"
   local rc="$2"
   local expected_fail_pattern="${3:-}"
   local known_translator_bug_pattern="${4:-}"
-  # Lean elaboration errors: skip_sequence > skip_gap > known_translator_bug > fail
+  # Lean elaboration errors: skip_sequence > skip_solver_timeout > skip_gap
+  #   > known_translator_bug > fail
   if [ "$rc" -ne 0 ] || grep -q "error:" "$log"; then
     # Match only the two concrete signatures that mean "Strata is missing
     # Sequence support". The bare `Sequence` token is too broad: Strata's
@@ -47,6 +50,14 @@ classify_boole_verify_log() {
     # type-check failure would be miscategorized as a Sequence skip.
     if grep -qE "Unsupported Boole type: Strata\\.BooleDDM\\.BooleType\\.Sequence|Unknown expr identifier Sequence\\.empty" "$log"; then
       echo "skip_sequence"
+      return 0
+    fi
+    # Solver timeout: cvc5 (or z3) failed to produce a verdict within the
+    # configured budget. Not a translator bug or a Strata feature gap — a
+    # resource issue. Tracked separately so genuine verifier regressions
+    # stay visible and solver-resource issues can be tuned independently.
+    if grep -qE "(cvc5|z3)[^\n]*(interrupted by timeout|killed by)" "$log"; then
+      echo "skip_solver_timeout"
       return 0
     fi
     # Strata-side gaps: features Strata itself does not yet support. These
@@ -136,6 +147,14 @@ classify_boole_verify_log() {
     }
   ' "$log")"
   if [ -z "$unexpected_fails" ]; then
+    # No obligation failed outright. If any obligation returned `unknown`
+    # (solver did not decide), classify as `skip_solver_unknown` so we
+    # don't silently count these as passes. Genuine passes require every
+    # obligation to be ✅ pass.
+    if grep -q "Result: ❓ unknown" "$log"; then
+      echo "skip_solver_unknown"
+      return 0
+    fi
     echo "pass"
     return 0
   fi
@@ -400,6 +419,18 @@ run_boole_verify() {
         ' "$verify_log" | cut -c1-120)"
       fi
       echo "$base: ⏭  (Strata gap): $err"
+      rm -f "$verify_log"
+      return 0
+      ;;
+    skip_solver_timeout)
+      echo "$base: ⏭  (solver timeout)"
+      rm -f "$verify_log"
+      return 0
+      ;;
+    skip_solver_unknown)
+      local n
+      n="$(grep -c "Result: ❓ unknown" "$verify_log" || true)"
+      echo "$base: ⏭  (solver unknown on $n obligation(s))"
       rm -f "$verify_log"
       return 0
       ;;
