@@ -38,6 +38,11 @@ private def isVstdName (name : Ident) : Bool :=
   TODO: handle shadowing
 -/
 structure ParserState where
+  /-- Capitalized crate namespace for the top-level JSON file currently parsed.
+      Used to distinguish in-crate trait impls from std/vstd/core impls that
+      may appear in `resolved_method` but should stay on existing built-in
+      lowering paths. -/
+  currentKrate : String := ""
   expectedType : Typ := .Bool
   /-- Set while parsing the direct child of an `as int` / `as nat` `Clip`.
       Suppresses the synthesized arithmetic-promotion `Clip` on that child:
@@ -85,6 +90,9 @@ def getAndClearParentIntNatClip : VParser Bool := do
   let st ← get
   modify fun st => { st with parentIntNatClip := false }
   return st.parentIntNatClip
+
+def setCurrentKrate (krate : String) : VParser Unit :=
+  modify fun st => { st with currentKrate := krate }
 
 def getFreeVars : VParser VarMap :=
   do let st ← get; return st.freeVars
@@ -330,6 +338,41 @@ def traitImplMethodFromJson? (j : Json) : m (Option Ident) := do
     | .ok _ => some <$> pathedNameFromNameJson tmi "method" "path"
     | .error _ => pure none
   | .error _ => pure none
+
+/-- Parse Verus's `Option (Fun, Typs)` resolved-method payload and return the
+    selected concrete impl method path, when present. -/
+def resolvedFunPayloadFromJson? (j : Json) : m (Option Ident) := do
+  match j with
+  | .arr elems =>
+    match elems[0]? with
+    | some fn => some <$> pathedNameFromJson fn "path"
+    | none => pure none
+  | _ => pure none
+
+/-- Statement-level calls carry their resolved trait target under the
+    `resolved_method` field. -/
+def resolvedFunFromJson? (j : Json) : m (Option Ident) := do
+  match j.getObjVal? "resolved_method" with
+  | .ok payload => resolvedFunPayloadFromJson? payload
+  | .error _ => pure none
+
+/-- Prefer Verus's resolved trait target only when it names an already-parsed
+    in-crate declaration. This keeps std/core/vstd resolved impls on the
+    existing abstract/built-in lowering paths, where the translator has special
+    handling for Clone/Deref/Iterator/View/etc. The parser is still single-pass:
+    calls to impl declarations that appear later in the JSON remain abstract
+    until declaration indexing becomes two-pass. -/
+def selectResolvedCallName (fallback : Ident) (resolved? : Option Ident) : VParser Ident := do
+  match resolved? with
+  | some resolved =>
+    let st ← get
+    if st.currentKrate != "" && resolved.head == st.currentKrate then
+      match ← getDeclAny? resolved with
+      | some _ => pure resolved
+      | none => pure fallback
+    else
+      pure fallback
+  | none => pure fallback
 
 /--
   Parse a type from an already-parsed type and a decoration.
@@ -842,11 +885,16 @@ def Quant.fromJson (j : Json) : m Quant := do
   | "Exists" => return .Exists
   | s => throw s!"[Quant.fromJson?]: Expected one of \{ Forall, Exists }, got {s}"
 
-def CallFun.fromJson (j : Json) : m CallFun := do
+def CallFun.fromJson (j : Json) : VParser CallFun := do
   match ← j["Fun", "Recursive", "InternalFun"] with
   | ("Fun", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 1
     let name ← pathedNameFromJson arr[0]
+    let resolved? ←
+      match arr[1]? with
+      | some payload => resolvedFunPayloadFromJson? payload
+      | none => pure none
+    let name ← selectResolvedCallName name resolved?
     return .Fun name
   | ("Recursive", obj) =>
     let name ← pathedNameFromJson obj
@@ -1379,6 +1427,11 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
 
   | ("Call", obj) =>
     let fnName ← pathedNameFromNameJson obj (nameKey := "fun")
+    -- Verus records the concrete impl a trait-method call resolves to in
+    -- `resolved_method`. Dispatch to that impl only when it is an emitted
+    -- in-crate declaration; external trait impls stay on the existing
+    -- special-case lowering path.
+    let callName ← selectResolvedCallName fnName (← resolvedFunFromJson? obj)
     let typArgsArr ← obj.getArrUnderKeyM "typ_args"
     let typArgs ← typArgsArr.mapM Typ.fromJson
     let argsArr ← obj.getArrUnderKeyM "args"
@@ -1401,14 +1454,14 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
       | none => pure argsParsed.toList
     match obj.getObjVal? "dest" with
     | .ok .null =>
-      return .Call fnName typArgs.toList args
+      return .Call callName typArgs.toList args
     | .ok destObj =>
       let (lhs, lhsTy) ← Dest.fromJson <| ← destObj.getObjValM "dest"
       let lhsIsInit ← destObj.getBoolUnderKeyM "is_init"
-      let rhs := Exp.Call (.Fun fnName) typArgs.toList args
+      let rhs := Exp.Call (.Fun callName) typArgs.toList args
       return .Assign lhs lhsTy rhs lhsIsInit
     | .error _ =>
-      return .Call fnName typArgs.toList args
+      return .Call callName typArgs.toList args
 
   | ("Assert", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 3
@@ -2089,6 +2142,7 @@ partial def Decl.fromJson (j : Json) : VParser (Option Decl) := do
 partial def Decls.fromJson? (j : Json) : VParser (String × List Decl × List Decl) := do
   let krate ← j.getStrUnderKeyM "krate"
   let krate := krate.capitalize
+  setCurrentKrate krate
 
   let declsArr ← j.getArrUnderKeyM "decls"
 
