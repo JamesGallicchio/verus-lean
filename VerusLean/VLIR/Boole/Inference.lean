@@ -291,6 +291,64 @@ def unwrapViewCall : Exp → Exp
     if isViewName (CallFun.name fn) then inner else .Call fn [] [inner]
   | e => e
 
+/-! ## Expression Type Inference -/
+
+/-- Result type of tuple projection `Proj' size field` from a right-nested
+    tuple type.  Verus serializes `(A, B, C)` as `Tuple A (Tuple B C)`.
+    A one-tuple projection is the identity. -/
+partial def tupleFieldTyp? (size field : Nat) (ty : Typ) : Option Typ :=
+  if field ≥ size then none
+  else
+    match ty with
+    | .Decorated _ inner => tupleFieldTyp? size field inner
+    | _ =>
+      if size == 1 then
+        some ty
+      else
+        match ty with
+        | .Tuple head tail =>
+          if field == 0 then some head
+          else tupleFieldTyp? (size - 1) (field - 1) tail
+        | _ => none
+
+partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Option Typ
+  | .Var x => boundType? bound x <|> env.get? x
+  | .Call fn _ args =>
+    let name := CallFun.name fn
+    if isSliceLenSpecName name || isSliceLenExecName name then
+      -- `slice::len` lowers to `Sequence.length(slice)` (int).
+      some .Int
+    else if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
+      some .Int
+    else if isVecIndexSpecName name || isVecIndexExecName name then
+      match args with
+      | vArg :: _ =>
+        match vecVarFromExp (unwrapViewCall vArg) with
+        | some base => env.get? base |>.bind vecElemTyp?
+        | none => none
+      | _ => none
+    else
+      lookupFnRetTypeFull env (identToBoole name)
+  | .Unary (.Box t) _ => some t
+  | .Unary (.Unbox t) _ => some t
+  | .Unary .Trigger e => inferComparableTyp? env bound e
+  | .Unary .Old e => inferComparableTyp? env bound e
+  | .Unary (.HasType _) e => inferComparableTyp? env bound e
+  | .Unary (.Proj dt variant field _ _) _ =>
+    let projField := projFieldNameOf dt variant field
+    lookupFnRetTypeFull env (datatypeDestructorNameOf dt projField)
+  | .Unary (.Proj' size field) e =>
+    (inferComparableTyp? env bound e).bind (tupleFieldTyp? size field)
+  | .Unary (.Clip range _) _ =>
+    match range with
+    | .Int => some .Int  | .Nat => some .Nat
+    | .U w => some (.UInt w.toNat)  | .I w => some (.SInt w.toNat)
+    | .USize => some .USize  | .ISize => some .ISize
+    | .Char => some .Char
+  | .If _ t f => inferComparableTyp? env bound t <|> inferComparableTyp? env bound f
+  | .Bind (.Let _ _ _) body => inferComparableTyp? env bound body
+  | _ => none
+
 /-! ## Bit-width Inference -/
 
 def constIntExprVal? : Exp → Option Int
@@ -377,6 +435,8 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
   | .Unary (.Clip .ISize _) _ => some (usizeBitWidth, true)
   | .Unary (.Clip .Int _) _ => none
   | .Unary (.Clip .Nat _) _ => none
+  | .Unary (.Proj' size field) e =>
+    (inferComparableTyp? env bound e).bind (tupleFieldTyp? size field) |>.bind bitInfoOfTyp
   | .Binary (.Bitwise (.Shl w _) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Binary (.Bitwise (.Shr w) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Unary _ e => inferBitInfo env bound e
@@ -386,42 +446,6 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
   | .Binary (.Eq _) _ _ | .Binary .Ne _ _ | .Binary (.Inequality _) _ _ => none
   | .Binary _ e1 e2 => inferBitInfo env bound e1 <|> inferBitInfo env bound e2
   | .If _ t f => inferBitInfo env bound t <|> inferBitInfo env bound f
-  | _ => none
-
-partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Option Typ
-  | .Var x => boundType? bound x <|> env.get? x
-  | .Call fn _ args =>
-    let name := CallFun.name fn
-    if isSliceLenSpecName name || isSliceLenExecName name then
-      -- `slice::len` lowers to `Sequence.length(slice)` (int).
-      some .Int
-    else if isSeqLenSpecName name || isVecLenSpecName name || isVecLenExecName name then
-      some .Int
-    else if isVecIndexSpecName name || isVecIndexExecName name then
-      match args with
-      | vArg :: _ =>
-        match vecVarFromExp (unwrapViewCall vArg) with
-        | some base => env.get? base |>.bind vecElemTyp?
-        | none => none
-      | _ => none
-    else
-      lookupFnRetTypeFull env (identToBoole name)
-  | .Unary (.Box t) _ => some t
-  | .Unary (.Unbox t) _ => some t
-  | .Unary .Trigger e => inferComparableTyp? env bound e
-  | .Unary .Old e => inferComparableTyp? env bound e
-  | .Unary (.HasType _) e => inferComparableTyp? env bound e
-  | .Unary (.Proj dt variant field _ _) _ =>
-    let projField := projFieldNameOf dt variant field
-    lookupFnRetTypeFull env (datatypeDestructorNameOf dt projField)
-  | .Unary (.Clip range _) _ =>
-    match range with
-    | .Int => some .Int  | .Nat => some .Nat
-    | .U w => some (.UInt w.toNat)  | .I w => some (.SInt w.toNat)
-    | .USize => some .USize  | .ISize => some .ISize
-    | .Char => some .Char
-  | .If _ t f => inferComparableTyp? env bound t <|> inferComparableTyp? env bound f
-  | .Bind (.Let _ _ _) body => inferComparableTyp? env bound body
   | _ => none
 
 def inferNumKind (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option NumKind :=

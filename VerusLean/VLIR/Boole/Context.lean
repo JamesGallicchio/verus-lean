@@ -29,6 +29,8 @@ inductive SupportDecl where
   | bvToNat (w : Nat) (signed : Bool)
   | intToBv (w : Nat) (signed : Bool)
   | bvWiden (fromW toW : Nat) (signed : Bool)
+  /-- Singleton unit datatype for Verus's zero-arity tuple value. -/
+  | unit
   /-- Polymorphic 2-ary tuple type (Verus represents all tuples as nested
       binary tuples; `Unit` is the 0-ary case). Emits a datatype
       `Tuple (T0, T1) { Tuple_ctor_2(Tuple_2_0 : T0, Tuple_2_1 : T1) }`,
@@ -117,6 +119,11 @@ structure BuildCtx where
       impl resolves it to (e.g. `montgomeryPoint`).  Built once from the decl set
       in `declsToBooleProgram`; consulted by `typToBooleType`. -/
   assocTypeResolution : Std.HashMap String Typ := {}
+  /-- Memoizes synthesized monomorphic tuple-projection helpers by
+      `(arity, field, container type)`, so a repeated closed bitvector
+      projection reuses one `Tuple2_proj_*` declaration instead of emitting a
+      fresh copy per occurrence (see `synthTupleProjHelper`). -/
+  tupleProjHelpers : Std.HashMap (Nat × Nat × Typ) String := {}
 
 abbrev BuildM := StateT BuildCtx (Except String)
 

@@ -292,13 +292,6 @@ expected_boole_fail_pattern_for_wrapper() {
 # for the bug descriptions and the fix plan.
 known_translator_bug_pattern_for_wrapper() {
   case "$1" in
-    # mini_c: the 2026-06-01 Strata pull resolved its earlier malformed tuple
-    # projection (`Tuple.._2`); the next translator-side blocker then surfaced —
-    # it references the `Set` type without triggering its `.set` support decl
-    # (`Undeclared type or category Set`), so Lean elaboration aborts before any
-    # obligation runs.  Still a translator bug (missing `requireSupport .set`),
-    # tracked in differential_status.md.
-    */vlir-tests/mini_c.lean) echo 'Undeclared type or category Set' ;;
     # LoopSimpleWithSpec uses `triangle0(i as nat)` style spec-fn calls; the
     # translator does not insert an `int -> nat` coercion at the call boundary,
     # so Strata reports `Expression has type int when nat expected` at Lean

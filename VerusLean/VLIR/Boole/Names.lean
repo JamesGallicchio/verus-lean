@@ -92,6 +92,10 @@ def tupleFstSelector : String := s!"{tupleTypeName}.._0"
 
 def tupleSndSelector : String := s!"{tupleTypeName}.._1"
 
+def unitTypeName : String := "Unit"
+
+def unitCtorName : String := "Unit_unit"
+
 /-! ## Datatype and Field Names -/
 
 private def strataReservedTypeNames : List String :=

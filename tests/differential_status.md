@@ -29,9 +29,11 @@ Solver success is **not** used to classify faithfulness.
   `pr/casts-boole @ fff49d4e3` plus its current working-tree fixes; solver:
   `cvc5`):
   - `lake build`: success (443 jobs; warnings only).
-  - `./tests/check_working_tests.sh`: **46 passed · 2 skipped (Strata gap:
-    `generics`, `guide/overflow`) · 1 failed (`crypto_noref`) · 0 generation
-    failures**.
+  - `./tests/check_working_tests.sh` (rerun 2026-06-22 after the tuple refresh):
+    **generation all working tests passed**; Strata verify: **30 passed ·
+    0 skipped (Sequence) · 3 skipped (Strata gap: `crypto_noref`, `generics`,
+    `guide/overflow`) · 0 skipped (solver timeout) · 16 skipped (solver
+    unknown) · 0 known translator bugs · 0 failed**.
   - `./tests/check_regression_gate.sh` / `regress_examples.sh --all-suites`:
     **67 verify passed · 0 skipped (Sequence) · 6 skipped (Strata gap) ·
     1 known translator bug · 53 verify failures · 0 generation failures ·
@@ -49,6 +51,20 @@ Solver success is **not** used to classify faithfulness.
     **149 obligations: 129 passed · 7 SMT encoding errors · 13 timeouts**.
     The encoding errors are the `assert_81` / `assume_82`
     `Sequence.update`/`Sequence.select` obligations.
+- **targeted mini_c tuple/unit refresh** (2026-06-22):
+  `./tests/run_tests.sh --boole --verbose tests/VerusFiles/mini_c.rs`
+  emits valid binary tuple selectors (`Tuple2.._0`/`Tuple2.._1`), no
+  `Tuple.._2` / `Tuple2_ctor_0`, and includes the needed `Unit` and `Set`
+  support declarations. `./tests/run_tests.sh --verify --verbose
+  tests/VerusFiles/mini_c.rs` now classifies as a Strata gap on unsupported
+  string literals (`Strata.BooleDDM.Expr.strLit`), not a translator bug.
+- **targeted crypto_noref tuple-projection refresh** (2026-06-22):
+  `./tests/run_tests.sh --boole --verbose tests/VerusFiles/crypto_noref.rs`
+  emits monomorphic `Tuple2_proj_*` helpers for the `|kv: (u8, u8)| kv.0 ^
+  kv.1` closures, avoiding Strata's direct `Tuple2.._0/_1` type-variable
+  mismatch in bitvector XOR. `./tests/run_tests.sh --verify --verbose
+  tests/VerusFiles/crypto_noref.rs` now classifies as a Strata gap on
+  unsupported polymorphic `Sequence.empty<T>()`, not a translator bug.
 - Full run (`./tests/regress_examples.sh --all-suites`):
   - solver: `cvc5`
 ## Automated Boole Regression Summary
@@ -216,7 +232,7 @@ erasure, or name-collision semantics.
 - `verus-examples:statements` (mixed-width bitvector arithmetic uses native interpreted `as_int`/`as_bv`, so the widened loop invariant discharges; 23✅ with only the hard nonlinear `measure_decrease_0` timing out)
 - `verus-examples:test` (translation faithful: small bv64 procedure `foo` with `requires a < bv{64}(100)` and `_pct_return := a + bv{64}(1)`, plus a `main` that exercises it. Verify SKIP — Strata-side dispatch gap on this shape, no translator defect)
 - `verus-examples:trigger_loops` (uninterpreted fns + multi-trigger quantifier patterns preserved; `[TRANS-choose]`: source `choose|z| g(z)` in `choose_example`/`quantifier_example` is parsed as `Bind.Lambda [z]` with the predicate erased. In `tests/ignored_tests.txt` as `UPSTREAM-IGNORE + HANG` — file is upstream-marked `ignore`; skipped silently)
-- `vlir-tests:crypto_noref` (concrete and polymorphic empty sequences emit typed forms, including `Sequence.empty<T>()`. Verification fails solely on generic tuple selectors: `Tuple2.._0/_1` retain distinct uninstantiated `T0`/`T1`, so the symmetric XOR in `encrypt_spec` / `decrypt_spec` is rejected with `Expression has type T1 when T0 expected`)
+- `vlir-tests:crypto_noref` (concrete and polymorphic empty sequences emit typed forms, including `Sequence.empty<T>()`. Tuple projections inside the `map_values` XOR closures now route through monomorphic `Tuple2_proj_*` helpers, so the prior direct-selector `T1 when T0 expected` failure is gone. Verification is currently blocked downstream by Strata's unsupported polymorphic `Sequence.empty<T>()` expression in `Vec_from_elem`)
 - `vlir-tests:datatypes` (current difference is only that Strata still type-fails later in the pipeline)
 - `vlir-tests:demo_for` (verify SKIP (Sequence): Boole output recovers the source-level `for` loop shape; blocked by Strata's Sequence frontend/indexing support)
 - `vlir-tests:demo_while_loop_isolation` (`Vec<u64>` find-max with explicit `loop_isolation` enabled; loop-index uses lower through `[TRANS-loop-counter-int]`, so indexing is expressed directly over `Sequence.length`/`Sequence.select`; structurally identical to `demo_while`)
@@ -305,7 +321,7 @@ erasure, or name-collision semantics.
   `montgomeryPoint`, and the exec call targets VLIR's resolved
   `Impl__13_mul`; verification status is still solver-heavy)
 - `vlir-tests:maps` (`[VERIFY-lambda-encoding]` in `mk_map` lambdas; `[TRANS-higher-order-collection-stubs]` currently distorts `Set_mk_map`; raw Core map equalities are still emitted as plain `==` rather than source-like map extensional equality)
-- `vlir-tests:mini_c` (mirrored from `verus/tests/mini_c.rs` into `tests/VerusFiles/`; generates Boole but emits malformed tuple projection `Tuple.._2` while lowering match tuple temporaries — translator-side malformed-output bug)
+- `vlir-tests:mini_c` (mirrored from `verus/tests/mini_c.rs` into `tests/VerusFiles/`; Boole now emits valid `Tuple2` selectors, drops unit-valued match temporaries / declares `Unit` when needed, and declares `Set` for `Map_dom`; verification is blocked downstream by Strata's unsupported `strLit` expression for string literals)
 - `vlir-tests:seqs` (`[VERIFY-lambda-encoding]` in `Seq::new`, `Seq::map`, `Seq::filter`, and `seq![x; n]`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; empty sequences emit typed forms, while other generic/nat typing gaps remain)
 - `vlir-tests:sets` (`[VERIFY-lambda-encoding]` in `Set::new`, `Set::filter`, `Set::map`, `set_map`, and `fold`; `[TRANS-higher-order-collection-stubs]` distorts `Set_new`, `Set_filter`, `Set_lib_map`, and `Set_Fold_fold`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; `s.choose()` is currently just uninterpreted `Set_choose` without witness semantics`)
 - `vlir-tests:test_vstd` (`[VERIFY-lambda-encoding]` in `Set_new(fun i => ...)`, `Map_new(fun i => ..., fun i => ...)`, `Seq_new(5, fun i => ...)`; fixed-size array literals lower to concrete `Sequence.empty`/`Sequence.build` chains)
@@ -455,12 +471,19 @@ erasure, or name-collision semantics.
 - Affects: `vlir-tests:FindMax`, `vlir-tests:demo_while`,
   `vlir-tests:demo_while_loop_isolation`, `verus-examples:generics`
 
-### `[VERIFY-sequence-empty-polymorphic]` Polymorphic `Sequence.empty<A>` (RESOLVED)
-- **Resolved:** `Bld.seqEmpty` / `seqEmptyExpr` fall back to
+### `[VERIFY-sequence-empty-polymorphic]` Polymorphic `Sequence.empty<A>` (surface resolved; SMT-encode open)
+- **Surface/translation resolved:** `Bld.seqEmpty` / `seqEmptyExpr` fall back to
   Core's polymorphic `seq_empty<A>()` production, printing
-  `Sequence.empty<T>()` for generic element types.
-- Remaining generic typed-operator failures are unrelated to the empty
-  constant and are tracked under `[VERIFY-generic-typevar-ddm]`.
+  `Sequence.empty<T>()` for generic element types, so it is valid Boole rather
+  than a translation-time error.
+- **SMT encoding still open:** the Strata SMT encoder does not encode the
+  polymorphic `seq_empty<T>` constant — it emits `Unsupported expression:
+  Strata.BooleDDM.Expr.seq_empty` (the same grammar-accepts / encoder-rejects
+  shape as `[VERIFY-lambda-encoding]`). This blocks `vlir-tests:crypto_noref`
+  in the generic `Vec_from_elem<T>` helper once the tuple-selector typing is
+  fixed. A translation-side workaround would monomorphize the concrete
+  instantiation to a typed `Sequence.empty_bv8` (mirroring the `Tuple2_proj_*`
+  helper).
 
 ### `[VERIFY-lambda-encoding]` Strata SMT encoder rejects lambdas
 - Per Strata PR #1049, the Boole/Core grammar accepts `fun x : T => body`
@@ -886,10 +909,11 @@ erasure, or name-collision semantics.
 ### `[MODEL-unit]` Missing Strata `Unit` (Core-only)
 - Raw Core still leaks `Tuple_ctor_0(): Unit` in places where the Verus source
   did not mention a user-visible unit value.
-- **Resolved for Boole**: `Tuple_ctor_0` does not appear in any current Boole
-  output. The translator either drops the unit value entirely (procedure
-  return is `()` modeled as no return slot) or rewrites the synthetic
-  `Tuple_ctor_0` away during normalization.
+- **Resolved for Boole**: unit lowers through a singleton support datatype
+  `datatype Unit { Unit_unit() }`, and unit-valued match temporaries are
+  dropped after preserving their branch side effects. Normal Boole wrapper
+  verification now covers stale malformed tuple/unit spellings such as
+  `Tuple.._2` and `Tuple2_ctor_0`.
 - Still tracked as a raw-Core legacy note for the affected tests:
   `verus-examples:guide/exec_attr`, `verus-examples:mergesort`,
   `verus-examples:set_from_vec`, `verus-examples:syntax`,
@@ -918,7 +942,7 @@ erasure, or name-collision semantics.
 - Verus `Seq<T>` lowers to Strata's built-in `Sequence T`. Free type
   variables (`A`, `T`, etc.) are auto-declared as abstract types.
 - Still missing in Strata: `Cell`, `Atomic`, `Atomic_ghost`, `Simple_pptr`,
-  `Unit`, `Arithmetic_overflow`, `Rwlock`, `Thread`, `String_string`,
+  `Arithmetic_overflow`, `Rwlock`, `Thread`, `String_string`,
   `Invariant` (keyword clash with Strata's `invariant`), `LocalInvariant`,
   `AtomicInvariant`. Floating-point types `f32`/`f64` lower to
   `Unsupported.Float*` placeholders (see `[TRANS-float-unsupported]`).
@@ -935,6 +959,4 @@ erasure, or name-collision semantics.
   - `Rwlock`: `verus-examples:rwlock_vstd`
   - `Thread`: `verus-examples:thread`
   - `String_string`: `verus-examples:guide/strings`
-  - `Unit` (Core-only): `vlir-tests:demo_for` (Boole-side resolves to no-return,
-    only the raw Core path leaks `Tuple_ctor_0`)
   - Floating-point: `verus-examples:float`

@@ -19,3 +19,4 @@ tests/RegressionLogs/
 *.bak
 prelude/Seq.future.core.st
 tests/VerusFiles/scratch/
+tests/VerusFiles/repros/

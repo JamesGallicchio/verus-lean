@@ -16,7 +16,7 @@ namespace VerusLean.Boole.Support
 open VerusLean
 open VerusLean.Boole.Coercions
 open VerusLean.Boole.Context (SupportDecl)
-open VerusLean.Boole.Names (tupleTypeName)
+open VerusLean.Boole.Names (tupleTypeName unitTypeName)
 
 def supportDeclName : SupportDecl → String
   | .nat => "nat"
@@ -26,6 +26,7 @@ def supportDeclName : SupportDecl → String
   | .bvToNat w signed => bvToNatCastName w signed
   | .intToBv w signed => intToBvCastName w signed
   | .bvWiden fromW toW signed => bvWidenCastName fromW toW signed
+  | .unit => unitTypeName
   | .tuple => tupleTypeName
   | .seqZipWith => "Seq_lib_zip_with"
   | .arrayFill => "Array_array_fill_for_copy_types"
@@ -47,7 +48,7 @@ def supportDeclSignature? : SupportDecl → Option (List Typ × Typ)
   -- The Seq higher-order / Set builtins use custom builders in `SupportEmit`
   -- (arrow-typed params / multiple type params that the `[input] → output`
   -- shape here can't express), so they return `none`.
-  | .nat | .tuple | .seqZipWith | .arrayFill
+  | .nat | .unit | .tuple | .seqZipWith | .arrayFill
   | .set | .seqNew | .seqLibMap | .seqLibMapValues | .seqLibFilter
   | .seqLibSortBy | .seqLibToSet | .setFinite => none
   | .natToInt => some ([.Nat], .Int)
@@ -80,7 +81,7 @@ def allSupportDecls : List SupportDecl :=
   -- declared.  `.tuple` precedes `.seqZipWith` (return type `Sequence
   -- (Tuple ..)`); `.set` precedes `.seqLibToSet` / `.setFinite` (which
   -- mention `Set ..` in their signatures).
-  [.tuple, .nat] ++ numericSupportDecls ++
+  [.unit, .tuple, .nat] ++ numericSupportDecls ++
     [.seqZipWith, .arrayFill,
      .set, .seqNew, .seqLibMap, .seqLibMapValues, .seqLibFilter,
      .seqLibSortBy, .seqLibToSet, .setFinite]

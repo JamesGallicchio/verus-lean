@@ -21,7 +21,8 @@ open VerusLean.Boole.Builder
 open VerusLean.Boole.Emit
 open VerusLean.Boole.Support
 open VerusLean.Boole.Context (SupportDecl)
-open VerusLean.Boole.Names (tupleTypeName tupleCtorName tupleFstSelector tupleSndSelector)
+open VerusLean.Boole.Names
+  (tupleTypeName tupleCtorName tupleFstSelector tupleSndSelector unitTypeName unitCtorName)
 
 private def ann (v : α) : StrataDDM.Ann α SourceRange := ⟨default, v⟩
 
@@ -48,6 +49,13 @@ private def mkAbstractTypeDecl (name : String) (params : List String) : BuildM B
         BooleDDM.Binding.mkBinding default (ann p) (BooleDDM.TypeP.type default)
       ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
   pure (.command_typedecl default (ann name) args)
+
+private def mkUnitDatatypeDecl : BuildM BCmd := do
+  addFreeVars #[unitTypeName, unitCtorName]
+  let ctor := BooleDDM.Constructor.constructor_mk default (ann unitCtorName) (ann none)
+  let constrList := BooleDDM.ConstructorList.constructorListAtom default ctor
+  let dtDecl := BooleDDM.DatatypeDecl.datatype_decl default (ann unitTypeName) (ann none) constrList
+  pure (.command_datatypes default (ann #[dtDecl]))
 
 /-- Emit the polymorphic 2-ary tuple datatype:
     `datatype Tuple2 (T0 : Type, T1 : Type) { Tuple2_ctor_2(_0 : T0, _1 : T1) };`.
@@ -176,6 +184,9 @@ private def mkSeqHigherOrderDecl (lowerType : TypeLowerer)
 def supportDeclToCommand (lowerType : TypeLowerer) (need : SupportDecl) :
     BuildM (Option BCmd) := do
   match need with
+  | .unit => do
+    let cmd ← mkUnitDatatypeDecl
+    pure (some cmd)
   | .tuple => do
     let cmd ← mkTupleDatatypeDecl
     pure (some cmd)

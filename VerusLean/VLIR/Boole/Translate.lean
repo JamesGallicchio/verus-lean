@@ -117,7 +117,8 @@ private def normalizeCallArgsForCallee (env : VarEnv) (fname : Ident) (args : Li
 partial def typToBooleType (ty : Typ) : BuildM BType :=
   match ty with
   | .Empty | .Unit => do
-    let idx ← resolveFreeVar "Unit"
+    requireSupport .unit
+    let idx ← resolveFreeVar unitTypeName
     pure (fvarTy idx)
   | .Tuple t1 t2 => do
     requireSupport .tuple
@@ -173,6 +174,11 @@ partial def typToBooleType (ty : Typ) : BuildM BType :=
       match params with
       | t :: _ => do pure (seqTy (← typToBooleType t))
       | [] => do pure (seqTy unknownTy)
+    else if datatypeNameOf name == "Set" then
+      requireSupport .set
+      let idx ← resolveFreeVar "Set"
+      let args ← params.toArray.mapM typToBooleType
+      pure (fvarTy idx args)
     else do
       let dtName := datatypeNameOf name
       let idx ← resolveFreeVar dtName
@@ -655,6 +661,57 @@ private def tupleProjChain (size field : Nat) (x : BExpr) : BuildM BExpr := do
     let fstIdx ← resolveFreeVar tupleFstSelector
     return Bld.app (Bld.fvar fstIdx) spine
 
+private partial def typContainsTypeParam : Typ → Bool
+  | .TypParam _ => true
+  | .Tuple a b => typContainsTypeParam a || typContainsTypeParam b
+  | .Array t _ => typContainsTypeParam t
+  | .SpecFn params ret => params.any typContainsTypeParam || typContainsTypeParam ret
+  | .Decorated _ t => typContainsTypeParam t
+  | .Struct _ params | .Enum _ params => params.any typContainsTypeParam
+  | _ => false
+
+/-- Strata's Boole surface does not always propagate datatype selector type
+    arguments through polymorphic tuple selectors in bitvector contexts:
+    `Tuple2.._0(kv) ^ Tuple2.._1(kv)` may leave the operands at unrelated
+    selector type variables even when `kv : Tuple2 bv8 bv8`.  For closed,
+    bitvector-valued projections, synthesize a tiny monomorphic helper with an
+    explicit return type and call that helper instead. -/
+private def synthTupleProjHelper (size field : Nat) (containerTy fieldTy : Typ) :
+    BuildM BExpr := do
+  -- Reuse one helper per `(arity, field, container type)`; the field type is
+  -- determined by the container, so this key is sufficient.
+  let key := (size, field, containerTy)
+  let name ← match (← get).tupleProjHelpers[key]? with
+    | some name => pure name
+    | none => do
+      let id ← freshSynthId
+      let name := s!"Tuple2_proj_{size}_{field}_{id}"
+      addFreeVars #[name]
+      let argName := "tuple_arg"
+      let inputTy ← typToBooleType containerTy
+      let outputTy ← typToBooleType fieldTy
+      let inputBinding :=
+        BooleDDM.Binding.mkBinding default (ann argName)
+          (BooleDDM.TypeP.expr inputTy)
+      let inputBindings := BooleDDM.Bindings.mkBindings default (ann #[inputBinding])
+      let noTypeArgs : StrataDDM.Ann (Option (BooleDDM.TypeArgs SourceRange)) SourceRange :=
+        ann none
+      let noSpec : StrataDDM.Ann (Array (BooleDDM.SpecElt SourceRange)) SourceRange :=
+        ann #[]
+      let body ← withScope do
+        addBoundVars #[argName]
+        tupleProjChain size field (Bld.bvar 0)
+      pushSynthDecl (.command_fndef default (ann name) noTypeArgs inputBindings outputTy
+        noSpec body (ann none))
+      modify (fun ctx =>
+        { ctx with tupleProjHelpers := ctx.tupleProjHelpers.insert key name })
+      pure name
+  let idx ← resolveFreeVar name
+  pure (Bld.fvar idx)
+
+private def tupleProjMayNeedHelper (containerTy fieldTy : Typ) : Bool :=
+  !typContainsTypeParam containerTy && (bitInfoOfTyp fieldTy).isSome
+
 /-- Tuple value from positional element expressions, as right-nested
     constructor applications — `(a, b, c)` is
     `Tuple2_ctor_2(a, Tuple2_ctor_2(b, c))` — mirroring the type lowering.
@@ -821,12 +878,10 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       expToBoole env bound (enumFieldExpectedType? env dt variant field) e)
     return Bld.appN ctor args
   | .TupleCtor size data => do
-    -- The unit value has no nested-pair form; unit-typed returns/assigns are
-    -- dropped before emission (see `isUnitValueExp`), so the opaque reference
-    -- here never reaches an emitted program.
     if size == 0 then
-      let ctorIdx ← resolveFreeVar s!"{tupleTypeName}_ctor_{size}"
-      return Bld.appN (Bld.fvar ctorIdx) []
+      requireSupport .unit
+      let ctorIdx ← resolveFreeVar unitCtorName
+      return Bld.fvar ctorIdx
     let args ← data.mapM (expToBoole env bound none)
     tupleCtorChain args
   | .Binary (.ExtEq deep ty) lhs rhs => do
@@ -1125,8 +1180,20 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       -- the arity).  A tuple has a single constructor, so the test is always true.
       if field == size then
         return boolConst true
-      else
-        tupleProjChain size field x
+      else do
+        match (inferComparableTyp? env bound e).bind (tupleFieldTyp? size field),
+            inferComparableTyp? env bound e with
+        | some fieldTy, some containerTy =>
+          if tupleProjMayNeedHelper containerTy fieldTy then do
+            -- A synthesized helper forces a concrete bitvector type; align it
+            -- with the use site's expected numeric kind.
+            let helper ← synthTupleProjHelper size field containerTy fieldTy
+            coerceNumeric (numKindOfTyp? fieldTy) (expected?.bind numKindOfTyp?)
+              (Bld.app helper x)
+          else
+            tupleProjChain size field x
+        | _, _ =>
+          tupleProjChain size field x
     | _ =>
       match applyUnaryOp op x with
       | some result => return result
@@ -1966,6 +2033,8 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           return [varStmt tmpName ty', callS, setStmt (sanitizeVarName rootName) updatedRoot]
     | _ => do
       let rhs' ← expToBooleFlat env (some lhsTy) rhs
+      if isUnitLikeTyp lhsTy then
+        return []
       match lvalueVarName? lhs with
       | some lhsName =>
         let lhsTy' ← typToBooleType lhsTy
