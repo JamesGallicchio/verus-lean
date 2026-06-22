@@ -1489,7 +1489,13 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
   | ("AssertLean", obj) =>
     let bodyObj ← obj.getObjValM "body"
     let e ← fromJsonSpanned bodyObj Exp.fromJson
-    return .AssertLean e
+    -- `assert(P) by (lean_proof as <name>)` carries the user label in
+    -- `mode: {"Proof": <name>}`.  Preserve it as a named query so the emitted
+    -- Boole obligation keeps the source label (`assert [<name>]: P;`).
+    let label : String :=
+      (Lean.Json.getObjValByPath obj ["mode", "Proof"] |>.bind (·.getStr?)).toOption.getD ""
+    if label.isEmpty then return .AssertLean e
+    else return .AssertQuery (.Other label) (.AssertLean e)
 
   | ("Assume", obj) =>
     let e ← fromJsonSpanned obj Exp.fromJson

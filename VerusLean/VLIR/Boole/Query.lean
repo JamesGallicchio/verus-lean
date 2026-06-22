@@ -69,6 +69,8 @@ def isTrivialTrueAssert : Stm → Bool
 def assertQueryModeLabel : AssertQueryMode → String
   | .NonLinear => "nonlinear_query"
   | .BitVector => "bitvector_query"
-  | .Other _ => "assert_query"
+  -- `.Other` carries a user-supplied name (e.g. `assert(P) by (lean_proof as a1)`);
+  -- keep it as the obligation label, falling back to a generic name when absent.
+  | .Other name => if name.isEmpty then "assert_query" else name
 
 end VerusLean.Boole.Query

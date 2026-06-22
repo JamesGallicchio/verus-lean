@@ -250,7 +250,7 @@ erasure, or name-collision semantics.
 - `vlir-tests:mutual_recursion` (Boole output is a source-close `rec function is_odd ... function is_even ...` block. The `.mutualBlock` Boole-translation arm threads the source `decreases abs(i)` measure; Boole emits `rec function is_odd … decreases abs(i)` and Strata's int-termination checker passes all `is_even_terminates_*` obligations. Translation faithful and termination-clean. The only residual `even_odd_mod2_ensures_*` failures are an *expected Strata encoding limitation*: int-recursive fns are pure UFs with no definitional axiom, so the solver cannot prove the inductive `is_even(i) <==> i%2==0` ensures — not a translator defect)
 - `vlir-tests:nonlinear` (bv operands use native interpreted `as_int`, while nat obligations use the modeled nat API; remaining open obligations are nonlinear solver-hard rather than blocked by opaque coercions)
 - `vlir-tests:proof_fn` (translation faithful: `function p (u : bv64) : bool` and `function min (x : int, y : int) : int` declared with bodies, lemma-style procedures lower to spec-only `procedure ... ensures ... { exit ... }` shape. Verify SKIP — Strata-side dispatch gap, no translator defect)
-- `vlir-tests:quant` (mixed `int`/`nat` quantifier patterns like `∀ x : int, y : nat :: x + y == y + x` produce direct `+` on mismatched types that Strata's typechecker rejects; also affected by `[TRANS-trigger-annotation]` (source `#[trigger]` annotations stripped) and `[TRANS-assert-label]` (source `as a1`/`a2`/`a3` labels dropped))
+- `vlir-tests:quant` (mixed `int`/`nat` quantifier patterns like `∀ x : int, y : nat :: x + y == y + x` produce direct `+` on mismatched types that Strata's typechecker rejects; also affected by `[TRANS-trigger-annotation]` (source `#[trigger]` annotations stripped); the source `as a1`/`a2`/`a3` labels are now preserved)
 - `vlir-tests:recursion` (Boole-side translation faithful. The mutual-block decreases applies here — `rec function M_is_odd … decreases M_abs(i)` is emitted and most `*_terminates_*` obligations pass. Residual `M_is_odd_terminates_1` fails: source uses a *lexicographic* measure (`decreases abs(i), 0int`) to break the same-argument `M_is_odd(i) → M_is_even(i)` edge, but the translator collapses lex-decreases to the head term, leaving that edge with no strict decrease under #1167's per-call-site obligation. Lex-collapse limitation exposed by enforced int-termination; full fix waits on Strata tuple-measure support. Same applies to `verus-examples:guide__recursion`)
 - `vlir-tests:rec_adt_structural` (nat emitted as abstract type via `[MODEL-missing-types]`; waiting for Strata native nat support)
 - `vlir-tests:test_requires` (translation faithful: `[bitvector_query]` and `[nonlinear_query]` proof-mode labels preserved on the `test_success` and `bound_check` assertions. Verify SKIP — Strata-side dispatch for these proof-mode labels is incomplete on this case, mirroring `guide/nonlinear_bitvec`)
@@ -582,23 +582,20 @@ erasure, or name-collision semantics.
   than a source-like future Strata surface form.
 - Affects: `verus-examples:atomics`, `verus-examples:statics`
 
-### `[TRANS-assert-label]` Source `as <name>` assertion labels not preserved
+### `[TRANS-assert-label]` Source `as <name>` assertion labels (RESOLVED)
 - Verus syntax `assert(P) by (lean_proof as a1)` carries an explicit label
-  `a1` that the source uses to name the obligation. Boole has matching surface
-  syntax (`assert [a1]: P;` per `Strata/Languages/Core/DDMTransform/Grammar.lean:251`
-  with the `Label` category at `:239,242`), but the translator currently emits
-  `assert P;` without the label. Semantic content is preserved; the named
-  obligation is lost.
-- The translator *does* emit synthetic labels for some proof-mode contexts:
-  `by (bit_vector)` produces `assert [bitvector_query]: ...`,
-  `by (nonlinear_arith)` produces `assert [nonlinear_query]: ...`, and
-  computation-mode asserts produce `assert [compute]: ...`. So label-emission
-  is wired up; only the user-supplied `as <name>` is dropped.
-- The `by (lean_proof)` proof-tactic specifier itself is not tracked as a
-  separate gap because every Boole obligation is downstream-proven by Lean
-  anyway, so the source choice of prover is irrelevant.
-- Affects: `vlir-tests:test_specfn`, plus any test using `by (lean_proof as ...)`
-  or other user-labeled `assert` syntax.
+  `a1` that names the obligation; Boole has matching surface syntax
+  (`assert [a1]: P;`).
+- **Resolved:** the `AssertLean` parser reads the label from the JSON
+  `mode: {"Proof": <name>}` and preserves it as a named query
+  (`.AssertQuery (.Other <name>) (.AssertLean …)`); `assertQueryModeLabel`
+  returns the `.Other` name, so the emitter produces `assert [a1]: P;`.
+  Verified on `vlir-tests:test_specfn` (source `as a1`/`a2`/`a3` now emit
+  `assert [a1]:` / `[a2]:` / `[a3]:`).
+- This joins the synthetic proof-mode labels the translator already emitted —
+  `by (bit_vector)` → `[bitvector_query]`, `by (nonlinear_arith)` →
+  `[nonlinear_query]`, compute-mode → `[compute]`.
+- Affects: `vlir-tests:test_specfn`, plus any test using `by (lean_proof as ...)`.
 
 ### `[TRANS-trigger-annotation]` `#[trigger]` annotations on quantifier sub-expressions stripped
 - Verus quantifiers can carry `#[trigger]` (or `#![auto]`) annotations that hint
@@ -607,10 +604,15 @@ erasure, or name-collision semantics.
   `(!(a & b))` as the trigger.
 - The translator currently strips these annotations: the same source quantifier
   becomes `∀ a : bv32, b : bv32 :: ~(a & b) == ~a | ~b;` with no trigger marker.
-- Boole's grammar has trigger infrastructure (`Triggers.empty`,
-  `Triggers.addGroup`, `TriggerGroup.empty`, `TriggerGroup.addTrigger` —
-  registered Core operators), so explicit trigger preservation is supported in
-  principle.
+- Boole's grammar has a trigger-carrying quantifier (`forall_unicodeT` /
+  `exists_unicodeT`), so the construct exists. **But this is not a
+  translation-only fix:** StrataBoole's Boole→Core lowering discards the
+  triggers (`Verify.lean`'s `forall_unicodeT _ ds _ body` / `exists_unicodeT _
+  ds _ body` ignore the trigger slot), so even an emitted trigger would not
+  reach the Core quantifier. Preserving triggers end-to-end needs both a
+  translator change (emit `forall_unicodeT` with the VLIR `Quant` groups)
+  **and** a Strata-Boole change (thread them through `toCoreExpr`) — a Strata
+  PR, not verus-boogie alone.
 - Logical content of the assertion is preserved; only the SMT instantiation
   hint is lost. May affect verification performance or completeness for
   trigger-sensitive proofs.
