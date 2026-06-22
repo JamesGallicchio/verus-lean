@@ -93,19 +93,31 @@ private def bvTypeWidth? : BType → Option Nat
   | .bv16 _ => some 16
   | .bv32 _ => some 32
   | .bv64 _ => some 64
+  | .bv128 _ => some 128
   | _ => none
 
-/-- Width of a `BExpr` that carries a bv type syntactically (typed bv ops +
-    bv literals). Defense-in-depth: lets `coerceBvBv` / `coerceNumeric`
-    short-circuit if the caller's `srcInfo?` hint ever drifts from the
-    translated BExpr's actual width. Returns `none` on `.app` / `.fvar` /
-    `.bvar` — caller falls back to the hint. -/
+/-- Width of a `BExpr` that carries a bv type syntactically (typed bv ops,
+    bv literals, and native `as_bv<w>` casts). Defense-in-depth: lets
+    `coerceBvBv` / `coerceNumeric` short-circuit if the caller's `srcInfo?`
+    hint ever drifts from the translated BExpr's actual width.  Reading the
+    width off an `as_bv<w>` node in particular elides a redundant re-narrowing
+    when an operand is already a cast of the target width (e.g. a `bv128`
+    narrowed `as u64` is `(x as_int) as_bv64` — already `bv64`, not to be
+    re-narrowed). Returns `none` on `.app` / `.fvar` / `.bvar` — caller falls
+    back to the hint. -/
 private def bexprBvWidth? : BExpr → Option Nat
   | .bv1Lit ..  => some 1
   | .bv8Lit ..  => some 8
   | .bv16Lit .. => some 16
   | .bv32Lit .. => some 32
   | .bv64Lit .. => some 64
+  | .bv128Lit .. => some 128
+  | .as_bv1 ..   => some 1
+  | .as_bv8 ..   => some 8
+  | .as_bv16 ..  => some 16
+  | .as_bv32 ..  => some 32
+  | .as_bv64 ..  => some 64
+  | .as_bv128 .. => some 128
   | .add_expr _ ty _ _ | .sub_expr _ ty _ _ | .mul_expr _ ty _ _
   | .div_expr _ ty _ _ | .mod_expr _ ty _ _
   | .bvsdiv _ ty _ _ | .bvsmod _ ty _ _

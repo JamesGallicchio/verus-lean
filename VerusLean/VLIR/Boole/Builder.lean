@@ -41,7 +41,8 @@ def bvTy (w : Nat) : BType :=
   | 16 => .bv16 default
   | 32 => .bv32 default
   | 64 => .bv64 default
-  | _  => panic! s!"bvTy: unsupported bitvector width {w} (expected 1|8|16|32|64); \
+  | 128 => .bv128 default
+  | _  => panic! s!"bvTy: unsupported bitvector width {w} (expected 1|8|16|32|64|128); \
     callers must filter via Coercions.isSupportedBvWidth"
 
 def mapTy (key val : BType) : BType := .Map default key val
@@ -59,27 +60,27 @@ def unknownTy : BType := tvarTy "$__unknown_type"
 def fvar (idx : Nat) : BExpr := .fvar default idx
 def bvar (idx : Nat) : BExpr := .bvar default idx
 
-/-- Strata's native `(e as_int)` cast — unsigned bv→int.  Lowers to
+/-- Strata's native `as_uint(e)` cast — unsigned bv→int.  Lowers to
     `Bv<W>.ToUInt` at Core, which cvc5 understands as nonneg-by-construction
     via the SMT-LIB `bv2nat` family. -/
 def castToInt (sourceTy : BType) (e : BExpr) : BExpr :=
-  .cast_to_int default sourceTy e
+  .as_uint default sourceTy e
 
-/-- Strata's native `(e as_sint)` cast — signed bv→int. -/
+/-- Strata's native `as_sint(e)` cast — signed bv→int. -/
 def castToSInt (sourceTy : BType) (e : BExpr) : BExpr :=
-  .cast_to_sint default sourceTy e
+  .as_sint default sourceTy e
 
-/-- Narrowing int→bv cast `e as_bv<w>` (Core `Int.ToBv<w>` → SMT `int_to_bv`).
+/-- Narrowing int→bv cast `as_bv<w>(e)` (Core `Int.ToBv<w>` → SMT `int_to_bv`).
     Per-width tokens (1/8/16/32/64/128); `none` for any other width so callers
     fall back to the uninterpreted support-decl cast. -/
 def castToBv (w : Nat) (e : BExpr) : Option BExpr :=
   match w with
-  | 1   => some (.cast_to_bv1   default e)
-  | 8   => some (.cast_to_bv8   default e)
-  | 16  => some (.cast_to_bv16  default e)
-  | 32  => some (.cast_to_bv32  default e)
-  | 64  => some (.cast_to_bv64  default e)
-  | 128 => some (.cast_to_bv128 default e)
+  | 1   => some (.as_bv1   default e)
+  | 8   => some (.as_bv8   default e)
+  | 16  => some (.as_bv16  default e)
+  | 32  => some (.as_bv32  default e)
+  | 64  => some (.as_bv64  default e)
+  | 128 => some (.as_bv128 default e)
   | _   => none
 
 def boolConst (b : Bool) : BExpr :=
@@ -98,7 +99,8 @@ def bitvecConstNat (w : Nat) (n : Nat) : BExpr :=
   | 16 => .bv16Lit default ⟨default, n⟩
   | 32 => .bv32Lit default ⟨default, n⟩
   | 64 => .bv64Lit default ⟨default, n⟩
-  | _  => panic! s!"bitvecConstNat: unsupported bitvector width {w} (expected 1|8|16|32|64)"
+  | 128 => .bv128Lit default ⟨default, n⟩
+  | _  => panic! s!"bitvecConstNat: unsupported bitvector width {w} (expected 1|8|16|32|64|128)"
 
 def bitvecConst (w : Nat) (bv : BitVec w) : BExpr :=
   bitvecConstNat w bv.toNat

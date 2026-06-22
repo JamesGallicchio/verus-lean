@@ -605,14 +605,6 @@ def numBinopEmit (domain : NumDomain) (op : BinaryOp) (l r : BExpr) :
         pure (applyBvBitOp opW opName l r)
     | _ => pure (applyBinaryOp op l r)
 
-/-- Extract a constant non-negative shift amount, peeling Box/Unbox/Clip
-    wrappers.  Used by rule ④ to lower an int-modeled `x >> k` / `x << k` to
-    int `x / 2^k` / `x * 2^k`. -/
-private partial def constShiftAmount? : Exp → Option Nat
-  | .Const (.Int k) _ => if k ≥ 0 then some k.toNat else none
-  | .Unary (.Box _) e | .Unary (.Unbox _) e | .Unary (.Clip _ _) e =>
-    constShiftAmount? e
-  | _ => none
 
 /-- Rule ③'s narrowing gate: a cast to a fixed-width integer type whose
     translation runs in the int domain keeps its wrap-around semantics unless
@@ -641,16 +633,6 @@ private def clipWrapIntModeled (env : VarEnv) (bound : BoundEnv)
     else
       Bld.intMod inner full
 
-/-- For rule ④'s gate only: is the shift's value operand modeled in `int`?  An
-    arithmetic or bitwise binary inherits its left operand's domain, and a
-    literal carries its annotated type.  Kept separate from `inferComparableTyp?`
-    (which also drives the coercion path) so widening shift detection here does
-    not perturb coercion. -/
-private partial def shiftValueIntModeled? (env : VarEnv) (bound : BoundEnv) : Exp → Bool
-  | .Binary (.Arith _ _) l _   => shiftValueIntModeled? env bound l
-  | .Binary (.Bitwise _ _) l _ => shiftValueIntModeled? env bound l
-  | .Const _ ty                => numKindOfTyp? ty == some .int
-  | e                          => (inferComparableTyp? env bound e).bind numKindOfTyp? == some .int
 
 /-- Positional projection from a tuple value.  Tuple types lower to
     right-nested binary pairs — `(A, B, C)` is `Tuple2 A (Tuple2 B C)`,
@@ -785,23 +767,6 @@ partial def prepScalarOperands (env : VarEnv) (bound : BoundEnv)
   let r ← expToBoole env bound (some ty) rhs
   pure (l, r)
 
-/-- Rule ④'s variable-amount form: an int-modeled `x >> e` / `x << e` whose
-    amount `e` is not a compile-time constant lowers through the prelude's
-    `int_pow2` (`prelude/Nat.boole.st`) — `x div int_pow2(e)` /
-    `x * int_pow2(e)`.  Operands are prepared at `Int` exactly like the
-    int-context binary path, and the result coerces to the caller's expected
-    kind.  Sound on the same grounds as the constant form: shift amounts are
-    non-negative at the source, and the int model carries no width
-    truncation. -/
-private partial def intShiftViaPow2 (env : VarEnv) (bound : BoundEnv)
-    (expected? : Option Typ) (arithOp : ArithOp) (mode : Mode) (lhs rhs : Exp) :
-    BuildM BExpr := do
-  let (l, r) ← prepScalarOperands env bound Typ.Int lhs rhs
-  let powIdx ← resolveFreeVar "int_pow2"
-  let powR := Bld.app (Bld.fvar powIdx) r
-  match ← numBinopEmit .int (.Arith arithOp mode) l powR with
-  | some result => coerceNumeric (some .int) (expected?.bind numKindOfTyp?) result
-  | none => throw s!"internal error: int lowering missing for {repr arithOp}"
 
 /-- Translate a VLIR expression to a BooleDDM expression. -/
 partial def expToBoole (env : VarEnv) (bound : BoundEnv)
@@ -901,29 +866,6 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     | some result => return result
     | none => throw s!"unsupported comparison: {repr cmp} in domain {repr domain}"
   | .Binary op lhs rhs => do
-    -- Rule ④: an int-modeled bit-shift (e.g. on a `u128` accumulator) has no
-    -- bitvector form, so lower it to int arithmetic.  A constant amount `k`
-    -- lowers to a `2^k` literal — `x >> k → x / 2^k`, `x << k → x * 2^k` —
-    -- by rewriting to the synthetic arith op and taking the int path below.
-    -- A non-constant amount `e` (e.g. vstd's `lemma_u128_shr_is_div`, where
-    -- the amount is a parameter) lowers through the prelude's `int_pow2` —
-    -- `x >> e → x div int_pow2(e)`, `x << e → x * int_pow2(e)`.  Sound for
-    -- the non-negative, in-range values such operands hold.  Gated on the
-    -- VALUE operand being int-modeled, so ordinary bitvector shifts are
-    -- unaffected.
-    if shiftValueIntModeled? env bound lhs then
-      match op, constShiftAmount? rhs with
-      | .Bitwise (.Shr _) mode, some k =>
-        return ← expToBoole env bound expected?
-          (.Binary (.Arith .EuclideanDiv mode) lhs (.Const (.Int ((2 : Int) ^ k)) Typ.Int))
-      | .Bitwise (.Shl _ _) mode, some k =>
-        return ← expToBoole env bound expected?
-          (.Binary (.Arith .Mul mode) lhs (.Const (.Int ((2 : Int) ^ k)) Typ.Int))
-      | .Bitwise (.Shr _) mode, none =>
-        return ← intShiftViaPow2 env bound expected? .EuclideanDiv mode lhs rhs
-      | .Bitwise (.Shl _ _) mode, none =>
-        return ← intShiftViaPow2 env bound expected? .Mul mode lhs rhs
-      | _, _ => pure ()
     -- Run arith in `int` when the context demands int or any subtree
     -- mixes int and bv operands. Otherwise bv overflow corrupts the
     -- post-hoc `bv*_to_int_u` wrap (`n == 2^64 - 1` ↦ `bv64_to_int_u(n
@@ -3287,6 +3229,7 @@ def cmdDeclName? : BCmd → Option String
     | _ => none
   | .boole_procedure _ name _ _ _ _ _ _ => some name.val
   | .command_procedure _ name _ _ _ _ => some name.val
+  | .command_cfg_procedure _ name _ _ _ _ => some name.val
   | .command_axiom _ _ _ => none
   | .command_var _ bind => some (match bind with | .bind_mk _ name _ _ => name.val)
   | .command_distinct _ _ _ => none

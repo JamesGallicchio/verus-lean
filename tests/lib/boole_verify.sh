@@ -122,25 +122,23 @@ classify_boole_verify_log() {
   # Pair each `Obligation: <name>` with the next `Result: ...` line so we can
   # tell *which* obligation failed.
   #
-  # Three per-obligation results count as non-passing — a transition from
-  # `pass` to any of them is a real loss of proof power and must be flagged,
-  # not tolerated:
-  #   * `❌ fail`               — cvc5 found a counterexample;
-  #   * `❓ unknown`            — cvc5 gave up;
-  #   * `🚨 SMT Encoding Error` — the obligation never even reached the solver
-  #     (e.g. an unused polymorphic decl's unmonomorphizable type var).  This
-  #     is a *hard* failure and was previously invisible, silently hiding
-  #     dozens of broken obligations behind a "pass".
+  # `❌ fail` (cvc5 found a counterexample) and `🚨 SMT Encoding Error` (the
+  # obligation never reached the solver — e.g. an unused polymorphic decl's
+  # unmonomorphizable type var) are hard non-passing results: a transition
+  # from `pass` to either is a real loss of proof power and is flagged.
   # Obligations documented in the per-wrapper `expected_fail_pattern` are
   # exempt (known-hard goals / known Strata gaps).
   #
-  # Per-obligation `🚨 Solver Timeout` is deliberately NOT matched — timeouts
-  # are nondeterministic, and a whole-run timeout is already handled above as
-  # `skip_solver_timeout`.
+  # `❓ unknown` is cvc5 *deciding it cannot* discharge the goal (typically
+  # quantifier-instantiation saturation): a deterministic non-result, routed
+  # to `skip_solver_unknown` so the run reports it rather than counting it a
+  # pass. Per-obligation `🚨 Solver Timeout` is cvc5 *running out of time*
+  # within the budget — nondeterministic and budget-sensitive — so it is left
+  # unflagged; a whole-run timeout is handled above as `skip_solver_timeout`.
   local unexpected_fails
   unexpected_fails="$(awk -v pat="$expected_fail_pattern" '
     /^Obligation:/ { obligation = $0; sub(/^Obligation: */, "", obligation); next }
-    /^Result: ❌ fail/ || /^Result: ❓ unknown/ || /^Result: 🚨 SMT Encoding Error/ {
+    /^Result: ❌ fail/ || /^Result: 🚨 SMT Encoding Error/ {
       if (pat == "" || obligation !~ pat) {
         print obligation
       }

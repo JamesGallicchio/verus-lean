@@ -17,7 +17,10 @@ open VerusLean
 
 def usizeBitWidth : Nat := 64
 
-def supportedBvWidths : List Nat := [1, 8, 16, 32, 64]
+-- Bitvector widths the Boole backend models natively.  Covers every
+-- fixed-width Rust integer type (`u8`..`u128`/`i8`..`i128`); `usize`/`isize`
+-- map to `usizeBitWidth`.  `u128`/`i128` are full `bv128` with native bv ops.
+def supportedBvWidths : List Nat := [1, 8, 16, 32, 64, 128]
 
 def isSupportedBvWidth (w : Nat) : Bool :=
   supportedBvWidths.contains w
@@ -36,10 +39,10 @@ def bitInfoOfTyp : Typ → Option (Nat × Bool)
   | .Decorated _ ty => bitInfoOfTyp ty
   | _ => none
 
-/-- Width and signedness of any fixed-width integer type, including widths
-    the backend does not model as bitvectors (`u128`/`i128`).  Contrast
-    `bitInfoOfTyp`, which answers "what bitvector width, if any" and stays
-    `none` for unsupported widths. -/
+/-- Width and signedness of any fixed-width integer type, unconditionally — it
+    does not gate on `isSupportedBvWidth`.  Contrast `bitInfoOfTyp`, which
+    answers "what bitvector width, if any" and stays `none` for a width outside
+    `supportedBvWidths`. -/
 def fixedWidthInfoOfTyp : Typ → Option (Nat × Bool)
   | .UInt w => some (w, false)
   | .SInt w => some (w, true)
@@ -79,14 +82,13 @@ inductive NumKind where
   deriving DecidableEq, Repr
 
 /-- The modeled numeric *domain* of a type — the single source of truth for
-    coercion decisions.  Every integer type has a domain: widths the Boole
-    backend represents as bitvectors (`supportedBvWidths`) are `.bv`; any wider
-    integer (`u128`/`i128`) has no bitvector model and is modeled as mathematical
-    `int`.  (Contrast `bitInfoOfTyp`, which answers the *different* question
-    "what bitvector width, if any" and stays `none` for `u128` — it is not a bv.)
-    Soundness: modeling `u128`/`i128` as `int` drops wrap-around semantics; it is
-    faithful only when the value provably never wraps, which Verus discharges as
-    a side condition (e.g. the field-mul boundary lemmas). -/
+    coercion decisions.  Every fixed-width integer type (`supportedBvWidths`,
+    which includes `u128`/`i128`) is a `.bv`; `int`/`nat` are the mathematical
+    domains.  Exec-mode wrapping arithmetic lowers in the bv domain at the type's
+    native width.  Spec-mode `+ - * /` is recorded with an `int`/`nat` result
+    type in VLIR and stays mathematical (the `parentIntNatClip` rule in
+    `Parser`), so a u128-typed spec value reaches its `as u128` cast as a
+    faithful unbounded `int`, then casts exactly to `bv128`. -/
 def numKindOfTyp? : Typ → Option NumKind
   | .Int => some .int
   | .Nat => some .nat
