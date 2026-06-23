@@ -6,7 +6,7 @@
    "name": "StrataBoole",
    "manifestFile": "lake-manifest.json",
    "inherited": false,
-   "dir": "../Strata/StrataBoole",
+   "dir": "../Strata-Boole",
    "configFile": "lakefile.toml"},
   {"type": "path",
    "scope": "",
@@ -30,7 +30,7 @@
    "name": "StrataDDM",
    "manifestFile": "lake-manifest.json",
    "inherited": true,
-   "dir": "../Strata/StrataBoole/../StrataDDM",
+   "dir": "../Strata-Boole/../Strata/StrataDDM",
    "configFile": "lakefile.toml"}],
  "name": "«verus-lean»",
  "lakeDir": ".lake"}
