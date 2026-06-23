@@ -882,7 +882,14 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       requireSupport .unit
       let ctorIdx ← resolveFreeVar unitCtorName
       return Bld.fvar ctorIdx
-    let args ← data.mapM (expToBoole env bound none)
+    -- Decompose a known tuple `expected?` into per-element types so a widened
+    -- element (an erased `as int` over a bare projection/variable that carries
+    -- no `Box{Int}`) is coerced to the slot type, instead of leaving a `bv`
+    -- value in an `int`/`nat` tuple field.  Mirrors the `StructCtor` /
+    -- `ArrayLiteral` element-type propagation; a non-tuple or generic
+    -- `expected?` yields `none` per element (the conservative default).
+    let args ← data.zipIdx.mapM (fun (e, i) =>
+      expToBoole env bound (expected?.bind (tupleFieldTyp? size i)) e)
     tupleCtorChain args
   | .Binary (.ExtEq deep ty) lhs rhs => do
     extEqExpToBoole env bound deep ty lhs rhs
@@ -1170,7 +1177,13 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         throw s!"unsupported checked field projection: {dt}::{variant}.{field}"
       let projField := projFieldNameOf dt variant field
       let projIdx ← resolveFreeVar (datatypeDestructorNameOf dt projField)
-      return Bld.app (Bld.fvar projIdx) x
+      let projected := Bld.app (Bld.fvar projIdx) x
+      -- The destructor yields the field at its source type; when the use site
+      -- expects a wider numeric kind (an erased `as int`/widening cast pushed
+      -- down here), insert a result-side coercion, mirroring the tuple
+      -- projection path below.
+      coerceNumeric ((enumFieldExpectedType? env dt variant field).bind numKindOfTyp?)
+        (expected?.bind numKindOfTyp?) projected
     | .IsVariant dt variant => do
       let testerIdx ← resolveFreeVar (enumTesterNameOf dt variant)
       return Bld.app (Bld.fvar testerIdx) x
@@ -1190,8 +1203,18 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
             let helper ← synthTupleProjHelper size field containerTy fieldTy
             coerceNumeric (numKindOfTyp? fieldTy) (expected?.bind numKindOfTyp?)
               (Bld.app helper x)
-          else
-            tupleProjChain size field x
+          else do
+            let projected ← tupleProjChain size field x
+            -- Only int/nat fields are safe to coerce here.  A bv field that
+            -- reaches this branch sits in a container carrying a type parameter
+            -- (closed bv containers take the monomorphic-helper branch above),
+            -- so its positional selector is typed at a type variable and a width
+            -- cast on it would be ill-typed.  An int/nat field's selector type is
+            -- concrete, so widening it to the expected kind is sound.
+            match numKindOfTyp? fieldTy with
+            | some .int | some .nat =>
+              coerceNumeric (numKindOfTyp? fieldTy) (expected?.bind numKindOfTyp?) projected
+            | _ => pure projected
         | _, _ =>
           tupleProjChain size field x
     | _ =>
@@ -1528,7 +1551,15 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       mkFallback
   | .CallLambda body args => do
     let fnExpr ← expToBoole env bound none body
-    let args' ← args.mapM (expToBoole env bound none)
+    -- Recover the applied function's parameter types and push each onto the
+    -- corresponding argument, so a widened argument (an erased `as int`/`as nat`
+    -- over a bv value) coerces to the parameter type instead of reaching the
+    -- lambda at the wrong numeric width.  Mirrors the parameter-typed argument
+    -- lowering on the named-`Call` path; an argument past the recovered arity
+    -- (or an unrecoverable function type) gets `none`, preserving plain lowering.
+    let paramTys := ((inferComparableTyp? env bound body).bind specFnParamTyps?).getD []
+    let args' ← args.zipIdx.mapM (fun (a, i) =>
+      expToBoole env bound paramTys[i]? a)
     return Bld.appN fnExpr args'
   | .Bind bind body =>
     match bind with

@@ -65,6 +65,32 @@ Solver success is **not** used to classify faithfulness.
   mismatch in bitvector XOR. `./tests/run_tests.sh --verify --verbose
   tests/VerusFiles/crypto_noref.rs` now classifies as a Strata gap on
   unsupported polymorphic `Sequence.empty<T>()`, not a translator bug.
+- **unit-test demonstration suite for `FEATURE_SUPPORT_MATRIX.md`** (2026-06-22):
+  added `tests/VerusFiles/unit_tests/*.rs` — one minimal, clearly-marked example
+  (header: "UNIT TEST … NOT adopted from the Verus repo") per all-green matrix
+  row. **26 verify end-to-end** (Verus `0 errors` + every Strata obligation ✅)
+  and are listed in `working_tests.txt`. Three rows the matrix marks all-green
+  do **not** verify in the minimal case and are recorded in
+  `waiting_for_strata.txt`:
+  - A5 "Structural recursion (over datatypes)" / B5 "decreases — function
+    (structural `@[cases]`)" — `unit_tests/structural_recursion.rs` hits the
+    `[CORE-decreases]` recursive-spec-fn `@[cases]` gap ("structural recursion
+    requires @[cases]").
+  - A5 "Mutual recursion (over datatypes)" (#599) —
+    `unit_tests/mutual_recursion_datatypes.rs` hits a mutually-recursive-datatype
+    forward reference ("Undeclared type or category forest") plus the `@[cases]`
+    gap.
+  - A1 "Bitwise ops on bvN" `>>s` — `unit_tests/bitwise_ops.rs`: the six unsigned ops
+    verify, but signed/arithmetic right shift lowers to `Bv32.SShr` (undeclared
+    in Strata Core) / malformed Boole on negative literals.
+  Authoring notes (solver-budget, not translation defects): symbolic bv→int
+  arithmetic bridges (`r == x + y`, `decreases i` on a bv var, full-range
+  overflow guards) time out at cvc5's default budget, so the green examples use
+  concrete or tightly-bounded operands; array `.len()` times out via the
+  uninterpreted `Array_spec_array_as_slice` wrapper (concrete-index access is
+  fine); loop-indexing stays in the `for`-over-local-array form (sha256's green
+  shape); and concrete bitwise asserts use `by (lean)` because Verus's default
+  solver treats integer bitwise ops as opaque while Strata/cvc5 discharges them.
 - Full run (`./tests/regress_examples.sh --all-suites`):
   - solver: `cvc5`
 ## Automated Boole Regression Summary
@@ -217,8 +243,8 @@ erasure, or name-collision semantics.
 - `verus-examples:guide/opaque` (faithful empty Boole export: source `pub open spec fn` opaque-with-`reveal_with_fuel` declarations have no exec procedures to verify. In `tests/ignored_tests.txt` as `EMPTY-EXPORT`. Even after appending `fn main(){}` to the source, Verus reports `0 verified, 0 errors` and emits no JSON because there are no Verus-mode declarations to serialize — consistent with the "nothing for Strata to discharge" classification)
 - `verus-examples:guide/overflow` (`[MODEL-missing-types]`: `Arithmetic_overflow` not modelled in Strata; `Num_checked_add` lowers to a procedure with `assume false;` body per the external-body convention. Classified `skip_gap` in elaboration because native `as_int` is applied to an unmonomorphized type variable `V`; this is the same Strata generic-monomorphization gap as `verus-examples:generics`)
 - `verus-examples:guide/references` (the loop decrease and overflow guards use native interpreted `as_int`; immutable/mutable references erase to plain values, which is verification-equivalent)
-- `verus-examples:guide/requires_ensures_edit` (source `i8` with signed comparisons `-16 <= x1 < 16` lowers to `<=s`/`<s` (`bvsle`/`bvslt`) Boole AST — blocked by Strata Verify lacking dispatch arms for these signed-bv-comparison constructors; tracked in the strata-bv-lowering issue draft)
-- `verus-examples:guide/requires_ensures` (same signed-bv-comparison gap as `requires_ensures_edit`; `print_two_digit_number` is `external_body` and follows the `assume false;` convention)
+- `verus-examples:guide/requires_ensures_edit` (source `i8` signed comparisons `-16 <= x1 < 16` lower to `<=s`/`<s` and now **verify end-to-end: 12/12 ✅ (2026-06-22)** — the earlier signed-bv-comparison lowering gap is resolved; Strata Core handles the signed-bv comparison ops)
+- `verus-examples:guide/requires_ensures` (the signed-bv-comparison gap is resolved, see `requires_ensures_edit`; `print_two_digit_number` is `external_body` and follows the `assume false;` convention)
 - `verus-examples:guide/strings` (translation is source-close; the current difference is the missing `String_string` / string-library model support in Strata. The local `fn main(){}` source edit (uncommitted, in `verus/examples/guide/strings.rs`) unblocks Verus export — Stage 1 reports `5 verified, 0 errors` — and Stage 3 surfaces the documented `Expression has type String_string when string expected` failure)
 - `verus-examples:impl_basic` (structs, methods, generics, ensures clauses preserved)
 - `verus-examples:nevd_script` (`nat`-typed recursive functions, measures, and call boundaries lower through the modeled `nat.toInt` / `nat.fromInt` / `nat.*` API; scalar crossings use native `as_int`)
@@ -240,7 +266,7 @@ erasure, or name-collision semantics.
 - `vlir-tests:demo` (verify SKIP (Sequence): Boole output is source-close and elaborates cleanly; blocked by Strata's Sequence frontend/indexing support)
 - `vlir-tests:FindMax` (`Vec<i32>` find-max via `Sequence bv32`; loop-index uses lower through `[TRANS-loop-counter-int]`; value comparisons remain signed bv32 comparisons such as `>=s`)
 - `vlir-tests:integer_ring` (Strata type error on intentionally-failing `type_fail`; cvc5 also times out on `wide_mul` ensures — non-linear bv64 multiplication beyond solver default budget)
-- `vlir-tests:LoopSimple` (`i32` summation loop; decreases and invariant arithmetic use native interpreted `as_sint`; signed comparisons `<s`/`<=s` still use `bvslt`/`bvsle` Boole AST nodes that lack dispatch arms in Strata Verify, so it remains an intentional verify-mismatch baseline)
+- `vlir-tests:LoopSimple` (`i32` summation loop; decreases and invariant arithmetic use native interpreted `as_sint`; signed comparisons `<s`/`<=s` lower to Strata Core signed-bv ops and **verify: 9/13 ✅ (2026-06-22)**; the residual 4 failures are nonlinear-arith cvc5 timeouts (`measure_decrease_0`), not a lowering gap)
 - `vlir-tests:LoopSimpleWithSpec` (source-close nat recursive specification, loop invariant/decreases, overflow assertions, and proof procedure; Strata still times out on hard obligations, so its outcome differs from Verus)
 - `vlir-tests:b1_boundary_proved` (source-close Dalek boundary variant, including its trusted source assumptions; Strata leaves obligations open while Verus passes)
 - `vlir-tests:b1_full` (emission is source-close, but the generated Lean/Strata program currently hits a stack overflow before verification completes)
@@ -442,16 +468,51 @@ erasure, or name-collision semantics.
 - `Fuel` statements parsed into `Stm.Reveal` and lowered to `assume` equations
   for non-generic spec functions. Generic `Fuel` dropped.
 
-### `[TRANS-widening-casts]` Widening casts partially inserted
+### `[TRANS-widening-casts]` Widening casts inserted at call, variable, and composite sites
 - Verus erases widening casts (`nat as int`, `u16 as int`) at SST level.
 - Type-directed coercion insertion adds interpreted bv→nat/int conversions
   at function/procedure call sites.
 - Type-directed coercion insertion also preserves source-typed quantifier
   binders and inserts native `as_bv64` casts at plain variable use sites when the
   current `usize`/indexing context expects `bv64`.
-- **Remaining gaps**: richer non-call contexts beyond plain variables
-  (for example larger arithmetic expressions, projections, and other composite
-  terms that still need result-side coercion insertion).
+- Composite result sites coerce too: struct/enum field projections and tuple
+  projections compare the field's numeric kind against the expected kind and
+  insert a result-side cast when they differ (e.g. `p.a as int` on `p.a : u16`
+  emits `as_uint(pair..a(p))`). Arithmetic built from such projections then
+  widens through the operand path, so `p.a as int + p.b as int` stays in `int`
+  with no `bv16` wrap. The bv→int step is idempotent (`bexprIsKnownInt`
+  recognizes native `as_uint`/`as_sint`), so an operand a caller already widened
+  is not double-cast. Closed bitvector tuple fields go through the monomorphic
+  `Tuple2_proj_*` helper (see the tuple-selector note in the projection commit).
+- Tuple literals decompose a known tuple `expected?` into per-element types and
+  push each onto the corresponding element, so a widened element with no
+  `Box{Int}` wrapper (a bare projection/variable) is coerced to the slot type:
+  `(p.a as u32, p.b as u32)` emits `Tuple2_ctor_2(as_bv32(as_uint(pair..a(p))),
+  …)` typed `Tuple2 bv32 bv32`, instead of leaving `bv16` values in `bv32`
+  fields. Mirrors the `StructCtor` / `ArrayLiteral` element-type propagation.
+- Lambda applications (`CallLambda`) recover the applied function's parameter
+  types from its `SpecFn` type and push each onto the corresponding argument, so
+  a widened argument coerces to the parameter type: `f(a as int)` with
+  `f : spec_fn(int) -> int` and `a : u16` emits `f(as_uint(a))` instead of
+  passing a `bv16` to an `int` parameter. The result side already coerces through
+  the surrounding `Box`/`Unbox` cast wrapper.
+- Exercised by `verus-examples:guide/integers`, `verus-examples:quantifiers`,
+  `verus-examples:statements`; minimal repro at
+  `tests/VerusFiles/repros/widening_composite.rs`.
+- **Remaining gaps**:
+  - A concrete bitvector field inside a type-parameterized tuple keeps a
+    type-variable selector (it escapes the monomorphic helper), so a width cast
+    on it is deferred rather than emitted — tracked with the generic
+    type-variable casts under `[VERIFY-generic-typevar-ddm]`. Likewise, an
+    `int`/`nat` tuple field's polymorphic selector is not yet monomorphized, so
+    *consuming* such a field (e.g. `(x as int, …).0`) hits the same Strata
+    selector-typing limit even though the tuple's *construction* is well-typed.
+  - Cast insertion across a spec-level lambda application is complete (arguments
+    coerce to the parameter type, results through the cast wrapper), so the
+    emitted Boole type-checks; what remains is downstream — *proving* properties
+    through the application is limited by Strata's lambda encoding
+    (`[VERIFY-lambda-encoding]`), as an obligation that depends on beta-reducing
+    the applied lambda still fails.
 
 ### `[TRANS-coercion-uninterpreted]` Legacy uninterpreted coercions (RESOLVED)
 - Resolved: bv↔int and bv-width casts use Strata's interpreted `as_int`,

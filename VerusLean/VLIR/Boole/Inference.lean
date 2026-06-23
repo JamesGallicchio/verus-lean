@@ -155,6 +155,14 @@ def setElemTyp? : Typ → Option Typ
   | .Decorated _ ty => setElemTyp? ty
   | _ => none
 
+/-- Parameter types of a (possibly decorated) spec-fn / closure type.  Used to
+    thread a lambda application's parameter types onto its arguments, so a
+    widened argument coerces to the parameter type. -/
+def specFnParamTyps? : Typ → Option (List Typ)
+  | .SpecFn params _ => some params
+  | .Decorated _ ty => specFnParamTyps? ty
+  | _ => none
+
 /-- Boole exposes dedicated typed empty-sequence constants for the concrete
     element types (`Sequence.empty_bv32`, `Sequence.empty_int`, etc.); see
     `seq_empty_*` in `StrataBoole/Grammar.lean`.  Return that token when the

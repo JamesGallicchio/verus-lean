@@ -93,6 +93,11 @@ lean_wrapper_for_target() {
   if [[ "$target" == "$ROOT_DIR/tests/VerusFiles/"* ]]; then
     rel="${target#$ROOT_DIR/tests/VerusFiles/}"
     rel="${rel%.rs}"
+    # Mirror run_tests.sh::case_key_from_rs_path: subdirectory separators are
+    # flattened to `__` (e.g. `unit_tests/bool` -> `unit_tests__bool`), so a
+    # VerusFiles file in a subdirectory resolves to the wrapper the generator
+    # actually writes.
+    rel="${rel//\//__}"
     echo "$BOOLE_PROGRAMS_DIR/vlir-tests/${rel}.lean"
   elif [[ "$target" == "$ROOT_DIR/tests/adopted_rust_verify_test/"* ]]; then
     rel="${target#$ROOT_DIR/tests/adopted_rust_verify_test/}"

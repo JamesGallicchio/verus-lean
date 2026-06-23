@@ -132,11 +132,17 @@ private def bexprBvWidth? : BExpr → Option Nat
 
     This only returns true when the emitted BooleDDM node carries an explicit
     `.int` type tag. Unknown shapes such as `.app`, `.fvar`, and `.bvar`
-    return false, so callers default to applying the requested cast. -/
+    return false, so callers default to applying the requested cast.
+
+    The native bv→int casts (`as_uint`/`as_sint`) are int-typed by construction,
+    so recognizing them keeps `coerceNumeric`'s bv→int step idempotent: an
+    operand a caller already widened to int (e.g. a self-coercing projection) is
+    not wrapped in a second `as_uint`. -/
 private def bexprIsKnownInt : BExpr → Bool
   | .add_expr _ (.int _) _ _ | .sub_expr _ (.int _) _ _
   | .mul_expr _ (.int _) _ _ | .div_expr _ (.int _) _ _
   | .mod_expr _ (.int _) _ _ | .neg_expr _ (.int _) _ => true
+  | .as_uint .. | .as_sint .. => true
   | _ => false
 
 /-- Insert a single numeric coercion. Returns the expression unchanged when
