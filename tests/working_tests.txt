@@ -34,9 +34,8 @@ tests/adopted_rust_verify_test/integer_ring.rs
 #
 # unit tests (authored for verus-boogie, NOT adopted from the Verus repo): one
 # minimal example per all-green FEATURE_SUPPORT_MATRIX.md row, each verifying
-# end-to-end (all obligations pass). See each header for the matrix row it 
-# demonstrates. The two datatype-recursion rows the matrix over-claims are 
-# tracked in tests/waiting_for_strata.txt, not here.
+# end-to-end (all obligations pass). See each header for the matrix row it
+# demonstrates.
 tests/VerusFiles/unit_tests/arrays.rs
 tests/VerusFiles/unit_tests/assert_label.rs
 tests/VerusFiles/unit_tests/bitwise_ops.rs
@@ -54,6 +53,7 @@ tests/VerusFiles/unit_tests/int_widths.rs
 tests/VerusFiles/unit_tests/let_bindings.rs
 tests/VerusFiles/unit_tests/loop_index.rs
 tests/VerusFiles/unit_tests/modes.rs
+tests/VerusFiles/unit_tests/mutual_recursion_datatypes.rs
 tests/VerusFiles/unit_tests/nested_loops.rs
 tests/VerusFiles/unit_tests/opaque_reveal.rs
 tests/VerusFiles/unit_tests/overflow_guard.rs
@@ -61,6 +61,7 @@ tests/VerusFiles/unit_tests/quantifiers.rs
 tests/VerusFiles/unit_tests/references.rs
 tests/VerusFiles/unit_tests/requires_ensures.rs
 tests/VerusFiles/unit_tests/seq_typed.rs
+tests/VerusFiles/unit_tests/structural_recursion.rs
 tests/VerusFiles/unit_tests/verifier_external.rs
 tests/VerusFiles/unit_tests/while_invariant.rs
 #

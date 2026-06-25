@@ -4,13 +4,11 @@
 // mutually-recursive datatypes (Tree / Forest), each with a structural
 // `decreases` on its datatype argument.
 //
-// STATUS (does NOT currently verify — matrix over-claims this row):
-// Two compounding Strata-Core gaps surface:
-//   1. "Undeclared type or category forest" — the mutually-recursive datatype
-//      pair is emitted in declaration order, so `Tree` references `Forest`
-//      before `Forest` is declared (no forward declaration of the sibling).
-//   2. the same `@[cases]` structural-recursion gap as
-//      structural_recursion.rs.
+// STATUS: verifies end-to-end (13/13). Verus groups the mutually-recursive
+// `Tree`/`Forest` datatypes into one `mutualBlock`; the translator emits them as
+// a single `command_datatypes` block, so they reference each other under Strata's
+// two-phase name pre-registration. Both datatype-measured recursive functions
+// emit `@[cases]` on their decreasing parameter for structural termination.
 use vstd::prelude::*;
 
 verus! {

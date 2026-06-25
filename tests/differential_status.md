@@ -68,18 +68,16 @@ Solver success is **not** used to classify faithfulness.
 - **unit-test demonstration suite for `FEATURE_SUPPORT_MATRIX.md`** (2026-06-22):
   added `tests/VerusFiles/unit_tests/*.rs` — one minimal, clearly-marked example
   (header: "UNIT TEST … NOT adopted from the Verus repo") per all-green matrix
-  row. **26 verify end-to-end** (Verus `0 errors` + every Strata obligation ✅)
-  and are listed in `working_tests.txt`. Three rows the matrix marks all-green
-  do **not** verify in the minimal case and are recorded in
-  `waiting_for_strata.txt`:
-  - A5 "Structural recursion (over datatypes)" / B5 "decreases — function
-    (structural `@[cases]`)" — `unit_tests/structural_recursion.rs` hits the
-    `[CORE-decreases]` recursive-spec-fn `@[cases]` gap ("structural recursion
-    requires @[cases]").
-  - A5 "Mutual recursion (over datatypes)" (#599) —
-    `unit_tests/mutual_recursion_datatypes.rs` hits a mutually-recursive-datatype
-    forward reference ("Undeclared type or category forest") plus the `@[cases]`
-    gap.
+  row. **27 verify end-to-end** (Verus `0 errors` + every Strata obligation ✅)
+  and are listed in `working_tests.txt`. A5 "Structural recursion (over
+  datatypes)" / B5 "decreases — function (structural `@[cases]`)" now verify
+  end-to-end (`unit_tests/structural_recursion.rs`, 9/9): Translate emits
+  `@[cases]` on the decreasing datatype parameter. A5 "Mutual recursion (over
+  datatypes)" (#599) also verifies (`unit_tests/mutual_recursion_datatypes.rs`,
+  13/13): the mutually-recursive datatype SCC emits as one `command_datatypes`
+  block, so `tree ↔ forest` resolve under two-phase name pre-registration. One
+  row the matrix marks all-green still does **not** verify in the minimal case
+  and is recorded in `waiting_for_strata.txt`:
   - A1 "Bitwise ops on bvN" `>>s` — `unit_tests/bitwise_ops.rs`: the six unsigned ops
     verify, but signed/arithmetic right shift lowers to `Bv32.SShr` (undeclared
     in Strata Core) / malformed Boole on negative literals.
@@ -424,6 +422,20 @@ erasure, or name-collision semantics.
   `spec_axioms.termination_check` handling.  Affects
   `vlir-tests:recursion`, `vlir-tests:mutual_recursion`,
   `verus-examples:guide__recursion`.
+- **Structural (datatype-measured) `decreases` — resolved (2026-06-24).** When the
+  measure is a parameter of user-datatype type, Strata classifies it as
+  structural recursion and requires the decreasing parameter to carry `@[cases]`
+  (int measures do not). `specFnToBoole` and the mutual-rec path now read the
+  parser's `recursiveCasesIdxHint` (the decreasing-parameter index, with
+  `Box`/`HasType` wrappers already peeled), gate it on the parameter being a
+  `Struct`/`Enum`, and emit that binding as `casesBinding` — dropping the
+  datatype `decreases`, since `@[cases]` carries termination via Strata's
+  `adtRank` and generates the per-constructor unfolding axioms.
+  `unit_tests/structural_recursion.rs` verifies 9/9 (termination + `len` values).
+  `mutual_recursion_datatypes.rs` (mutual datatypes) now also verifies 13/13:
+  emitting the datatype SCC as one `command_datatypes` block (`mergeDatatypeCommands`
+  in `Translate.lean`) resolves the `tree ↔ forest` forward reference, separate
+  from the termination markers.
 
 ### `[TRANS-return-comment]` Early return rendered as comment (Core-only)
 - This is a Core-pipeline-only workaround: Verus SST encodes `return expr;`

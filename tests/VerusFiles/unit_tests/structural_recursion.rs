@@ -6,15 +6,11 @@
 // `decreases <datatype>` measure (the measure decreases structurally to a
 // field). `int` return is used to stay off the abstract-`nat` path.
 //
-// STATUS (does NOT currently verify — matrix over-claims these rows):
-// Strata Core rejects the emitted bare `rec function len ... decreases l` with
-//   "recursive function 'len': structural recursion requires @[cases]".
-// The translator threads a datatype `decreases` but does not emit Strata's
-// `@[cases]` structural-recursion marker, so datatype-measured recursion fails
-// at Core. This matches the differential_status.md `[CORE-decreases]` note
-// (the int-measured path was fixed 2026-06-22, but the *structural* path was
-// not). Recursion over a datatype with an *int* measure (e.g. `decreases n`)
-// does verify — see decreases_int.rs.
+// STATUS: verifies end-to-end. The translator recognizes the datatype-valued
+// `decreases` parameter and emits Strata's `@[cases]` structural-recursion
+// marker on the corresponding `rec function` binding, so Strata uses its
+// structural `adtRank` termination path. Recursion over a datatype with an
+// *int* measure (e.g. `decreases n`) remains covered by decreases_int.rs.
 use vstd::prelude::*;
 
 verus! {

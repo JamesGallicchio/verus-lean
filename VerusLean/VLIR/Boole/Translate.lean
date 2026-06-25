@@ -2329,16 +2329,50 @@ def typeArgsFromDecls (decls : List (String × Typ)) : List String :=
 
 /-! ### Building BooleDDM Commands -/
 
-private def mkMonoInputs (inputs : List (String × Typ)) :
+/-- A user-defined datatype (struct or enum) — the parameter shape that makes a
+    `decreases` measure *structural* rather than int-valued.  `Boxed`/`Datatype`
+    references parse to `.Struct` (`Typ.fromJson`); decorations are peeled. -/
+private def isStructuralMeasureTyp : Typ → Bool
+  | .Struct _ _ => true
+  | .Enum _ _ => true
+  | .Decorated _ t => isStructuralMeasureTyp t
+  | _ => false
+
+/-- Index of the parameter to mark `@[cases]` for a recursive spec fn whose
+    `decreases` measure is a parameter of user-datatype type.  Strata classifies
+    a datatype-valued measure as structural recursion and requires the
+    decreasing parameter to carry `@[cases]`; int-valued measures do not, and
+    keep their `decreases` clause.  Reuses the parser's `recursiveCasesIdxHint`
+    (the decreasing-parameter index, with `Box`/`HasType` wrappers already
+    peeled) and gates it on the parameter being a datatype — mirroring
+    `getDecreasesKind` in Strata's `Transform/TerminationCheck.lean`. -/
+private def structuralCasesParamIdx? (f : SpecFn) : Option Nat :=
+  match f.recursiveCasesIdxHint with
+  | some idx =>
+    match f.inputs[idx]? with
+    | some (_, ty) => if isStructuralMeasureTyp ty then some idx else none
+    | none => none
+  | none => none
+
+private def mkMonoInputs (inputs : List (String × Typ)) (casesIdx? : Option Nat := none) :
     BuildM (BooleDDM.Bindings SourceRange × Array String) := do
   let mut bindings : Array (BooleDDM.Binding SourceRange) := #[]
   let mut names : Array String := #[]
+  let mut i := 0
   for (name, ty) in inputs do
     let sanName := sanitizeVarName name
     let ty' ← typToBooleType ty
-    bindings := bindings.push
-      (BooleDDM.Binding.mkBinding default (ann sanName) (BooleDDM.TypeP.expr ty'))
+    -- Mark the structural-recursion parameter `@[cases]` (see
+    -- `structuralCasesParamIdx?`); Strata requires it for datatype-measured
+    -- recursion. All other parameters use the plain binding.
+    let binding :=
+      if casesIdx? == some i then
+        BooleDDM.Binding.casesBinding default (ann sanName) (BooleDDM.TypeP.expr ty')
+      else
+        BooleDDM.Binding.mkBinding default (ann sanName) (BooleDDM.TypeP.expr ty')
+    bindings := bindings.push binding
     names := names.push sanName
+    i := i + 1
   pure (BooleDDM.Bindings.mkBindings default (ann bindings), names)
 
 private def mkMonoOutputs (outputs : List (String × Typ)) :
@@ -2456,7 +2490,11 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List B
   addFreeVars #[fnName]
   let name := ann fnName
   let typeArgs := mkTypeArgsAnn (fnTypeParams f.inputs f.returnType)
-  let (inputBindings, inputNames) ← mkMonoInputs f.inputs
+  -- A datatype-valued `decreases` measure marks the decreasing parameter
+  -- `@[cases]` for structural recursion (Strata requires it; int-valued
+  -- measures keep their `decreases` clause instead).
+  let casesIdx? := if f.isRecursive then structuralCasesParamIdx? f else none
+  let (inputBindings, inputNames) ← mkMonoInputs f.inputs casesIdx?
   let outputTy ← typToBooleType f.returnType
   let envLocal := extendEnv env f.inputs
   -- A spec fn whose whole body is `choose |v| pred` (Verus's Hilbert choice)
@@ -2521,10 +2559,14 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List B
     -- input-bound scope since the measure names the params.  Falls back to
     -- `mkMeasure none` (Strata's own checker) on unexpected shapes.
     let decrAnn ←
-      match f.decreases with
-      | some (.Block stmts) => decreasesToMeasureAnn envLocal stmts
-      | some s => decreasesToMeasureAnn envLocal [s]
-      | none => pure (Bld.mkMeasure none)
+      -- `@[cases]` supplies the structural measure (Strata's adtRank), so the
+      -- datatype-valued `decreases` is dropped rather than emitted into the
+      -- int-valued measure slot.
+      if casesIdx?.isSome then pure (Bld.mkMeasure none)
+      else match f.decreases with
+        | some (.Block stmts) => decreasesToMeasureAnn envLocal stmts
+        | some s => decreasesToMeasureAnn envLocal [s]
+        | none => pure (Bld.mkMeasure none)
     pure (body?, elts, decrAnn)
   match body? with
   | some body =>
@@ -3042,6 +3084,30 @@ def funcCheckSstToBoole (env : VarEnv) (f : FuncCheckSst) : BuildM BCmd := do
 
 /-! ### Top-Level Declaration Translation -/
 
+/-- Coalesce the `command_datatypes` commands in `cmds` into one mutual
+    datatype block.  Strata's `command_datatypes` carries a newline-separated
+    list of decls and elaborates them with two-phase name pre-registration, so
+    decls sharing one command may reference one another.  Verus groups mutually
+    recursive datatypes into a single `mutualBlock`; emitting each as its own
+    command makes a sibling type "Undeclared" the moment a constructor field
+    references it (no declaration order satisfies a cycle).  The merged command
+    takes the slot of the first datatype command and the rest are dropped; every
+    non-datatype command keeps its position, so per-datatype axioms still follow
+    the (now-declared) types. -/
+private def mergeDatatypeCommands (cmds : List BCmd) : List BCmd :=
+  let dtDecls := cmds.foldl (init := (#[] : Array (BooleDDM.DatatypeDecl SourceRange)))
+    fun acc c => match c with
+      | .command_datatypes _ ⟨_, decls⟩ => acc ++ decls
+      | _ => acc
+  if dtDecls.size ≤ 1 then cmds
+  else
+    let merged : BCmd := .command_datatypes default (ann dtDecls)
+    let out := cmds.foldl (init := ((#[] : Array BCmd), false)) fun st c =>
+      match c with
+      | .command_datatypes _ _ => if st.2 then st else (st.1.push merged, true)
+      | _ => (st.1.push c, st.2)
+    out.1.toList
+
 partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap) (sfMap : SpecFnMap)
     (allDecls : List Decl) :
@@ -3076,7 +3142,11 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         let fnName := identToBoole f.name
         let name := ann fnName
         let typeArgs := mkTypeArgsAnn (fnTypeParams f.inputs f.returnType)
-        let (inputBindings, inputNames) ← mkMonoInputs f.inputs
+        -- Every fn here is emitted as a `rec function`, so mark a datatype
+        -- `decreases` parameter `@[cases]` (self-guarded: `structuralCasesParamIdx?`
+        -- yields `none` for absent or int-valued measures).
+        let casesIdx? := structuralCasesParamIdx? f
+        let (inputBindings, inputNames) ← mkMonoInputs f.inputs casesIdx?
         let outputTy ← typToBooleType f.returnType
         let envLocal := extendEnv env f.inputs
         let (body, specElts, decrAnn) ← withScope do
@@ -3098,10 +3168,13 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           -- measure for mutually-recursive spec fns and rejected them
           -- with "requires a 'decreases' clause or a '@[cases]'".
           let decrAnn ←
-            match f.decreases with
-            | some (.Block stmts) => decreasesToMeasureAnn envLocal stmts
-            | some s => decreasesToMeasureAnn envLocal [s]
-            | none => pure (Bld.mkMeasure none)
+            -- `@[cases]` supplies the structural measure; drop the datatype
+            -- `decreases` rather than emit it into the int-valued slot.
+            if casesIdx?.isSome then pure (Bld.mkMeasure none)
+            else match f.decreases with
+              | some (.Block stmts) => decreasesToMeasureAnn envLocal stmts
+              | some s => decreasesToMeasureAnn envLocal [s]
+              | none => pure (Bld.mkMeasure none)
           pure (body, elts, decrAnn)
         pure (BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy
           (ann specElts) decrAnn body)
@@ -3110,7 +3183,9 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     let otherCmds ← others.foldlM (fun acc d => do
       let cmds ← declToBoole env projLayouts mutArgMap sfMap allDecls d
       return acc ++ cmds) []
-    return recCmds ++ otherCmds
+    -- Mutually-recursive datatypes share one `mutualBlock`; merge their
+    -- per-datatype commands so Strata sees a single mutual datatype block.
+    return recCmds ++ mergeDatatypeCommands otherCmds
 
 /-! ## Prelude and Entry Point -/
 
