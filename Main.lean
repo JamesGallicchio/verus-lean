@@ -16,14 +16,37 @@ private def stripLineComments (text : String) : String :=
       let trimmed := line.trimAscii.toString
       !trimmed.startsWith "//")
 
-/-- Read a Boole prelude file relative to the `verus-boogie` repo root. -/
+/-- Locate `prelude/<fileName>` by walking up from `start` (bounded), so the
+    prelude is found whether `verus-lean` runs from the repo root or a subdir. -/
+private def searchUpForPrelude
+    (start : System.FilePath) (fileName : String) : IO (Option System.FilePath) := do
+  let mut dir := start
+  for _ in [0:16] do
+    let cand := dir / "prelude" / fileName
+    if ← cand.pathExists then
+      return some cand
+    match dir.parent with
+    | some p => dir := p
+    | none => return none
+  return none
+
+/-- Read a Boole prelude file.  Resolves `prelude/<fileName>` robustly — first by
+    walking up from the current directory, then from the running binary's
+    location — so a generated `.boole.st` is self-contained (the `nat` prelude it
+    references is defined) regardless of the invocation cwd. -/
 private def readPreludeBody? (fileName : String) : IO (Option String) := do
-  let cwd ← IO.currentDir
-  let path := cwd / "prelude" / fileName
-  if ← path.pathExists then
+  let path? ←
+    match ← searchUpForPrelude (← IO.currentDir) fileName with
+    | some p => pure (some p)
+    | none =>
+      match (← IO.appPath).parent with
+      | some binDir => searchUpForPrelude binDir fileName
+      | none => pure none
+  match path? with
+  | some path =>
     let text ← IO.FS.readFile path
     pure <| some <| stripLineComments text
-  else
+  | none =>
     pure none
 
 private def readNatPreludeBody? : IO (Option String) :=

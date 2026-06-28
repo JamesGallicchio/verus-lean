@@ -17,6 +17,14 @@ JSON_BOOGIE_EXAMPLES_DIR="$JSON_BOOGIE_DIR/verus-examples"
 JSON_BOOGIE_VLIR_DIR="$JSON_BOOGIE_DIR/vlir-tests"
 
 verbose=false
+# SMT solver for the `--verify` stage's `#eval Strata.Boole.verify` wrapper.
+# Defaults to any pre-set env value so an exported SOLVER still works without
+# the flag.
+solver="${SOLVER:-cvc5}"
+# Tracks whether `--solver` was passed explicitly. When it is, `--verify` rewrites
+# the solver in an already-generated wrapper, so `--verify --solver X` takes
+# effect without also re-running `--boole`.
+solver_explicit=false
 # Comma-separated synthesized verification aids to disable, forwarded to
 # `verus-lean` via the BOOLE_SYNTH_DISABLE env var. Defaults to any pre-set
 # value so an exported env var still works without the flag.
@@ -36,6 +44,7 @@ Stages (pipeline: .rs -> JSON -> .boole.st -> .lean wrapper -> verify):
   --verbose        Show full output: every proof obligation during --verify
                    (default prints only a tally + non-passing obligations) and
                    full CLI output for the Verus/Boole steps
+  --solver <name>  SMT solver for the --verify stage (e.g. cvc5, z3); default cvc5
   --synth-disable <names>
                    Comma-separated synthesized verification aids to turn OFF
                    during Boole generation (sets BOOLE_SYNTH_DISABLE). Valid
@@ -317,8 +326,23 @@ write_boole_wrapper() {
     sed '1{/^[[:space:]]*program [A-Za-z][A-Za-z]*;.*$/d;}' "$program_file"
     echo "#end"
     echo
-    echo "#eval Strata.Boole.verify \"cvc5\" ${ident}_program (options := .quiet)"
+    echo "#eval Strata.Boole.verify \"$solver\" ${ident}_program (options := .quiet)"
   } >"$out_file"
+}
+
+# When --solver was passed explicitly, rewrite the solver in an already-generated
+# wrapper so `--verify --solver X` (without re-running --boole) uses X. The
+# wrapper is a regenerable artifact, so the in-place rewrite is safe.
+rewrite_wrapper_solver() {
+  local wrapper="$1"
+  if $solver_explicit && [ -f "$wrapper" ]; then
+    local tmp="$wrapper.solver.tmp"
+    if sed "s/Strata\\.Boole\\.verify \"[A-Za-z0-9_]*\"/Strata.Boole.verify \"$solver\"/" "$wrapper" >"$tmp"; then
+      mv "$tmp" "$wrapper"
+    else
+      rm -f "$tmp"
+    fi
+  fi
 }
 
 run_cmd_quiet() {
@@ -443,6 +467,21 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --verbose) verbose=true; shift ;;
+    --solver)
+      if [ $# -lt 2 ]; then
+        echo "Missing value for --solver"
+        usage
+        exit 1
+      fi
+      solver="$2"
+      solver_explicit=true
+      shift 2
+      ;;
+    --solver=*)
+      solver="${1#*=}"
+      solver_explicit=true
+      shift
+      ;;
     --synth-disable)
       if [ $# -lt 2 ]; then
         echo "Missing value for --synth-disable"
@@ -685,6 +724,7 @@ if $run_verify; then
       *) verify_path="$ROOT_DIR/$target_lean_path" ;;
     esac
     echo "Verify: $(basename "$verify_path")"
+    rewrite_wrapper_solver "$verify_path"
     run_boole_verify "$verify_path" "full" "$verbose"
   elif [ -n "$target_rs_path" ] || [ -n "$target_json_path" ]; then
     if [ -n "$target_rs_path" ]; then
@@ -698,6 +738,7 @@ if $run_verify; then
       exit 1
     fi
     echo "Verify: $(basename "$verify_path")"
+    rewrite_wrapper_solver "$verify_path"
     run_boole_verify "$verify_path" "full" "$verbose"
   else
     any=false

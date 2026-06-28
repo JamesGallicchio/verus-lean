@@ -14,12 +14,12 @@ type nat;
 // output doesn't need to splice `nat.toInt(...)` everywhere a nat appears
 // in a binop.
 
-function nat.toInt      (n : nat) : int;
-function nat.fromIntAux (x : int) : nat;
+function nat.toInt (n : nat) : int;
 
-function nat.fromInt    (x : int) : nat
-  requires 0 <= x;
-{ nat.fromIntAux(x) }
+// Total, matching Verus's native `nat`: a `nat` result is non-negative by type,
+// so coercion never carries a proof obligation. `nat.fromInt` is uninterpreted;
+// the round-trip is pinned only for non-negative inputs (see `nat_fromInt_toInt`).
+function nat.fromInt (x : int) : nat;
 
 // Nat axioms
 axiom [nat_nonneg]:        (forall n : nat :: 0 <= nat.toInt(n));
@@ -34,16 +34,16 @@ function nat.sub (a : nat, b : nat) : nat
 function nat.mul (a : nat, b : nat) : nat { nat.fromInt(nat.toInt(a) * nat.toInt(b)) }
 // Boole's `/` parses as `safediv_expr`, which Strata's encoder does not
 // yet support; use the integer `div` keyword (`div_expr`) instead.
+// `nat.div`/`nat.mod` are total, mirroring Verus's spec-level `/`/`%`, which are
+// total: division by zero yields an unspecified value, never a proof obligation
+// (vir's EucDiv/EucMod equal the SMT `div`/`mod`, whose bounds `0 <= . < y` are
+// guarded by `0 < y`). For a zero divisor the result is some unspecified `nat`;
+// the value is pinned only for a nonzero divisor, via the solver's native
+// `div`/`mod`. (Exec `/`/`%` — where Rust panics on a zero divisor — would need
+// a checked variant; this prelude models the spec operators.)
 function nat.div (a : nat, b : nat) : nat
-  requires nat.toInt(b) != 0;
 { nat.fromInt(nat.toInt(a) div nat.toInt(b)) }
-// `nat.mod` mirrors `nat.div`: a nonzero-divisor precondition, with the Euclidean
-// remainder non-negative so `nat.fromInt` is well-defined.  The precondition
-// guards the value axiom, so reasoning about a bare `nat.mod` value (e.g. parity
-// under an equality) is limited — callers needing the value cannot treat it
-// transparently — but the prelude stays consistent with `nat.div`.
 function nat.mod (a : nat, b : nat) : nat
-  requires nat.toInt(b) != 0;
 { nat.fromInt(nat.toInt(a) mod nat.toInt(b)) }
 
 // Nat comparisons

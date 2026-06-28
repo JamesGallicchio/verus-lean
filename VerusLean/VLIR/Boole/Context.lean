@@ -124,6 +124,14 @@ structure BuildCtx where
       projection reuses one `Tuple2_proj_*` declaration instead of emitting a
       fresh copy per occurrence (see `synthTupleProjHelper`). -/
   tupleProjHelpers : Std.HashMap (Nat × Nat × Typ) String := {}
+  /-- For each single-field wrapper struct whose one field is a fixed-size array
+      `[T; N]` (e.g. `Scalar([u8; 32])`), maps its Boole type name to the pair
+      `(destructor Boole name, N)` — e.g. `scalar ↦ ("scalar..bytes", 32)`.  The
+      wrapper lowers to a transparent `Sequence T` synonym that discards the
+      length; the length is recovered on the *destructor* applied to a wrapper
+      value (`length(scalar..bytes(x)) == 32`), matching how bodies index it.
+      Built once from the decl set in `declsToBooleProgram`. -/
+  wrapperInfo : Std.HashMap String (String × Nat) := {}
 
 abbrev BuildM := StateT BuildCtx (Except String)
 

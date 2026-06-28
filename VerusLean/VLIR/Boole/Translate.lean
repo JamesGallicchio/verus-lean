@@ -529,8 +529,9 @@ def natCmpFn : InequalityOp → String
   | .Gt => "nat.gt"
 
 /-- Prelude function for a nat-space arithmetic op, or `none` if the op has no
-    nat-native form.  `nat.mod` mirrors `nat.div`: both carry a nonzero-divisor
-    precondition (see `Nat.boole.st`). -/
+    nat-native form.  `nat.div` / `nat.mod` are total, mirroring Verus's
+    spec-level `/` / `%` — a zero divisor yields an unspecified value (see
+    `Nat.boole.st`). -/
 def natArithFn? : BinaryOp → Option String
   | .Arith .Add _          => some "nat.add"
   | .Arith .Sub _          => some "nat.sub"
@@ -936,14 +937,14 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     -- nat-native lowering: nat-result arithmetic → `nat.add`/`nat.sub`/… (see
     -- the `natArithFn?` table doc).  Fires on the *expected* type, which
     -- `.Unary (.Clip .Nat _)` propagates down.  Operands are translated at
-    -- `Nat`, so where `nat.sub`/`nat.div` carry preconditions (`b <= a` /
-    -- `b != 0`), those are exactly the obligations Verus discharges at the
-    -- source — surfaced faithfully rather than hidden behind an int
-    -- round-trip.  `EuclideanMod` additionally fires on nat operand types:
-    -- unlike `*`/`+`, a `nat % p` carries no nat-clip, so under an equality
+    -- `Nat`.  `nat.sub` carries a `b <= a` precondition (the obligation Verus
+    -- discharges at the source).  `nat.div`/`nat.mod` are total in the prelude,
+    -- mirroring Verus's spec-level `/`/`%` (which are total — division by zero is
+    -- unspecified, not a proof obligation), so no divisor-nonzero obligation is
+    -- emitted.  `EuclideanMod` additionally fires on nat operand types: unlike
+    -- `*`/`+`, a `nat % p` carries no nat-clip, so under an equality
     -- (`a % p == b % p`) there is no expected-nat hint to catch it.  Restricted
-    -- to mod so `nat.sub`/`nat.div` keep their expected-driven firing; `nat.mod`'s
-    -- `b != 0` obligation is then surfaced faithfully, like `nat.div`.
+    -- to mod so `nat.sub`/`nat.div` keep their expected-driven firing.
     let natModByOperands :=
       (op matches .Arith .EuclideanMod _) &&
       inferComparisonNumKind env bound lhs == some .nat &&
@@ -2485,6 +2486,75 @@ partial def expHasInlineForcingLambda : Exp → Bool
   | .MatchBlock (scrut, _) body =>
     expHasInlineForcingLambda scrut || expHasInlineForcingLambda body
 
+/-- Strip `Decorated` wrappers to expose the underlying type. -/
+private def stripTypDecoration : Typ → Typ
+  | .Decorated _ ty => stripTypDecoration ty
+  | ty => ty
+
+/-- If `ty` is a single-field `[T; N]` wrapper struct (modeled as a transparent
+    `Sequence T` synonym), the `(destructor Boole name, length)` recorded by the
+    `wrapperInfo` pre-pass; else none. -/
+def wrapperLenInfo? (ty : Typ) : BuildM (Option (String × Nat)) := do
+  match stripTypDecoration ty with
+  | .Struct name _ => pure ((← get).wrapperInfo.get? (datatypeNameOf name))
+  | _ => pure none
+
+/-- `Sequence.length(<destructor>(x)) == n` — the wrapper's length stated in the
+    body's own vocabulary (the destructor applied to the wrapper value).  Stating
+    it on `<destructor>(x)` rather than `x` matches how bodies index the wrapper
+    (`Sequence.select(<destructor>(x), i)`), so a strict (non-unfolding) SMT
+    solver discharges the bound by syntactic match.  Same shape as the struct
+    field length axiom, minus the `forall`. -/
+def wrapperLenFact (x : BExpr) (dtorName : String) (n : Nat) : BuildM BExpr := do
+  let dtorIdx ← resolveFreeVar dtorName
+  pure (Synth.fixedArrayLenFact (Bld.appN (Bld.fvar dtorIdx) [x]) n)
+
+/-- Length contracts for wrapper-struct-typed parameters (`requires`) and returns
+    (`ensures`), each stated as `length(<destructor>(x)) == N`.  Threads the
+    length through the call graph the way the hand-written reference does: every
+    wrapper boundary carries the fact, so callers discharge their `_calls_`
+    obligations from the matching `ensures`.  No-op when `fixedArrayLengths` is
+    off.  Must run inside the scope where `inputs`/`outputs` resolve. -/
+def wrapperLenSpecElts (inputs outputs : List (String × Typ)) :
+    BuildM (Array (BooleDDM.SpecElt SourceRange)) := do
+  if !(← getSynthConfig).fixedArrayLengths then return #[]
+  let mut elts : Array (BooleDDM.SpecElt SourceRange) := #[]
+  for (name, ty) in inputs do
+    match (← wrapperLenInfo? ty) with
+    | some (dtor, n) =>
+      let fact ← wrapperLenFact (← resolveVar name) dtor n
+      elts := elts.push (.requires_spec default noLabel (ann none) fact)
+    | none => pure ()
+  for (name, ty) in outputs do
+    match (← wrapperLenInfo? ty) with
+    | some (dtor, n) =>
+      let fact ← wrapperLenFact (← resolveVar name) dtor n
+      elts := elts.push (.ensures_spec default noLabel (ann none) fact)
+    | none => pure ()
+  return elts
+
+/-- Length `requires` for a spec fn's array-typed parameters, shared by the
+    non-mutual (`specFnToBoole`) and mutual-recursive spec-fn paths so neither
+    loses the facts.  A `[T; N]` param carries `Sequence.length(p) == N` (the
+    length is otherwise lost when `[T; N]` lowers to `Sequence T`, leaving the
+    body's `Sequence.select` accesses with an unconstrained length — invalid
+    bounds VCs); a single-field wrapper-struct param carries the length on its
+    destructor (`Sequence.length(p..field) == N`, prepended — see
+    `wrapperLenSpecElts`), matching how bodies index the wrapper so a strict SMT
+    solver discharges the bound by syntactic match. -/
+def specFnParamLenElts (inputs : List (String × Typ))
+    (elts : Array (BooleDDM.SpecElt SourceRange)) :
+    BuildM (Array (BooleDDM.SpecElt SourceRange)) := do
+  if !(← getSynthConfig).fixedArrayLengths then return elts
+  let elts ← inputs.foldlM (fun acc (name, ty) => do
+    match arrayFixedLen? ty with
+    | some n =>
+      let pExpr ← resolveVar name
+      pure (acc.push (.requires_spec default noLabel (ann none)
+        (Synth.fixedArrayLenFact pExpr n)))
+    | none => pure acc) elts
+  pure ((← wrapperLenSpecElts inputs []) ++ elts)
+
 def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List BCmd) := do
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
@@ -2552,6 +2622,9 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List B
         dedupVariantReqs <| (rootExposedProjs b).filter (fun (n, _, _) => inputNameSet.contains n)
       | none => []
     let elts ← synthVariantRequires variantReqs
+    -- Fixed-array length `requires` for `[T; N]` and wrapper-struct params,
+    -- shared with the mutual-recursive spec-fn path (`specFnParamLenElts`).
+    let elts ← specFnParamLenElts f.inputs elts
     -- Lower Verus's serialized `decreases` measure (parsed into
     -- `SpecFn.decreases`) for recursive spec fns.  The termination-check
     -- body is a `Block` whose first stmt is `decrease%init0 := <measure>`;
@@ -2652,6 +2725,21 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let specElts ← mkSpecElts envLocal f.requires f.ensures []
+    -- (SynthConfig.fixedArrayLengths) A proof fn returning a fixed-size array
+    -- `[T; N]` carries `ensures Sequence.length(result) == N` to its callers,
+    -- mirroring the ExecFn return site. Scoped to the named return (`retDecls`).
+    let specElts ← if (← getSynthConfig).fixedArrayLengths then
+        retDecls.foldlM (fun acc (name, ty) =>
+          match arrayFixedLen? ty with
+          | some n => do
+            let outExpr ← resolveVar name
+            pure (acc.push (.ensures_spec default noLabel (ann none)
+              (Synth.fixedArrayLenFact outExpr n)))
+          | none => pure acc) specElts
+      else pure specElts
+    -- Wrapper-struct params/returns carry the length on the destructor, threaded
+    -- via requires/ensures (see `wrapperLenSpecElts`).
+    let specElts := (← wrapperLenSpecElts f.inputs retDecls) ++ specElts
     -- Lower the source-level `decreases` clause BEFORE body translation so
     -- the bound-var stack is in a known-clean state (just inputs+outputs).
     -- The body's internal scopes can otherwise leave the stack longer than
@@ -2659,6 +2747,18 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     -- decreases expression.
     let decrAnn ← decreasesToMeasureAnn envLocal f.decreases
     let localStmts ← localsToVarStmts localsAll
+    -- (SynthConfig.fixedArrayLengths) Re-establish each fixed-size-array
+    -- parameter's `[T; N]` length at entry as `assume Sequence.length(p) == N`,
+    -- mirroring the ExecFn site: a type invariant (no caller obligation), so the
+    -- proof-fn body's index accesses on the array are in-bounds.
+    let fixedArrayLenAssumes ← if (← getSynthConfig).fixedArrayLengths then
+        f.inputs.filterMapM fun (name, ty) =>
+          match arrayFixedLen? ty with
+          | some n => do
+            let pExpr ← resolveVar name
+            pure (some (assumeStmt "" (Synth.fixedArrayLenFact pExpr n)))
+          | none => pure none
+      else pure ([] : List BStmt)
     let retVar? := if hasRet then some (f.retName, f.returnType) else none
     let bodyStmts ← match bodyStm? with
       | some stm => stmToBoole envLocal projLayouts mutArgMap retVar? fnName stm
@@ -2667,7 +2767,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
       -- ensures are trivially satisfied. (Body-less in Strata is *not*
       -- treated as a trusted declaration; see the exec-fn comment.)
       | none => pure [assumeStmt "" (boolConst false)]
-    let allStmts := localStmts ++ bodyStmts
+    let allStmts := localStmts ++ fixedArrayLenAssumes ++ bodyStmts
     let body := BooleDDM.Block.block default (ann allStmts.toArray)
     pure (specElts, body, decrAnn)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
@@ -2821,6 +2921,9 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
               (Synth.fixedArrayLenFact outExpr n)))
           | none => pure acc) specElts
       else pure specElts
+    -- Wrapper-struct params/returns carry the length on the destructor, threaded
+    -- via requires/ensures (see `wrapperLenSpecElts`).
+    let specElts := (← wrapperLenSpecElts f.inputs retDecls) ++ specElts
     -- Lower the source-level `decreases` clause BEFORE body translation so
     -- the bound-var stack is in a known-clean state.  Body translation may
     -- leave additional bound vars on the stack, which would produce
@@ -3162,6 +3265,8 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
                 (rootExposedProjs b).filter (fun (n, _, _) => inputNameSet.contains n)
             | none => []
           let elts ← synthVariantRequires variantReqs
+          -- Fixed-array/wrapper length `requires`, shared with `specFnToBoole`.
+          let elts ← specFnParamLenElts f.inputs elts
           -- Thread the source `decreases` measure into the mutual-rec
           -- slot, mirroring `specFnToBoole`.  Previously hardcoded to
           -- `none`, so Strata's int-valued termination checker had no
@@ -3291,12 +3396,34 @@ private def buildAssocTypeResolution (decls : List Decl) : Std.HashMap String Ty
     | _, _ => pure ()
   return resolution
 
+/-- Map each single-field `[T; N]` wrapper struct to its Boole type name →
+    `(destructor name, N)` — e.g. `Scalar([u8; 32])` ⇒ `scalar ↦ ("scalar..bytes", 32)`,
+    matching the wrapper-synonym branch of `structToBoole`.  Lets parameter/return
+    length contracts be stated on the destructor (`length(scalar..bytes(x))==32`). -/
+private def buildWrapperInfo (decls : List Decl) : Std.HashMap String (String × Nat) := Id.run do
+  let mut m : Std.HashMap String (String × Nat) := {}
+  for d in decls do
+    match d with
+    | .struct s =>
+      match s.fields with
+      | [(fname, fty)] =>
+        match arrayFixedLen? fty with
+        | some n =>
+          m := m.insert (datatypeNameOf s.name) (datatypeDestructorNameOf s.name fname, n)
+        | none => pure ()
+      | _ => pure ()
+    | _ => pure ()
+  return m
+
 def declsToBooleProgram (decls : List Decl) :
     BuildM (Array BCmd) := do
   -- Resolve trait associated-type projections to their concrete impl types
   -- before any decl is lowered.  Built from the full decl set, since pruning
   -- below may drop the impl decls the resolution reads from.
   modify fun c => { c with assocTypeResolution := buildAssocTypeResolution decls }
+  -- Wrapper-struct length info, stated on the destructor so the contract matches
+  -- how bodies index the wrapper (see `wrapperLenSpecElts`).
+  modify fun c => { c with wrapperInfo := buildWrapperInfo decls }
   -- `vec2seq` branch: Verus emits stub `proc Vec_*` / `proc Slice_into_vec`
   -- wrappers (and a few other Vec-named procedures) to cover the Rust Vec
   -- surface — `Vec_new`, `Vec_len`, `Vec_push`, `Vec_from_elem`,
