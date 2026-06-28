@@ -281,6 +281,12 @@ private partial def exprHonorsExpectedInt : Exp → Bool
   | .Unary .Trigger e => exprHonorsExpectedInt e
   | .Unary (.HasType _) e => exprHonorsExpectedInt e
   | .Unary .Old e => exprHonorsExpectedInt e
+  -- Datatype / tuple field projection: the `.Proj` / `.Proj'` arm coerces its
+  -- result to `expected?` (the two paths mirror each other), so a nat-typed
+  -- field used in an int comparison already lowers to `int`.  Without this the
+  -- post-coerce safety net fires and double-wraps (`nat.toInt(nat.toInt(..))`).
+  | .Unary (.Proj ..) _ => true
+  | .Unary (.Proj' ..) _ => true
   | .If _ t f => exprHonorsExpectedInt t && exprHonorsExpectedInt f
   | .Bind _ body => exprHonorsExpectedInt body
   | .MatchBlock _ body => exprHonorsExpectedInt body
