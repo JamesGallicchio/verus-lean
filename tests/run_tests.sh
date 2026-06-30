@@ -83,16 +83,14 @@ case_key_from_rs_path() {
   local p="$1"
   local p_real
   p_real="$(abs_file_path "$p")"
-  local vlir_root adopted_rvt_root verus_root examples_root
+  local vlir_root adopted_rvt_root examples_root
   vlir_root="$(cd "$VERUSFILES_DIR" && pwd -P)"
   adopted_rvt_root="$(cd "$ADOPTED_RVT_DIR" 2>/dev/null && pwd -P || true)"
-  verus_root="$(cd "$VERUS_DIR" && pwd -P)"
   examples_root="$(cd "$VERUS_DIR/examples" && pwd -P)"
   local rel
   case "$p_real" in
     "$vlir_root"/*) rel="${p_real#$vlir_root/}" ;;
     "$adopted_rvt_root"/*) rel="tests__adopted_rust_verify_test__$(basename "$p_real")" ;;
-    "$verus_root/tests"/*) rel="${p_real#$verus_root/}" ;;
     "$examples_root"/*) rel="${p_real#$examples_root/}" ;;
     *) rel="$(basename "$p_real")" ;;
   esac
@@ -149,15 +147,13 @@ infer_suite_from_rs_path() {
   local p="$1"
   local p_real
   p_real="$(abs_file_path "$p")"
-  local vlir_root adopted_rvt_root verus_tests_root examples_root
+  local vlir_root adopted_rvt_root examples_root
   vlir_root="$(cd "$VERUSFILES_DIR" && pwd -P)"
   adopted_rvt_root="$(cd "$ADOPTED_RVT_DIR" 2>/dev/null && pwd -P || true)"
-  verus_tests_root="$(cd "$VERUS_DIR/tests" && pwd -P)"
   examples_root="$(cd "$VERUS_DIR/examples" && pwd -P)"
   case "$p_real" in
     "$vlir_root"/*) echo "vlir-tests" ;;
     "$adopted_rvt_root"/*) echo "vlir-tests" ;;
-    "$verus_tests_root"/*) echo "vlir-tests" ;;
     "$examples_root"/*) echo "verus-examples" ;;
     *) echo "verus-examples" ;;
   esac
@@ -181,17 +177,6 @@ collect_all_suite_rs_files() {
   while IFS= read -r file; do
     printf '%s\n' "$file"
   done < <(collect_local_vlir_rs_files)
-
-  while IFS= read -r file; do
-    base="$(basename "$file")"
-    if [ -f "$VERUSFILES_DIR/$base" ]; then
-      continue
-    fi
-    if [ -f "$ADOPTED_RVT_DIR/$base" ]; then
-      continue
-    fi
-    printf '%s\n' "$file"
-  done < <(find "$VERUS_DIR/tests" -maxdepth 1 -type f -name '*.rs' | sort)
 
   while IFS= read -r file; do
     base="$(basename "$file" .rs)"
