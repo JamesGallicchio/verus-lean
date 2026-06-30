@@ -535,9 +535,9 @@ def natCmpFn : InequalityOp → String
   | .Gt => "nat.gt"
 
 /-- Prelude function for a nat-space arithmetic op, or `none` if the op has no
-    nat-native form.  `nat.div` / `nat.mod` are total, mirroring Verus's
-    spec-level `/` / `%` — a zero divisor yields an unspecified value (see
-    `Nat.boole.st`). -/
+    nat-native form.  `nat.sub` / `nat.div` / `nat.mod` are total, mirroring
+    Verus's `nClip` / spec-level `/` / `%` — a `nat` underflow or a zero divisor
+    yields an unspecified value, not a proof obligation (see `Nat.boole.st`). -/
 def natArithFn? : BinaryOp → Option String
   | .Arith .Add _          => some "nat.add"
   | .Arith .Sub _          => some "nat.sub"
@@ -943,11 +943,11 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     -- nat-native lowering: nat-result arithmetic → `nat.add`/`nat.sub`/… (see
     -- the `natArithFn?` table doc).  Fires on the *expected* type, which
     -- `.Unary (.Clip .Nat _)` propagates down.  Operands are translated at
-    -- `Nat`.  `nat.sub` carries a `b <= a` precondition (the obligation Verus
-    -- discharges at the source).  `nat.div`/`nat.mod` are total in the prelude,
-    -- mirroring Verus's spec-level `/`/`%` (which are total — division by zero is
-    -- unspecified, not a proof obligation), so no divisor-nonzero obligation is
-    -- emitted.  `EuclideanMod` additionally fires on nat operand types: unlike
+    -- `Nat`.  `nat.sub`/`nat.div`/`nat.mod` are total in the prelude, mirroring
+    -- Verus's `nClip` / spec-level `/`/`%` (all total — a `nat` underflow or a
+    -- division by zero is unspecified, not a proof obligation), so neither a
+    -- `b <= a` nor a divisor-nonzero obligation is emitted.  `EuclideanMod`
+    -- additionally fires on nat operand types: unlike
     -- `*`/`+`, a `nat % p` carries no nat-clip, so under an equality
     -- (`a % p == b % p`) there is no expected-nat hint to catch it.  Restricted
     -- to mod so `nat.sub`/`nat.div` keep their expected-driven firing.
@@ -3457,13 +3457,22 @@ def declsToBooleProgram (decls : List Decl) :
         || n == "Slice_len"
         || n == "Slice_slice_index_get"
     | none => false
+  -- Opaque type declarations for external types the translator always erases
+  -- are dead: a `Vec` lowers to `Sequence` (never `Vec_vec`), and the `Global`
+  -- allocator is a verification phantom that no emitted type names. Drop them so
+  -- the output carries no unreferenced `type Vec_vec` / `type Alloc_global`.
+  let isErasedOpaqueTypeDecl (d : Decl) : Bool :=
+    match d with
+    | .struct s => s.fields.isEmpty && (isVecTypeName s.name || isAllocatorTypeName s.name)
+    | .enum e => e.fields.isEmpty && (isVecTypeName e.name || isAllocatorTypeName e.name)
+    | _ => false
   -- Drop the inlined-at-callsite stubs *before* the reference-based prunes
   -- below.  Otherwise their (about-to-be-dropped) `ensures` clauses pin
   -- vstd spec fns that nothing else references — e.g. `Slice_len`'s
   -- ensures references `Slice_spec_slice_len`, keeping it alive after
   -- `pruneUnreferencedVstdSpecs` even though every real call to
   -- `slice.len()` lowers directly to `Sequence.length(slice)`.
-  let decls := decls.filter (fun d => !isVec2SeqDroppedDecl d)
+  let decls := decls.filter (fun d => !isVec2SeqDroppedDecl d && !isErasedOpaqueTypeDecl d)
   -- Drop Verus-synthesised impl-block accessor spec fns that aren't
   -- transitively referenced by any user-level decl. Eager emission of every
   -- `Impl__N_arrow_*` bloats the output and slows verification; most tests

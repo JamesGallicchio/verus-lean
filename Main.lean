@@ -58,26 +58,18 @@ private def readSeqPreludeBody? : IO (Option String) :=
 private def readVecPreludeBody? : IO (Option String) :=
   readPreludeBody? "Vec.boole.st"
 
-/-- Concatenate the prelude pieces into a single text block for `loadPrelude`.
-
-    `Nat.boole.st` is always included (when present): it hosts the `nat`
-    type + `nat.toInt`/`nat.fromInt` API that `Cast.applyCast` resolves for
-    every `.natToInt` / `.intToNat` coercion the translator emits — and
-    those coercions can appear in any program with `nat`-typed expressions,
-    not just sequence-using ones.  Order matters: Nat must come before Seq
-    because `Seq_len`'s body references `int_to_nat` from Nat. -/
-private def assemblePreludeText
-    (seqNeeded vecNeeded : Bool)
-    (natPreludeBody? seqPreludeBody? vecPreludeBody? : Option String) :
-    Option String :=
-  let pieces :=
-    [ natPreludeBody?
-    , if seqNeeded then seqPreludeBody? else none
-    , if vecNeeded then vecPreludeBody? else none ]
-      |>.filterMap id
-  match pieces with
-  | [] => none
-  | _ => some (String.intercalate "\n\n" pieces)
+/-- True iff `nat` appears as a whole identifier token in `s` — the Boole `nat`
+    type, or the `nat` head of a `nat.toInt` / `nat.add` / … call (`.` is a token
+    separator).  Tokenizes on identifier boundaries so substrings like `nation`
+    do not match.  Used to decide, from the actually-rendered program text,
+    whether the `nat` prelude is referenced. -/
+private def referencesNatToken (s : String) : Bool :=
+  let isIdent := fun (c : Char) => c.isAlphanum || c == '_'
+  let (found, lastTok) := s.foldl (init := ((false, "") : Bool × String))
+    (fun (found, cur) c =>
+      if isIdent c then (found, cur.push c)
+      else (found || cur == "nat", ""))
+  found || lastTok == "nat"
 
 private def failWith (msg : String) : IO α :=
   throw <| IO.userError s!"Error: {msg}"
@@ -166,34 +158,51 @@ unsafe def genBooleFromFile
   -- Plan prelude loading from VLIR syntax before BooleDDM construction, then
   -- translate once with the parsed prelude names pre-registered so fvar
   -- indices align with Strata's global context.
+  let synthCfg ← synthConfigFromEnv
   let preludePlan := Boole.Prelude.planDecls allDecls
-  let preludeText? := assemblePreludeText
-      (preludePlan.needsSeq && seqPreludeBody?.isSome)
-      (preludePlan.needsVec && vecPreludeBody?.isSome)
-      natPreludeBody? seqPreludeBody? vecPreludeBody?
-  let preludeResult ←
-    match preludeText? with
-    | some text => Boole.Emit.loadPrelude text
-    | none => pure (.ok (#[], #[]))
-  match preludeResult with
+  -- Load each prelude piece separately so the `nat` block can be dropped when
+  -- the emitted program never references it.  `nat`'s names are registered
+  -- (loaded) whenever the file is present, keeping fvar indices stable; whether
+  -- the `nat` declarations are *emitted* is decided post-translation from the
+  -- rendered text.  Seq/Vec gate on their VLIR triggers.
+  let loadPiece (needed : Bool) (body? : Option String) := do
+    if needed then
+      match body? with
+      | some text =>
+        match ← Boole.Emit.loadPrelude text with
+        | .ok r => pure r
+        | .error e => failWith e
+      | none => pure (#[], #[])
+    else pure (#[], #[])
+  let (natOps, natNames) ← loadPiece natPreludeBody?.isSome natPreludeBody?
+  let (seqOps, seqNames) ← loadPiece (preludePlan.needsSeq && seqPreludeBody?.isSome) seqPreludeBody?
+  let (vecOps, vecNames) ← loadPiece (preludePlan.needsVec && vecPreludeBody?.isSome) vecPreludeBody?
+  -- Order matters: Nat first — Seq bodies reference `int_to_nat` from Nat.
+  let preludeNames := natNames ++ seqNames ++ vecNames
+  match Translate.translateDeclsWithPrelude allDecls preludeNames synthCfg with
   | .error e => failWith e
-  | .ok (preludeOps, preludeNames) =>
-    let synthCfg ← synthConfigFromEnv
-    match Translate.translateDeclsWithPrelude allDecls preludeNames synthCfg with
+  | .ok (cmds, finalCtx) =>
+    -- Filter out user commands whose names are already in the prelude
+    let preludeSet := preludeNames.toList
+    let cmds := cmds.filter fun cmd =>
+      match Translate.cmdDeclName? cmd with
+      | some name => !preludeSet.contains name
+      | none => true
+    let cmds := dedupeNamedCommands cmds
+    let bodyOps := Boole.Emit.commandsToOps cmds
+    -- Emit the `nat` prelude only when the rest of the program — the body plus
+    -- the Seq/Vec prelude pieces, whose bodies reference `nat` — actually names a
+    -- `nat` token.  Decided from the rendered text, so an over-approximating
+    -- trigger (e.g. a native `Sequence` ref tripping `needsSeq`) never forces a
+    -- dead prelude.  On a render error, keep `nat` (matches always-emit behavior).
+    let natNeeded :=
+      match Boole.Emit.renderProgram (seqOps ++ vecOps) bodyOps finalCtx.allFreeVars with
+      | .ok text => referencesNatToken text
+      | .error _ => true
+    let preludeOps := (if natNeeded then natOps else #[]) ++ seqOps ++ vecOps
+    match Boole.Emit.renderProgram preludeOps bodyOps finalCtx.allFreeVars with
+    | .ok output => printFn output
     | .error e => failWith e
-    | .ok (cmds, finalCtx) =>
-      -- Filter out user commands whose names are already in the prelude
-      let preludeSet := preludeNames.toList
-      let cmds := cmds.filter fun cmd =>
-        match Translate.cmdDeclName? cmd with
-        | some name => !preludeSet.contains name
-        | none => true
-      let cmds := dedupeNamedCommands cmds
-      let bodyOps := Boole.Emit.commandsToOps cmds
-      -- Use Strata's official Boole.formatProgram with explicit GlobalContext
-      match Boole.Emit.renderProgram preludeOps bodyOps finalCtx.allFreeVars with
-      | .ok output => printFn output
-      | .error e => failWith e
 
 unsafe def main : List String → IO Unit
   | ["boole", path] => genBooleFromFile path IO.println

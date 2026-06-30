@@ -166,6 +166,14 @@ def isVecTypeName (name : Ident) : Bool :=
   let s := name.toString
   s.endsWith "Vec" || s.endsWith "vec"
 
+/-- The Rust global allocator type (`alloc::alloc::Global`) — the `A` type
+    parameter of `Vec`/`Box`.  It is a verification phantom: the translator
+    erases it (a `Vec` lowers to `Sequence`, dropping its allocator arg), so no
+    emitted Boole type ever names it.  Keyed on the lowered datatype name, which
+    is exactly what an opaque emission would declare. -/
+def isAllocatorTypeName (name : Ident) : Bool :=
+  datatypeNameOf name == "Alloc_global"
+
 def isVecLenSpecName (name : Ident) : Bool :=
   let s := name.toString
   s.endsWith "spec_vec_len"

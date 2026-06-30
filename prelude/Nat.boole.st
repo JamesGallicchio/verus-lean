@@ -28,8 +28,11 @@ axiom [nat_toInt_fromInt]: (forall n : nat :: nat.fromInt(nat.toInt(n)) == n);
 
 // Nat operations
 function nat.add (a : nat, b : nat) : nat { nat.fromInt(nat.toInt(a) + nat.toInt(b)) }
+// `nat.sub` is total, mirroring Verus's `nat - nat`: vir lowers it to int
+// subtraction then a total `Clip` to nat (`nClip`), so `a < b` yields an
+// unspecified nat, never a proof obligation. The value is pinned (== a - b)
+// only when `b <= a`.
 function nat.sub (a : nat, b : nat) : nat
-  requires nat.toInt(b) <= nat.toInt(a);
 { nat.fromInt(nat.toInt(a) - nat.toInt(b)) }
 function nat.mul (a : nat, b : nat) : nat { nat.fromInt(nat.toInt(a) * nat.toInt(b)) }
 // Boole's `/` parses as `safediv_expr`, which Strata's encoder does not

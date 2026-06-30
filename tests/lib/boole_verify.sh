@@ -12,7 +12,11 @@
 #   $2 = log file for combined stdout+stderr
 # Returns Lean's exit code.
 run_boole_wrapper() {
-  (cd "$STRATA_DIR/StrataBoole" && lake env lean "$1") >"$2" 2>&1
+  # `-s` sets Lean's main-thread stack to 128 MB (the value is in KB). The
+  # heaviest benchmarks (b1/b4) build a large `#strata` data-defn whose LCNF
+  # compilation recurses past the ~8 MB default and overflows; 128 MB clears it.
+  # Harmless for small wrappers — the stack is allocated lazily.
+  (cd "$STRATA_DIR/StrataBoole" && lake env lean -s 131072 "$1") >"$2" 2>&1
 }
 
 # Classify a verify log from `lake env lean <wrapper.lean>`.
@@ -188,9 +192,13 @@ expected_boole_fail_pattern_for_wrapper() {
   case "$1" in
     # ── negative tests (intentional source-level failures) ──────────────
     */vlir-tests/basic_failure.lean) echo 'fail_a_post_expr' ;;
-    # `by_lean.rs`: `lean_test` ensures fails + asserts in
-    # `assert_lean_jumble`. Brittle to assertion ordering in source.
-    */vlir-tests/by_lean.lean)       echo 'lean_test_ensures|assert_[4-9]_' ;;
+    # `by_lean.rs`: `lean_test` ensures + the intentionally-unprovable asserts
+    # in `assert_lean_jumble` (`0 < x`, nonlinear `x*y < y/x`, the bitvector
+    # identity).  Their statement idx runs into double digits (`assert_10_`),
+    # so the range covers one- and two-digit idxs; anchored on idx, not the
+    # volatile serial.  cvc5 may report these as ❌ fail or ❓ unknown depending
+    # on whether inert axioms slow it past its time limit — both are expected.
+    */vlir-tests/by_lean.lean)       echo 'lean_test_ensures|assert_([4-9]|[1-9][0-9])_' ;;
     # `matching.rs` intentionally fails on `assert(s is Soccer)` (an
     # unconstrained enum) and `is_insect(mammal) == 6` (calls a `->`
     # accessor with the wrong variant precondition).
