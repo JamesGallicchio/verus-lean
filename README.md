@@ -12,16 +12,23 @@ This repository now supports two main translation paths:
 All building/compiling is done at the root level of the project,
 unless otherwise indicated.
 
-If you haven't set up the project yet, run
-```
-lake update          # Installs Lean and its dependencies
-lake exe cache get   # Downloads pre-compiled .olean files
-```
+`verus-lean` depends on two sibling checkouts, referenced by relative path in
+`lakefile.lean`:
+- `../Strata-Boole` — the Boole dialect and verifier
+- `../Strata` — the Core/DDM backend. `Strata-Boole` builds on it, and
+  `verus-lean` also imports a few `Strata` / `StrataDDM` modules directly, so it
+  is required here in its own right (not only transitively).
 
-After, and for all subsequent builds, run
+Place both next to `verus-boogie` (see [Repository layout](#repository-layout)),
+then build from the `verus-boogie` root:
 ```
 lake build
 ```
+That single command builds the whole graph: Lake compiles `Strata` and
+`Strata-Boole` first, in dependency order, then `verus-lean`. You do **not**
+need to build the siblings separately beforehand. (They are local *path*
+dependencies — nothing is downloaded, and each one's build artifacts land in
+its own `.lake/`.)
 
 The compiled binary can be found at `.lake/build/bin/verus-lean`.
 
@@ -32,7 +39,7 @@ or perhaps even better, `ln -s .lake/build/bin/verus-lean verus-lean`.)
 
 You can run the compiled `verus-lean` binary directly:
 ```
-./lake/build/bin/verus-lean boole <path/to/serialized_verus.json> [path/to/output.boole.st]
+.lake/build/bin/verus-lean boole <path/to/serialized_verus.json> [path/to/output.boole.st]
 ```
 Alternatively, you can use a Python script that works in concert with my verus fork.
 (The script assumes that this fork is on your `$PATH`, or is (symlinked) at the root level of the project.)
@@ -55,23 +62,29 @@ Use `tests/run_tests.sh` from the `verus-boogie` root:
 
 ### Repository layout
 
-By default, the script expects these three repos as siblings:
+By default, the script expects these repos as siblings:
 
 ```text
 <workspace>/
   verus/
   verus-boogie/
   Strata/
+  Strata-Boole/
 ```
 
 So from `verus-boogie`, it uses:
-- Verus repo at `../verus` (binary at `../verus/source/target-verus/release/verus`)
-- Strata repo at `../Strata`
+- Verus repo at `../verus` — the export front end; the binary at
+  `../verus/source/target-verus/release/verus` must be built from the `boogie`
+  branch, which carries the Lean JSON export and the `-V new-mut-ref` mode the
+  `--verus`/`--all` stages rely on
+- Strata repo at `../Strata` — the Core/DDM backend
+- Strata-Boole repo at `../Strata-Boole` — the Boole dialect and verifier; the
+  `--verify` stage runs `lake env lean` here, and the build links against it
 
 If your repos are not in this layout, you can override paths with env vars:
 
 ```bash
-VERUS_DIR=/path/to/verus STRATA_DIR=/path/to/Strata ./tests/run_tests.sh --all /path/to/file.rs
+VERUS_DIR=/path/to/verus STRATA_DIR=/path/to/Strata STRATA_BOOLE_DIR=/path/to/Strata-Boole ./tests/run_tests.sh --all /path/to/file.rs
 ```
 
 You can also override direct binaries if needed:
