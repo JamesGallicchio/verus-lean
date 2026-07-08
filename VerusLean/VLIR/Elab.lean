@@ -208,8 +208,11 @@ def UnaryOp.toTerm (u : UnaryOp) (e : Term) : CoreM Term := do
     | .ISize => let iSizeIdent := mkIdent `ISize; `(($e : $iSizeIdent))
     | .Char => let charIdent := mkIdent `Char; `(($e : $charIdent))
     | _ => `($e)
+  | .Length => `(($e).length)
   | .Trigger => `($e) -- Ignore trigger information when constructing terms
   | .Old => `($e) -- Pre-state marker is erased in Lean term elaboration
+  | .MutRefCurrent => `($e) -- Value-level identity: mutable state is tracked by renames
+  | .MutRefFuture => `($e) -- Post-state reads are rewritten to out names before elaboration
   | .Proj dt variant field _ _ =>
     dbg_trace s!"[Elab.lean]: UnaryOp.Proj: {dt} {variant} {field}"
     -- UnaryOp.Proj: Matching.life Arthropod legs
@@ -257,6 +260,7 @@ def BinaryOp.toTerm (b : BinaryOp) (lhs rhs : Term) : CoreM Term := do
   | .Inequality ineq => ineq.toTerm lhs rhs
   | .Arith arith _ => arith.toTerm lhs rhs
   | .Bitwise bitwise _ => bitwise.toTerm lhs rhs
+  | .Index => `($lhs[$rhs])
 
 def CallFun.toIdent : CallFun → CoreM (Lean.Ident)
   | CallFun.Fun i => i.toIdent

@@ -27,16 +27,61 @@ def shouldDropForLoopScaffoldingLocal (name : String) : Bool :=
 def isForLoopScaffoldingVar (name : String) : Bool :=
   name.startsWith "VERUS_" || name.startsWith "tmp" || name.startsWith "decrease"
 
-private def isOptionIsSomeCheck : Exp → Bool
+/-- For-loop ghost scaffolding lives in `VERUS_`-prefixed locals
+    (`VERUS_ghost_iter`, `VERUS_old_snap`, `VERUS_old_iter`, …).  Any
+    expression reading one is iterator bookkeeping: the recovered `for`
+    drops the ghost state, so such references cannot lower and the
+    surrounding clause/statement is scaffolding to drop. -/
+partial def expRefsVERUSVar : Exp → Bool
+  | .Const _ _ => false
+  | .Var x => x.startsWith "VERUS_"
+  | .Call _ _ args => args.any expRefsVERUSVar
+  | .CallLambda body args => expRefsVERUSVar body || args.any expRefsVERUSVar
+  | .StructCtor _ fields => fields.any (fun (_, e) => expRefsVERUSVar e)
+  | .EnumCtor _ _ data => data.any (fun (_, e) => expRefsVERUSVar e)
+  | .TupleCtor _ data => data.any expRefsVERUSVar
+  | .Unary _ e => expRefsVERUSVar e
+  | .Binary _ e1 e2 => expRefsVERUSVar e1 || expRefsVERUSVar e2
+  | .If c t f => expRefsVERUSVar c || expRefsVERUSVar t || expRefsVERUSVar f
+  | .Bind (.Let _ _ e) body => expRefsVERUSVar e || expRefsVERUSVar body
+  | .Bind (.Quant _ _ trigs) body =>
+    trigs.any (fun g => g.any expRefsVERUSVar) || expRefsVERUSVar body
+  | .Bind (.Lambda _) body => expRefsVERUSVar body
+  | .Bind (.Choose _ pred) body => expRefsVERUSVar pred || expRefsVERUSVar body
+  | .ArrayLiteral elems => elems.any expRefsVERUSVar
+  | .MatchBlock (scrut, _) body => expRefsVERUSVar scrut || expRefsVERUSVar body
+
+/-- Statement-level view of `expRefsVERUSVar` (reads only; an assignment
+    *to* a `VERUS_` local is judged by its name, not by this predicate). -/
+def stmReadsVERUSVar : Stm → Bool
+  | .Assign _ _ rhs _ => expRefsVERUSVar rhs
+  | .Call _ _ args => args.any expRefsVERUSVar
+  | .Assert e | .AssertCompute e | .AssertLean e | .Assume e => expRefsVERUSVar e
+  | .AssertBitVector reqs enss => reqs.any expRefsVERUSVar || enss.any expRefsVERUSVar
+  | .Return e? => e?.map expRefsVERUSVar |>.getD false
+  | .If cond _ _ => expRefsVERUSVar cond
+  | _ => false
+
+private partial def isOptionIsSomeCheck : Exp → Bool
   | .Unary (.IsVariant dt "Some") _ =>
     let s := dt.toString.toLower
     s.endsWith "option" || s.contains "option"
+  -- The iterator exit test carries a trivial guard conjunct
+  -- (`isSome(...) && true`) and may sit under box coercions.
+  | .Binary .And c (.Const (.Bool true) _) => isOptionIsSomeCheck c
+  | .Unary (.Box _) e => isOptionIsSomeCheck e
+  | .Unary (.Unbox _) e => isOptionIsSomeCheck e
   | _ => false
 
-private def isOptionSomeProj : Exp → Bool
+private partial def isOptionSomeProj : Exp → Bool
   | .Unary (.Proj dt "Some" "0" _ _) _ =>
     let s := dt.toString.toLower
     s.endsWith "option" || s.contains "option"
+  -- The projection may sit under box coercions or a pass-through let
+  -- binding whose body just returns the bound variable (`let t := Some_0(…) in t`).
+  | .Unary (.Box _) e | .Unary (.Unbox _) e | .Unary .Trigger e => isOptionSomeProj e
+  | .Bind (.Let v _ rhs) (.Var v') => v == v' && isOptionSomeProj rhs
+  | .Bind (.Let v _ rhs) (.Unary (.Unbox _) (.Var v')) => v == v' && isOptionSomeProj rhs
   | _ => false
 
 private partial def flattenBody : Stm → List Stm
@@ -183,7 +228,22 @@ where
           go needed' (s :: keptRev) rest
         else
           go needed keptRev rest
-    go [] [] stms.reverse
+    -- Forward taint pass first: a statement reading `VERUS_*` ghost state
+    -- (or a local computed from it) is iterator bookkeeping the recovered
+    -- loop cannot lower, and the names it assigns are tainted in turn
+    -- (`tmp5 := Std_specs_Iter_trigger_peek_implications(…); assert tmp5`).
+    let taintFiltered :=
+      let step := fun (acc : List Stm × List String) (s : Stm) =>
+        let (keptRev, tainted) := acc
+        let readsTainted := (stmtRefsLocal s).any (fun n =>
+          n.startsWith "VERUS_" || tainted.contains n)
+        if readsTainted then
+          match stmtAssignedVarLocal? s with
+          | some n => (keptRev, n :: tainted)
+          | none => (keptRev, tainted)
+        else (s :: keptRev, tainted)
+      (stms.foldl step ([], [])).1.reverse
+    go [] [] taintFiltered.reverse
 
 structure ForLoopRangeInfo where
   startExp : Exp
@@ -268,9 +328,15 @@ where
 private def processForLoopInvariants (loopVar : String) (invs : List LoopInvariant)
     : List LoopInvariant :=
   invs.filterMap fun inv =>
-    if isGhostIteratorInvariant inv.body then none
+    -- Rewrite first: a *user* invariant arrives as
+    -- `let i := (if isSome(peek …ghost…) then Some_0(…) else arbitrary()) in P`
+    -- and the rewrite replaces the ghost-peek binding with the recovered loop
+    -- binder, eliminating the ghost references.  What still mentions the
+    -- ghost-iterator API or `VERUS_*` state after rewriting is synthesized
+    -- iterator bookkeeping the recovered loop drops.
+    let rewritten := rewriteForLoopInvariant loopVar inv.body
+    if isGhostIteratorInvariant inv.body || expRefsVERUSVar rewritten then none
     else
-      let rewritten := rewriteForLoopInvariant loopVar inv.body
       some { inv with body := rewritten }
 
 private def processForLoopDecrease (loopVar : String) (decrease : List Exp) : List Exp :=
@@ -340,7 +406,22 @@ private def filterForLoopPreamble (stms : List Stm) : List Stm :=
         go needed' (s :: keptRev) rest
       else
         go needed keptRev rest
-  go [] [] stms.reverse
+  -- Forward taint pass first: iterator-setup statements read the `VERUS_*`
+  -- ghost state the recovered loop drops (`Std_specs_Iter_new(VERUS_iter,…)`)
+  -- — they cannot lower regardless of callee name, and locals computed from
+  -- them are scaffolding in turn.
+  let taintFiltered :=
+    let step := fun (acc : List Stm × List String) (s : Stm) =>
+      let (keptRev, tainted) := acc
+      let readsTainted := (stmtRefs s).any (fun n =>
+        n.startsWith "VERUS_" || tainted.contains n)
+      if readsTainted then
+        match stmtAssignedVar? s with
+        | some n => (keptRev, n :: tainted)
+        | none => (keptRev, tainted)
+      else (s :: keptRev, tainted)
+    (stms.foldl step ([], [])).1.reverse
+  go [] [] taintFiltered.reverse
 
 structure RecoveredForLoop where
   preStms : List Stm

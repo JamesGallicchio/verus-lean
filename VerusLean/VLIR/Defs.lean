@@ -202,6 +202,8 @@ inductive UnaryOp where
   | BitNot (width? : Option Nat)
   /-- Force integer value into range given by IntRange (e.g. by using mod). -/
   | Clip (range : IntRange) (truncate : Bool)
+  /-- Length of an array or slice. Both lower to sequence length in Boole. -/
+  | Length
   /-
   StrLen, // Str Slices
   StrIsAscii, // strslice_is_ascii
@@ -227,6 +229,20 @@ inductive UnaryOp where
     passes can avoid rewriting pre-state variables into post-state outputs.
   -/
   | Old
+  /--
+    Reads the current value of a `&mut` place (Verus `MutRefCurrent`).
+    Value-level identity in Boole's model: mutable state is tracked through
+    explicit renames, so "the value now" is the operand itself.
+  -/
+  | MutRefCurrent
+  /--
+    Reads the prophesied final value of a `&mut` place (Verus `MutRefFuture`).
+    In a procedure's `ensures` this denotes the post-state of a mut parameter;
+    `execFnToBoole` rewrites those reads to the `<n>_out` output name before
+    name substitution. Elsewhere it is value-level identity, like
+    `MutRefCurrent`.
+  -/
+  | MutRefFuture
   /--
     A field projection out of a structure. For example `p.fst`.
 
@@ -295,6 +311,8 @@ inductive BinaryOp
   | Arith (op : ArithOp) (mode : Mode)
   /-- Bitwise operations. Overflow checking is done when `mode = Exec`. -/
   | Bitwise (op : BitwiseOp) (mode : Mode)
+  /-- Array/slice indexing. The bounds-check payload is already discharged by Verus. -/
+  | Index
 deriving Repr, Inhabited, Hashable, BEq
 
 inductive Quant where
@@ -421,12 +439,14 @@ inductive LValue where
   | Proj (base : LValue) (dt : Ident) (variant : String) (field : String)
       (getVariant : Bool) (check : VariantCheck)
   | Proj' (base : LValue) (size : Nat) (field : Nat)
-deriving Repr, Inhabited, DecidableEq, Hashable
+  | Index (base : LValue) (index : Exp)
+deriving Repr, Inhabited, Hashable
 
 def LValue.baseVar? : LValue → Option String
   | .Var name => some name
   | .Proj base _ _ _ _ _ => base.baseVar?
   | .Proj' base _ _ => base.baseVar?
+  | .Index base _ => base.baseVar?
 
 /--
   Flattened Verus statements.

@@ -940,6 +940,10 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
     match ← numBinopEmit domain (.Inequality cmp) l r with
     | some result => return result
     | none => throw s!"unsupported comparison: {repr cmp} in domain {repr domain}"
+  | .Binary .Index lhs rhs => do
+    let seqExpr ← expToBoole env bound none lhs
+    let intIdx ← expToBoole env bound (some .Int) rhs
+    coerceIndexedResult env bound expected? lhs (Bld.seqSelect seqExpr intIdx)
   | .Binary op lhs rhs => do
     -- Run arith in `int` when the context demands int or any subtree
     -- mixes int and bv operands. Otherwise bv overflow corrupts the
@@ -1155,6 +1159,9 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
           if srcInfo?.isSome then none
           else targetInfo?.map (fun (w, signed) => bitTypOfInfo w signed)
         expToBoole env bound innerExpected? e
+      | .Length =>
+        let seqExpr ← expToBoole env bound none e
+        coerceNumeric (some .int) (expected?.bind numKindOfTyp?) (seqLength seqExpr)
       | _ => expToBoole env bound expected? e
     match op with
     | .Clip _ _ => return x
@@ -1182,9 +1189,19 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
       -- In both cases the correct Boole expression is the inner one.
       return x
     | .Trigger => return x
+    | .MutRefCurrent =>
+      -- Value of a `&mut` place now: the operand itself, under the explicit
+      -- mutable-state renames the translator maintains.
+      return x
+    | .MutRefFuture =>
+      -- Post-state reads of mut params are rewritten to `<n>_out` before
+      -- lowering (`substMutRefFutureOuts`); a future read that reaches here
+      -- is loop-machinery ghost state whose value the renames already track.
+      return x
     | .Box _ => return x
     | .Unbox _ => return x
     | .HasType _ => return x
+    | .Length => return x
     | .Proj dt variant field _getVariant check => do
       if check == .Yes then
         throw s!"unsupported checked field projection: {dt}::{variant}.{field}"
@@ -1777,6 +1794,11 @@ private partial def lowerProjectedAssignRhsToRoot
       else tupleProjChain size i container)
     let updatedContainer ← tupleCtorChain args
     lowerProjectedAssignRhsToRoot env projLayouts base updatedContainer
+  | .Index base index, rhs => do
+    let container ← lvalueReadExprToBoole env base
+    let intIdx ← expToBoole env [] (some .Int) index
+    let updatedContainer := Bld.seqUpdate container intIdx rhs
+    lowerProjectedAssignRhsToRoot env projLayouts base updatedContainer
 
 /-- Collect base-variable names that appear as the *container* argument of
     a `Std_specs_Core_index_set(container, index, value)` call anywhere in
@@ -2227,7 +2249,8 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
       let lenInvs ← if cfg.fixedArrayLengths then do
           let modifiedNames :=
             ((collectSetVars (.Block loop.userBody)).map (·.name)
-              ++ collectIndexSetTargets (.Block loop.userBody)).eraseDups
+              ++ collectIndexSetTargets (.Block loop.userBody)
+              ++ collectProjectedAssignBases (.Block loop.userBody)).eraseDups
           modifiedNames.filterMapM fun v =>
             match (envWithBinder.get? v).bind arrayFixedLen? with
             | some n => do
@@ -2248,7 +2271,7 @@ partial def tryForLoopRecovery (env : VarEnv) (projLayouts : List ProjLayout)
       -- our prelude; lowering it would surface as an unresolved fvar.
       let measureExpr? ← match loop.decrease.head? with
         | some e =>
-          if expContainsGhostPervasiveCall e then pure none
+          if expContainsGhostPervasiveCall e || ForLoop.expRefsVERUSVar e then pure none
           else do
             let ce0 ← expToBooleFlat envWithBinder none e
             let srcKind? := inferNumKind envWithBinder [] e
@@ -2928,6 +2951,15 @@ private def synthesizeVecFromElemBody (f : ExecFn) : BuildM BBlock := do
     pure (guardExclusiveBvForLoop nTy zeroBv nExpr loopStmt)
   pure (BooleDDM.Block.block default (ann #[initStmt, loopStmt]))
 
+/-- Exec collection types whose length is a Rust `usize`: `Vec<T>` and
+    dynamically-sized slices (`.Array t none`), through decorations (`&`,
+    `&mut`, `Box`, …).  Spec `Seq<T>` is genuinely unbounded and deliberately
+    does not match. -/
+private partial def isUsizeLenSeqTyp : Typ → Bool
+  | .Decorated _ t => isUsizeLenSeqTyp t
+  | .Array _ none => true
+  | t => (vecElemTyp? t).isSome
+
 def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (sfMap : SpecFnMap) (f : ExecFn) : BuildM BCmd := do
   let fnName := identToBoole f.name
@@ -2952,6 +2984,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   -- in `stmToBoole`, so the mutation appears in the emitted Boole even though
   -- `collectSetVars` doesn't see it in the source AST.
   let mutatedNames := assignedInBody ++ collectIndexSetTargets f.body
+    ++ collectProjectedAssignBases f.body
   let byValMutDecls : List (String × String × Typ) :=
     f.inputs.filterMap (fun (n, t) =>
       if mutRefInputNames.contains n then none
@@ -2965,7 +2998,13 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
     let b := stripDecreaseArtifacts (expandReveals sfMap (applyNameSubstsStm mutRenames f.body))
     let b := normalizeBody isPureBooleBuiltinCallName b
     match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s
-  let rewrittenEnsures := f.ensures.map (applyNameSubstsExp mutRenames)
+  -- `final(p)` reads (`MutRefFuture`) denote the post-state of a `&mut`
+  -- parameter: rewrite them to the `_out` output first, then apply the name
+  -- substitutions (which stop at `old(...)`, keeping pre-state reads on the
+  -- input name).
+  let mutFutureRenames := mutOutDecls.map (fun (n, outName, _) => (n, outName))
+  let rewrittenEnsures := f.ensures.map (fun e =>
+    applyNameSubstsExp mutRenames (substMutRefFutureOuts mutFutureRenames e))
   let hasRet := match f.returnType with | .Unit | .Empty => false | _ => true
   let retDecls := if hasRet then [(f.retName, f.returnType)] else []
   let mutOutputDecls := mutOutDecls.map (fun (_, outName, payloadTy) => (outName, payloadTy))
@@ -3076,6 +3115,20 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
                 pure (some (assumeStmt "" (Synth.fixedArrayLenFact pExpr n)))
               | none => pure none
           else pure ([] : List BStmt)
+        -- Exec collections (`Vec<T>`, dynamically-sized slices) have `usize`
+        -- lengths in Rust — a bound the unbounded `Sequence` lowering loses.
+        -- Assumed at entry, never `requires`: the fact is a type invariant,
+        -- true at every call site, so it must not mint caller obligations.
+        -- Bodies rely on it to discharge the increment overflow guards Verus
+        -- emits for index loops (`assert i + 1 <= usize::MAX`).  Spec `Seq<T>`
+        -- is genuinely unbounded and deliberately does not match.
+        let seqLenBoundAssumes ← if (← getSynthConfig).fixedArrayLengths then
+            f.inputs.filterMapM fun (name, ty) =>
+              if isUsizeLenSeqTyp ty then do
+                let pExpr ← resolveVar name
+                pure (some (assumeStmt "" (Synth.seqLenUsizeBoundFact pExpr)))
+              else pure none
+          else pure ([] : List BStmt)
         -- Init mutable-out variables from inputs
         let mutOutInits ← mutOutDecls.mapM (fun (inName, outName, payloadTy) => do
           let inExpr ← resolveVar inName
@@ -3089,7 +3142,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
           pure (setStmtTyped localTy (sanitizeVarName localName) inExpr))
         let retVar? := if hasRet then some (f.retName, f.returnType) else none
         let bodyStmts ← stmToBoole envLocal projLayouts mutArgMap retVar? fnName rewrittenBody
-        let allStmts := localStmts ++ fixedArrayLenAssumes ++ mutOutInits ++ byValInits ++ bodyStmts
+        let allStmts := localStmts ++ fixedArrayLenAssumes ++ seqLenBoundAssumes ++ mutOutInits ++ byValInits ++ bodyStmts
         let body := BooleDDM.Block.block default (ann allStmts.toArray)
         pure (specElts, body)
     pure (specElts, body, decrAnn)

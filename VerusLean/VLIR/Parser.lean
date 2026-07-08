@@ -275,12 +275,25 @@ def pathedNameFromJson (j : Json) (pathKey : String := "path") : m Ident := do
     | .obj _ =>
       -- Some Verus-generated names (notably anonymous closures) encode
       -- `krate: null`. Keep parsing by assigning a stable pseudo-namespace.
-      let krate ←
+      -- `krate` is upstream's `CrateId`: unit variants (`Internal`/`Core`/`Alloc`/`Vstd`)
+      -- serialize as plain strings, while `Id(name, _)` serializes as `{"Id": [name, hash]}`.
+      -- A bare string or `null` is also accepted (the `Option Ident` encoding).
+      let krateJson ←
         match pathVal.getObjVal? "krate" with
-        | .ok (.str s) => pure s
-        | .ok .null => pure "anonymous"
-        | .ok other => throw s!"expected string or null `krate`, got {other}"
-        | .error _ => pure "anonymous"
+        | .ok v => pure v
+        | .error _ => pure Json.null
+      let krate ←
+        match krateJson with
+        | .str s => pure (if s == "Internal" then "anonymous" else s)
+        | .null => pure "anonymous"
+        | .obj _ =>
+          match krateJson.getObjVal? "Id" with
+          | .ok (.arr a) =>
+            match a[0]? with
+            | some (Json.str name) => pure name
+            | _ => throw s!"expected crate name in `krate` Id array, got {krateJson}"
+          | _ => throw s!"unexpected `krate` object, got {krateJson}"
+        | other => throw s!"expected string, null, or CrateId object `krate`, got {other}"
       let segsJson ← pathVal.getArrUnderKeyM "segments"
       let segs ← segsJson.mapM Json.getStrM
       pure (krate, segs.toList)
@@ -442,7 +455,12 @@ partial def Typ.fromJson (j : Json) : m Typ := do
   | .ok "ISize" => return .ISize
   | .ok _ => throw s!"unsupported primitive type string: {j}"
   | .error _ =>
-    match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam", "Projection", "FnDef", "Float"] with
+    match ← j["Primitive", "Int", "ConstInt", "Datatype", "Boxed", "Decorate", "Air", "Bool", "SpecFn", "TypParam", "Projection", "FnDef", "Float", "MutRef"] with
+    | ("MutRef", obj) =>
+      -- The dedicated `&mut T` type maps to the `Decorate(.MutRef, _, T)`
+      -- representation so both encodings lower identically downstream.
+      let ty ← Typ.fromJson obj
+      return .Decorated .MutRef ty
     | ("Primitive", obj) =>
       let t ← obj.getArrM
       match t[0]? with
@@ -755,9 +773,11 @@ def UnaryOp.fromJson (j : Json) : m UnaryOp := do
   match j.getStr? with
   | .ok "Not"    => return .Not
   | .ok "BitNot" => throw "BitNot not yet implemented"
-  | .ok s => throw s!"[UnaryOp.fromJson?]: Expected one of \{ Not, BitNot, Clip }, got {s}"
+  | .ok "MutRefCurrent" => return .MutRefCurrent
+  | .ok "MutRefFuture" => return .MutRefFuture
+  | .ok s => throw s!"[UnaryOp.fromJson?]: Expected one of \{ Not, BitNot, Clip, MutRefCurrent, MutRefFuture }, got {s}"
   | .error _ =>
-    match ← j["BitNot", "Trigger", "Clip", "InferSpecForLoopIter"] with
+    match ← j["BitNot", "Trigger", "Clip", "InferSpecForLoopIter", "MutRefFuture", "Length"] with
     | ("BitNot", obj) => -- Try seeing if "BitNot" has a width
       let width ← widthFromJson obj
       return .BitNot width
@@ -770,6 +790,14 @@ def UnaryOp.fromJson (j : Json) : m UnaryOp := do
       -- Verus hint wrapper used around expressions in some loop contexts.
       -- It does not change expression semantics for our translation.
       return .Trigger
+    | ("MutRefFuture", _) =>
+      -- Object form carries the surface-syntax source name (e.g. "Final");
+      -- the semantics is the same future-value read either way.
+      return .MutRefFuture
+    | ("Length", _) =>
+      -- Verus distinguishes array vs slice in the payload; both are modeled as
+      -- sequences by the Boole backend, so the same VLIR op suffices here.
+      return .Length
     | _ => throw s!"[UnaryOp.fromJson?]: Expected one of \{ BitNot, Trigger }, got {j}"
 
 /-- Parse Verus field-projection check metadata. -/
@@ -791,7 +819,14 @@ def VariantCheck.fromJson (j : Json) : m VariantCheck := do
   -- TODO: Require the parser state to refer to data types?
 -/
 def UnaryOp.oprFromJson (j : Json) : m UnaryOp := do
-  match ← j["Field", "IsVariant", "Box", "Unbox", "HasType", "CustomErr"] with
+  match j.getStr? with
+  | .ok "AutoDecreases" | .ok "AutoLoopEnsures" =>
+    -- Verus metadata markers used while constructing/checking loops; they
+    -- unwrap to the inner expression in Verus' AIR lowering.
+    return .Trigger
+  | .ok s => throw s!"unsupported unaryop string: {s}"
+  | .error _ =>
+  match ← j["Field", "IsVariant", "Box", "Unbox", "HasType", "CustomErr", "HasResolved", "ProofNote", "ToDyn", "AutoDecreases", "AutoLoopEnsures"] with
   | ("Field", obj) =>
     try
       let dt ← pathedNameFromJson (pathKey := "Path") <| ← obj.getObjValM "datatype"
@@ -851,6 +886,18 @@ def UnaryOp.oprFromJson (j : Json) : m UnaryOp := do
   | ("CustomErr", _) =>
     -- Error payload wrapper; no semantic effect on the expression itself.
     return .Trigger
+  | ("HasResolved", _) =>
+    -- Type-resolution marker (Verus-internal); erase to identity on the operand.
+    return .Trigger
+  | ("ProofNote", _) =>
+    -- Proof-annotation marker; no semantic effect on the expression.
+    return .Trigger
+  | ("ToDyn", _) =>
+    -- `dyn` coercion marker; erase to identity on the operand.
+    return .Trigger
+  | ("AutoDecreases", _) | ("AutoLoopEnsures", _) =>
+    -- See the string-form arm above.
+    return .Trigger
   | _ => throw s!"unsupported unaryop: {j}"
 
 def BinaryOp.fromJson (j : Json) : m BinaryOp :=
@@ -864,7 +911,7 @@ def BinaryOp.fromJson (j : Json) : m BinaryOp :=
   | .ok s => throw s!"[BinaryOp.fromJson?]: Expected one of \{ And, Or, Xor, Implies, Ne }, got {s}"
   | .error _ => do
     -- Try one of the object ops instead
-    match ← j["Eq", "Inequality", "Bitwise", "Arith", "HeightCompare"] with
+    match ← j["Eq", "Inequality", "Bitwise", "Arith", "HeightCompare", "Index"] with
     | ("Eq", obj)         => return .Eq (← Mode.fromJson obj)
     | ("Inequality", obj) => return .Inequality (← InequalityOp.fromJson obj)
     | ("Bitwise", obj) =>
@@ -885,6 +932,11 @@ def BinaryOp.fromJson (j : Json) : m BinaryOp :=
     | ("HeightCompare", obj) =>
       let strictlyLt ← obj.getBoolUnderKeyM "strictly_lt"
       return .Inequality (if strictlyLt then .Lt else .Le)
+    | ("Index", _) =>
+      -- Verus carries `[Array|Slice, BoundsCheck]`; both lower to
+      -- Sequence.select in Boole, and Verus has already generated the
+      -- relevant bounds obligations.
+      return .Index
     | _ => throw s!"unsupported binary op: {j}"
 
 def Quant.fromJson (j : Json) : m Quant := do
@@ -1211,6 +1263,13 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
   | ("UnaryOpr", obj) =>
     -- A complex unary object should be an array with an op and a data element
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
+    -- `HasResolved(t, e)` is Verus's bool-valued mut-ref resolution predicate,
+    -- assumed at control points by the prophecy machinery. Boole's model has
+    -- no resolution state, so the predicate is trivially `true` here; that
+    -- only weakens assumptions (and discharges resolution obligations that
+    -- Boole does not track), never introduces a fact.
+    if (arr[0].getObjVal? "HasResolved").isOk then
+      return .Const (.Bool true) .Bool
     let retType ← getTyp
     -- dbg_trace s!"UnaryOpr arr: {arr}"
     let op  ← UnaryOp.oprFromJson arr[0]
@@ -1377,17 +1436,30 @@ partial def lvalueFromExp : Exp → Option LValue
   | .Unary (.Proj' size field) e =>
     lvalueFromExp e |>.map (fun base =>
       .Proj' base size field)
+  | .Binary .Index base index =>
+    lvalueFromExp base |>.map (fun base =>
+      .Index base index)
   | .Unary (.Box _) e
   | .Unary (.Unbox _) e
   | .Unary (.Clip _ _) e
   | .Unary .Old e
   | .Unary .Trigger e
+  -- Assigning through a `&mut` place (`*x = ...`) targets the place itself;
+  -- the mut-ref value wrappers are transparent on the l-value side.
+  | .Unary .MutRefCurrent e
+  | .Unary .MutRefFuture e
   | .Unary (.HasType _) e => lvalueFromExp e
   | _ => none
 
 def Dest.fromJson (j : Json) : VParser (LValue × Typ) := do
   let e ← fromJsonSpanned j Exp.fromJson
-  let ty ← getTyp
+  -- The dest's type is the node's own `typ` field.  The parser's typ state
+  -- holds whichever child parsed last — for an index place (`a[i] = …`)
+  -- that is the *index*, whose `usize` would mistype the stored value.
+  let ty ←
+    match j.getObjVal? "typ" with
+    | .ok typObj => Typ.fromJson typObj
+    | .error _ => getTyp
   match lvalueFromExp e with
   | some lhs => return (lhs, ty)
   | none => throw s!"Expected an l-value expression, got {e}"
@@ -1434,7 +1506,14 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     "OpenInvariant", "ClosureInner", "Block", "Fuel", "RevealString", "Air"] with
 
   | ("Call", obj) =>
-    let fnName ← pathedNameFromNameJson obj (nameKey := "fun")
+    -- `fun` is a `CallTarget`: `{"Fun": <fun>}` wraps a bare `Fun` (with a `path`),
+    -- or `"AssumeExternal"`. Unwrap the `Fun` tag before reading the path; a
+    -- bare `Fun` object without the `CallTarget` wrapper is read directly.
+    let funJson ← obj.getObjValM "fun"
+    let fnName ←
+      match funJson.getObjVal? "Fun" with
+      | .ok funObj => pathedNameFromJson funObj "path"
+      | .error _ => pathedNameFromJson funJson "path"
     -- Verus records the concrete impl a trait-method call resolves to in
     -- `resolved_method`. Dispatch to that impl only when it is an emitted
     -- in-crate declaration; external trait impls stay on the existing

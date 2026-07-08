@@ -350,12 +350,15 @@ partial def inferComparableTyp? (env : VarEnv) (bound : BoundEnv) : Exp → Opti
   | .Unary (.Unbox t) _ => some t
   | .Unary .Trigger e => inferComparableTyp? env bound e
   | .Unary .Old e => inferComparableTyp? env bound e
+  | .Unary .Length _ => some .Int
   | .Unary (.HasType _) e => inferComparableTyp? env bound e
   | .Unary (.Proj dt variant field _ _) _ =>
     let projField := projFieldNameOf dt variant field
     lookupFnRetTypeFull env (datatypeDestructorNameOf dt projField)
   | .Unary (.Proj' size field) e =>
     (inferComparableTyp? env bound e).bind (tupleFieldTyp? size field)
+  | .Binary .Index container _ =>
+    (inferComparableTyp? env bound container).bind arrayElemTyp?
   | .Unary (.Clip range _) _ =>
     match range with
     | .Int => some .Int  | .Nat => some .Nat
@@ -454,6 +457,8 @@ def inferBitInfo (env : VarEnv) (bound : BoundEnv) (e : Exp) : Option (Nat × Bo
   | .Unary (.Clip .Nat _) _ => none
   | .Unary (.Proj' size field) e =>
     (inferComparableTyp? env bound e).bind (tupleFieldTyp? size field) |>.bind bitInfoOfTyp
+  | .Binary .Index container _ =>
+    (inferComparableTyp? env bound container).bind arrayElemTyp? |>.bind bitInfoOfTyp
   | .Binary (.Bitwise (.Shl w _) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Binary (.Bitwise (.Shr w) _) _ _ => if isSupportedBvWidth w then some (w, false) else none
   | .Unary _ e => inferBitInfo env bound e

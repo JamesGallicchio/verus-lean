@@ -386,18 +386,32 @@ run_verus_export() {
   out_json_norm_alt_tmp="$tmp_dir/${out_base//-/_}.json"
   set +e
   if $verbose; then
-    run_cmd_quiet_in_dir "$tmp_dir" "$VERUS_BIN" --export-lean-all "$file"
+    run_cmd_quiet_in_dir "$tmp_dir" "$VERUS_BIN" -V new-mut-ref --export-lean-all "$file"
     rc=$?
   else
     # Quiet mode: suppress Verus chatter but still surface its
     # "verification results:: N verified, M errors" summary line.
-    verus_out="$( (cd "$tmp_dir" && "$VERUS_BIN" --export-lean-all "$file") 2>&1 )"
+    verus_out="$( (cd "$tmp_dir" && "$VERUS_BIN" -V new-mut-ref --export-lean-all "$file") 2>&1 )"
     rc=$?
     printf '%s\n' "$verus_out" | grep -E 'verification results::' || true
   fi
   set -e
   if [ $rc -ne 0 ] && $verbose; then
     echo "Verus exited non-zero for $base; continuing if JSON was produced."
+  fi
+  # `-V new-mut-ref` requires postconditions to disambiguate mut-ref derefs
+  # with old()/final(); sources using the legacy bare `*y` syntax fail to
+  # export under it, so retry those without the flag.
+  if [ ! -f "$out_json_alt_tmp" ] && [ ! -f "$out_json_tmp" ] && \
+     [ ! -f "$out_json_norm_alt_tmp" ] && [ ! -f "$out_json_norm_tmp" ]; then
+    set +e
+    if $verbose; then
+      run_cmd_quiet_in_dir "$tmp_dir" "$VERUS_BIN" --export-lean-all "$file"
+    else
+      verus_out="$( (cd "$tmp_dir" && "$VERUS_BIN" --export-lean-all "$file") 2>&1 )"
+      printf '%s\n' "$verus_out" | grep -E 'verification results::' || true
+    fi
+    set -e
   fi
   if [ -f "$out_json_alt_tmp" ]; then
     mv -f "$out_json_alt_tmp" "$out_json_final"

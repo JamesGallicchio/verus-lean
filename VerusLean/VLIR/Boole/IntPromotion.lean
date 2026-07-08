@@ -77,6 +77,7 @@ private def callFunNameIs (fn : CallFun) (p : Ident → Bool) : Bool :=
 
 private def isLengthExp : Exp → Bool
   | .Call fn _ _ => callFunNameIs fn isLengthCallName
+  | .Unary .Length _ => true
   | .Unary (.Box _) e | .Unary (.Unbox _) e | .Unary (.Clip _ _) e =>
     isLengthExp e
   | _ => false
@@ -304,6 +305,9 @@ mutual
     | .ExtEq _ _ =>
       let s := visitExpAux s shadowed .safe a
       visitExpAux s shadowed .safe b
+    | .Index =>
+      let s := visitExpAux s shadowed .safe a
+      visitExpAux s shadowed .seqIdx b
     | .And | .Or | .Xor | .Implies =>
       let s := visitExpAux s shadowed .safe a
       visitExpAux s shadowed .safe b

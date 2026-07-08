@@ -64,6 +64,30 @@ partial def collectSetVars : Stm → List LocalDeclInfo
   | .Block stms => stms.flatMap collectSetVars
   | _ => []
 
+/-- Base variables of non-init `Assign`s whose LHS is a *projected* place
+    (`a[i] = …`, `p.f = …`).  These mutate the base variable even though the
+    plain-LHS walk (`collectSetVars`) surfaces no name for them — the
+    projected-assign lowering rebuilds the container and stores it back to
+    the base.  Needed to shadow by-value `mut` parameters mutated through
+    indexing and to re-pin loop length invariants for index-mutated arrays. -/
+partial def collectProjectedAssignBases : Stm → List String
+  | .Assign lhs _ _ lhsIsInit =>
+    if lhsIsInit then []
+    else match lvalueVarName? lhs with
+      | some _ => []
+      | none => (lhs.baseVar?).toList
+  | .AssertQuery _ body => collectProjectedAssignBases body
+  | .DeadEnd stm => collectProjectedAssignBases stm
+  | .If _cond b1 b2 =>
+    collectProjectedAssignBases b1 ++ (b2.map collectProjectedAssignBases).getD []
+  | .Loop _isForLoop _label cond body _invs _decrease =>
+    (match cond with | some (s, _) => collectProjectedAssignBases s | none => [])
+      ++ collectProjectedAssignBases body
+  | .OpenInvariant stm => collectProjectedAssignBases stm
+  | .ClosureInner body => collectProjectedAssignBases body
+  | .Block stms => stms.flatMap collectProjectedAssignBases
+  | _ => []
+
 /-! ## Filtering -/
 
 def localShouldEmit (_hasForLoop : Bool) (decl : LocalDeclInfo) : Bool :=

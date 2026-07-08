@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORKING_LIST="${WORKING_LIST:-$ROOT_DIR/tests/working_tests.txt}"
+VERUS_DIR="${VERUS_DIR:-$ROOT_DIR/../verus}"
 STRATA_DIR="${STRATA_DIR:-$ROOT_DIR/../Strata}"
 BOOLE_PROGRAMS_DIR="${BOOLE_PROGRAMS_DIR:-$ROOT_DIR/tests/BoolePrograms}"
 # Set SKIP_STRATA_VERIFY=1 to skip Step 3 (faster regen-only run).
@@ -20,6 +21,13 @@ usage() {
 
 abs_existing_path() {
   local p="$1"
+  if [[ "$p" == ../verus/examples/* ]]; then
+    local rel="${p#../verus/}"
+    if [ -f "$VERUS_DIR/$rel" ]; then
+      echo "$(cd "$(dirname "$VERUS_DIR/$rel")" && pwd -P)/$(basename "$VERUS_DIR/$rel")"
+      return 0
+    fi
+  fi
   if [ -f "$p" ]; then
     echo "$(cd "$(dirname "$p")" && pwd -P)/$(basename "$p")"
     return 0
@@ -103,6 +111,12 @@ lean_wrapper_for_target() {
     rel="${target#$ROOT_DIR/tests/adopted_rust_verify_test/}"
     rel="${rel%.rs}"
     echo "$BOOLE_PROGRAMS_DIR/vlir-tests/tests__adopted_rust_verify_test__${rel}.lean"
+  elif [[ "$target" == "$VERUS_DIR/examples/guide/"* ]]; then
+    rel="$(basename "${target%.rs}")"
+    echo "$BOOLE_PROGRAMS_DIR/verus-examples/guide__${rel}.lean"
+  elif [[ "$target" == "$VERUS_DIR/examples/"* ]]; then
+    rel="$(basename "${target%.rs}")"
+    echo "$BOOLE_PROGRAMS_DIR/verus-examples/${rel}.lean"
   elif [[ "$target" == */verus/examples/guide/* ]]; then
     rel="$(basename "${target%.rs}")"
     echo "$BOOLE_PROGRAMS_DIR/verus-examples/guide__${rel}.lean"

@@ -150,17 +150,21 @@ end
 def substExps (subs : List (String × Exp)) (e : Exp) : Exp :=
   subs.foldl (fun acc (n, rhs) => substExp n rhs acc) e
 
-/-- Rename the base variable inside an LValue. Walks `.Proj` / `.Proj'`
-    spines down to the leaf `.Var src` and rewrites it to `.Var dst`.
-    Used by `substStm` only when the substitution `rhs` is itself a
-    `.Var dst` (i.e. variable rename) — substituting a non-Var Exp into
-    an LValue position is ill-typed, and inline-temps callers never need
-    that path because tmps don't appear as assignment targets. -/
-partial def renameLValueVar (src dst : String) : LValue → LValue
-  | .Var n => if n == src then .Var dst else .Var n
+/-- Substitute variables appearing inside an `LValue`.
+
+    The root of an l-value can only be renamed to another variable; replacing it
+    with an arbitrary expression would make the destination ill-typed. Index
+    expressions, however, are ordinary expressions and can receive the full
+    substitution. -/
+partial def substLValue (name : String) (rhs : Exp) : LValue → LValue
+  | .Var n =>
+    match rhs with
+    | .Var dst => if n == name then .Var dst else .Var n
+    | _ => .Var n
   | .Proj base dt v field gv ck =>
-    .Proj (renameLValueVar src dst base) dt v field gv ck
-  | .Proj' base size field => .Proj' (renameLValueVar src dst base) size field
+    .Proj (substLValue name rhs base) dt v field gv ck
+  | .Proj' base size field => .Proj' (substLValue name rhs base) size field
+  | .Index base index => .Index (substLValue name rhs base) (substExp name rhs index)
 
 partial def substStm (name : String) (rhs : Exp) : Stm → Stm
   | .Call fn typs args => .Call fn typs (args.map (substExp name rhs))
@@ -172,11 +176,7 @@ partial def substStm (name : String) (rhs : Exp) : Stm → Stm
   | .AssertLean e => .AssertLean (substExp name rhs e)
   | .Assume e => .Assume (substExp name rhs e)
   | .Assign lhs lhsTy e lhsIsInit =>
-    -- Rename only when `rhs` is a `.Var`: otherwise an LValue position
-    -- has no sensible substitution. See `renameLValueVar` doc comment.
-    let lhs' := match rhs with
-      | .Var dst => renameLValueVar name dst lhs
-      | _ => lhs
+    let lhs' := substLValue name rhs lhs
     .Assign lhs' lhsTy (substExp name rhs e) lhsIsInit
   | .DeadEnd stm => .DeadEnd (substStm name rhs stm)
   | .Return e => .Return (e.map (substExp name rhs))
@@ -201,6 +201,69 @@ def applyNameSubstsExp (subs : List (String × String)) (e : Exp) : Exp :=
 
 def applyNameSubstsStm (subs : List (String × String)) (s : Stm) : Stm :=
   subs.foldl (fun acc (src, dst) => renameStmVar src dst acc) s
+
+/-- Base variable a mut-ref value expression reads, looking through
+    value-preserving wrappers (`old`, triggers, box coercions, and the
+    mut-ref value ops themselves). -/
+partial def mutRefBaseVar? : Exp → Option String
+  | .Var x => some x
+  | .Unary .Old e => mutRefBaseVar? e
+  | .Unary .Trigger e => mutRefBaseVar? e
+  | .Unary (.Box _) e => mutRefBaseVar? e
+  | .Unary (.Unbox _) e => mutRefBaseVar? e
+  | .Unary .MutRefCurrent e => mutRefBaseVar? e
+  | .Unary .MutRefFuture e => mutRefBaseVar? e
+  | _ => none
+
+/-- Rewrite `MutRefFuture` reads of `&mut` parameters to their post-state
+    output names (`subs` maps in-name → out-name).  Applied to `ensures`
+    clauses, where the future value of a mut parameter is the procedure's out
+    value.  Future reads whose base is not in `subs` are left in place (they
+    lower as value-level identity).  Binders shadow: a bound name drops out of
+    `subs` within its scope. -/
+partial def substMutRefFutureOuts (subs : List (String × String)) : Exp → Exp
+  | .Const c ty => .Const c ty
+  | .Var x => .Var x
+  | .Call fn typs exps => .Call fn typs (exps.map (substMutRefFutureOuts subs))
+  | .CallLambda body args =>
+    .CallLambda (substMutRefFutureOuts subs body) (args.map (substMutRefFutureOuts subs))
+  | .StructCtor dt fields =>
+    .StructCtor dt (fields.map fun (n, e) => (n, substMutRefFutureOuts subs e))
+  | .EnumCtor dt variant data =>
+    .EnumCtor dt variant (data.map fun (n, e) => (n, substMutRefFutureOuts subs e))
+  | .TupleCtor size data => .TupleCtor size (data.map (substMutRefFutureOuts subs))
+  | .Unary .MutRefFuture e =>
+    match mutRefBaseVar? e with
+    | some n =>
+      match subs.find? (fun p => p.1 == n) with
+      | some (_, outName) => .Var outName
+      | none => .Unary .MutRefFuture (substMutRefFutureOuts subs e)
+    | none => .Unary .MutRefFuture (substMutRefFutureOuts subs e)
+  | .Unary op e => .Unary op (substMutRefFutureOuts subs e)
+  | .Binary op e1 e2 =>
+    .Binary op (substMutRefFutureOuts subs e1) (substMutRefFutureOuts subs e2)
+  | .If c t f =>
+    .If (substMutRefFutureOuts subs c) (substMutRefFutureOuts subs t)
+      (substMutRefFutureOuts subs f)
+  | .Bind bind body =>
+    match bind with
+    | .Let v ty e =>
+      let e' := substMutRefFutureOuts subs e
+      let subs' := subs.filter (fun p => p.1 != v)
+      .Bind (.Let v ty e') (substMutRefFutureOuts subs' body)
+    | .Quant q vars trigs =>
+      let subs' := subs.filter (fun p => vars.all (fun (v, _) => v != p.1))
+      let trigs' := trigs.map (fun g => g.map (substMutRefFutureOuts subs'))
+      .Bind (.Quant q vars trigs') (substMutRefFutureOuts subs' body)
+    | .Lambda vars =>
+      let subs' := subs.filter (fun p => vars.all (fun (v, _) => v != p.1))
+      .Bind (.Lambda vars) (substMutRefFutureOuts subs' body)
+    | .Choose vars pred =>
+      let subs' := subs.filter (fun p => vars.all (fun (v, _) => v != p.1))
+      .Bind (.Choose vars (substMutRefFutureOuts subs' pred)) (substMutRefFutureOuts subs' body)
+  | .ArrayLiteral elems => .ArrayLiteral (elems.map (substMutRefFutureOuts subs))
+  | .MatchBlock (scrut, ty) body =>
+    .MatchBlock (substMutRefFutureOuts subs scrut, ty) (substMutRefFutureOuts subs body)
 
 /-! ## Statement normalization passes -/
 

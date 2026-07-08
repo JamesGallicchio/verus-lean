@@ -34,6 +34,19 @@ Solver success is **not** used to classify faithfulness.
     0 skipped (Sequence) · 3 skipped (Strata gap: `crypto_noref`, `generics`,
     `guide/overflow`) · 0 skipped (solver timeout) · 16 skipped (solver
     unknown) · 0 known translator bugs · 0 failed**.
+  - `./tests/check_working_tests.sh` against the current Verus main replay
+    (`VERUS_DIR=/Users/zhangcheng/Desktop/CMU/spring26/project/verus-current-wt`,
+    rerun 2026-07-06 after accepting upstream mut-ref prophecy wrappers; full
+    verifier run on `9cb33cead`, generation-only rerun after rebasing to
+    `49b8806ca`):
+    **generation all working tests passed**.  Strata verify: **57 passed ·
+    0 skipped (Sequence) · 2 skipped (Strata gap) · 0 skipped (solver timeout) ·
+    6 skipped (solver unknown) · 0 known translator bugs · 12 failed**.  The
+    former missing-JSON failures were not Boole-generation failures after the
+    parser/lowering update: local copied `&mut` tests needed `final(...)` and
+    explicit `decreases`, while `../verus/examples/...` entries now resolve via
+    `VERUS_DIR` so this gate tests the selected Verus worktree's migrated
+    examples.
   - `./tests/check_regression_gate.sh` / `regress_examples.sh --all-suites`:
     **67 verify passed · 0 skipped (Sequence) · 6 skipped (Strata gap) ·
     1 known translator bug · 53 verify failures · 0 generation failures ·

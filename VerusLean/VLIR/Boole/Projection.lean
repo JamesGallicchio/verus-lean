@@ -94,5 +94,7 @@ def lvalueToExp : LValue → Exp
     .Unary (.Proj dt variant field getVariant check) (lvalueToExp base)
   | .Proj' base size field =>
     .Unary (.Proj' size field) (lvalueToExp base)
+  | .Index base index =>
+    .Binary .Index (lvalueToExp base) index
 
 end VerusLean.Boole.Projection

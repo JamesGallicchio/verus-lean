@@ -35,6 +35,15 @@ private def noLabel : StrataDDM.Ann (Option (BooleDDM.Label SourceRange)) Source
 def fixedArrayLenFact (e : BExpr) (n : Nat) : BExpr :=
   Bld.eq (Bld.seqLength e) (Bld.intConst (Int.ofNat n))
 
+/-- `Sequence.length(e) <= usize::MAX` — an exec collection's (`Vec<T>`,
+    slice) length is a `usize` in Rust, a bound the unbounded `Sequence`
+    lowering loses.  Emitted as a parameter entry `assume`; bodies rely on it
+    to discharge the increment overflow guards Verus emits for index loops.
+    The literal is `2^usizeBitWidth - 1` (`usizeBitWidth = 64`,
+    `Coercions.lean`). -/
+def seqLenUsizeBoundFact (e : BExpr) : BExpr :=
+  Bld.intLe (Bld.seqLength e) (Bld.intConst ((2 : Int) ^ 64 - 1))
+
 /-- `requires 0 <= idx && idx <= Sequence.length(seq)` for a synthesized
     recursion that walks a length-`idx` prefix of `seq` and selects
     `seq[idx-1]` in its step case (the `Seq::map` helper).  The synthesized

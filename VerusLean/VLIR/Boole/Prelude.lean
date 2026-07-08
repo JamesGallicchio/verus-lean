@@ -163,6 +163,7 @@ private partial def refsOfLValue : LValue → List String
     let ownRefs := if isVecTypeName dt then ["Vec"] else []
     (ownRefs ++ refsOfLValue base).eraseDups
   | .Proj' base _ _ => refsOfLValue base
+  | .Index base index => ("Sequence" :: refsOfLValue base ++ refsOfExp index).eraseDups
 
 private partial def refsOfStm : Stm → List String
   | .Call fn _ args =>

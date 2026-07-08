@@ -106,6 +106,7 @@ def UnaryOp.pp (op : UnaryOp) : String :=
   match op with
   | .Not => "!"
   | .BitNot _ => "!"
+  | .Length => "len "
   | .Old => "old "
   | .Proj dt variant field _ _ => s!"{dt}.{field} of {variant}"
   | .IsVariant dt variant => s!"is {dt}.{variant}: "
@@ -126,6 +127,7 @@ def BinaryOp.pp (op : BinaryOp) : String :=
   | .Inequality ineq => InequalityOp.pp ineq
   | .Arith arith _ => ArithOp.pp arith
   | .Bitwise bitwise _ => BitwiseOp.pp bitwise
+  | .Index => "[ ]"
 
 def Quant.pp (q : Quant) : String :=
   match q with
@@ -207,6 +209,8 @@ partial def LValue.pp : LValue → String
     s!"{LValue.pp base}.{dt}.{variant}.{field}"
   | .Proj' base size field =>
     s!"{LValue.pp base}.tuple{size}.{field}"
+  | .Index base index =>
+    s!"{LValue.pp base}[{Exp.pp index}]"
 
 def AssertQueryMode.pp : AssertQueryMode → String
   | .NonLinear => "NonLinear"
