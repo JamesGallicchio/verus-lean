@@ -27,9 +27,11 @@ private def noLabel : StrataDDM.Ann (Option (BooleDDM.Label SourceRange)) Source
 
 /-- `Sequence.length(e) == n` — the fixed-size-array length fact.  Verus's
     compile-time `[T; N]` length is lost when the type lowers to `Sequence T`;
-    this re-pins it.  Emitted (under `SynthConfig.fixedArrayLengths`) in three
-    shapes: a struct-field length axiom, a parameter entry `assume`, and a
-    mutated-in-loop `invariant`. -/
+    this re-pins it.  Emitted (under `SynthConfig.fixedArrayLengths`) as
+    boundary requires/ensures (including selector-path facts), parameter entry
+    `assume`s, mutated-in-loop `invariant`s, and the guarded `<fn>_ret_len`
+    axioms.  Never as a global datatype axiom: datatypes are total, so
+    `forall s : <dt> :: length(...) == n` would be unsound. -/
 def fixedArrayLenFact (e : BExpr) (n : Nat) : BExpr :=
   Bld.eq (Bld.seqLength e) (Bld.intConst (Int.ofNat n))
 

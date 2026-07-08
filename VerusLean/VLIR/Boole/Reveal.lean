@@ -50,15 +50,16 @@ def specFnIsGenericFull (f : SpecFn) : Bool :=
 def fnTypeParams (inputs : List (String × Typ)) (ret : Typ) : List String :=
   ((inputs.flatMap (fun (_, ty) => typTypeVars ty)) ++ typTypeVars ret).eraseDups
 
-/-- Lower a `reveal(f)` to a universally-quantified equality
-    `forall args. f(args) == body(args)`. Returns `none` for generic
-    spec fns (whose type vars Boole's quantifier can't bind) and for
-    spec fns without a body. -/
+/-- Lower a `reveal(f)` to `assume forall args. f(args) == body(args)`.
+    Returns `none` when there is no equation to state: generic fns (Boole
+    quantifiers can't bind type vars), body-less fns, and `arbitrary()`-bodied
+    fns (the body would name the undeclared `Pervasive_arbitrary`). -/
 def mkRevealAssume (f : SpecFn) : Option Stm :=
   if specFnIsGenericFull f then none
   else match f.body with
   | none => none
   | some body =>
+    if exprIsBareArbitrary body then none else
     let callArgs := f.inputs.map (fun (x, _) => Exp.Var x)
     let call := Exp.Call (.Fun f.name) [] callArgs
     let eq := Exp.Binary (.Eq .Spec) call body

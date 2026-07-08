@@ -527,6 +527,11 @@ structure SpecFn where
   -- Lets the translator pair the impl's resolved return type with the abstract
   -- declaration's associated-type projection (`<Self as Trait>::Assoc`).
   traitImplMethod? : Option Ident := none
+  /-- `recommends` clauses, from the spec fn's `decl.reqs` in the JSON.
+      Bodied spec fns emit them as Boole `requires`: Verus treats them as
+      unchecked hints, but Boole checks the body's definedness and needs
+      them. -/
+  recommends : List Exp := []
 deriving Repr, Inhabited, Hashable
 
 structure ProofFn where
@@ -562,6 +567,11 @@ structure ExecFn where
   /-- Trait method this exec fn implements, when it is a `TraitMethodImpl`.
       See `SpecFn.traitImplMethod?`. -/
   traitImplMethod? : Option Ident := none
+  /-- True when the JSON `kind` is `TraitMethodDecl`: the abstract trait-side
+      declaration of a method, as opposed to an impl or a free function.
+      Unreferenced bodiless ones are pruned
+      (`pruneUnreferencedTraitMethodDecls`). -/
+  isTraitMethodDecl : Bool := false
 deriving Repr, Inhabited, Hashable
 
 structure Struct where

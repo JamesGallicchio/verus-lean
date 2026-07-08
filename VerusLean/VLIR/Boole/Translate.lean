@@ -30,6 +30,7 @@ import VerusLean.VLIR.Boole.Query
 import VerusLean.VLIR.Boole.Reveal
 import VerusLean.VLIR.Boole.Signatures
 import VerusLean.VLIR.Boole.SupportEmit
+import VerusLean.VLIR.Boole.TraitResolve
 import VerusLean.VLIR.Boole.Synth
 import VerusLean.VLIR.Boole.VariantReqs
 
@@ -236,14 +237,19 @@ private def mkTypeArgsAnn (params : List String) :
 
 /-! ## Loop Control Helpers -/
 
-/-- Allocate a fresh synthetic loop label of the form `loop_N`, where `N`
+/-- Allocate a fresh synthetic loop label of the form `vloop_N`, where `N`
     comes from `BuildCtx.loopLabelCounter`. Used when a `.Loop` has no
     source-level label but its body contains unlabeled `break`/`continue`
     that need a target — deriving the label from AST structure would
-    risk collisions between structurally identical loops. -/
+    risk collisions between structurally identical loops.  The `vloop_`
+    prefix stays out of the `loop_N` / `loop_havoc_N` namespace that
+    Strata's `LoopElim` transform uses for its synthesized blocks: the
+    post-transform type check rejects label shadowing, so an emitted
+    `loop_N` block enclosing a while loop would collide with the block
+    `LoopElim` wraps that loop in. -/
 private def implicitLoopLabel : BuildM String := do
   let n ← freshLoopLabelId
-  pure (sanitizeIdent s!"loop_{n}")
+  pure (sanitizeIdent s!"vloop_{n}")
 
 private partial def hasUnlabeledLoopControl : Stm → Bool
   | .BreakOrContinue none _ => true
@@ -1863,7 +1869,12 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           -- via `inferNumKind`) double-counted the type and round-tripped
           -- already-int loop counters through `bv64_to_int_u(int_to_bv64_u(...))`.
           let intIdx ← expToBoole env [] (some .Int) indexArg
-          let valueExpr ← expToBoole env [] none valueArg
+          -- The stored value must land at the container's element type;
+          -- without the expectation a bitwise value chain falls back to the
+          -- default bv-usize width and mistypes the `Sequence.update`.
+          let elemTy? := arrayElemTyp? containerTy <|> vecElemTyp? containerTy
+            <|> seqElemTyp? containerTy
+          let valueExpr ← expToBoole env [] elemTy? valueArg
           let updated ←
             match arrayElemTyp? containerTy with
             | some _ => pure (Bld.seqUpdate containerExpr intIdx valueExpr)
@@ -2515,53 +2526,158 @@ def wrapperLenFact (x : BExpr) (dtorName : String) (n : Nat) : BuildM BExpr := d
   let dtorIdx ← resolveFreeVar dtorName
   pure (Synth.fixedArrayLenFact (Bld.appN (Bld.fvar dtorIdx) [x]) n)
 
-/-- Length contracts for wrapper-struct-typed parameters (`requires`) and returns
-    (`ensures`), each stated as `length(<destructor>(x)) == N`.  Threads the
-    length through the call graph the way the hand-written reference does: every
-    wrapper boundary carries the fact, so callers discharge their `_calls_`
-    obligations from the matching `ensures`.  No-op when `fixedArrayLengths` is
-    off.  Must run inside the scope where `inputs`/`outputs` resolve. -/
+/-- Substitute type parameters by name.  Instantiates an enum variant's
+    declared payload type at the use site's type arguments
+    (`Option_option edwardsPoint`: the `Some` payload `V` becomes
+    `edwardsPoint`). -/
+private partial def substTypParams (subst : List (String × Typ)) : Typ → Typ
+  | .TypParam i => ((subst.lookup i).getD (.TypParam i))
+  | .Tuple t1 t2 => .Tuple (substTypParams subst t1) (substTypParams subst t2)
+  | .Array t len? => .Array (substTypParams subst t) len?
+  | .SpecFn ps ret => .SpecFn (ps.map (substTypParams subst)) (substTypParams subst ret)
+  | .Decorated d t => .Decorated d (substTypParams subst t)
+  | .Struct n ps => .Struct n (ps.map (substTypParams subst))
+  | .Enum n ps => .Enum n (ps.map (substTypParams subst))
+  | t => t
+
+/-- Length facts for every array-backed component reachable from `expr : ty`
+    through selectors.  `[T; N]` yields `Sequence.length(<path>) == N`; a
+    wrapper yields the fact on its destructor; a tuple recurses into both
+    slots (`(A, B, C)` is right-nested, so paths are `Tuple2.._0`/`.._1`
+    chains); a monomorphic single-constructor struct recurses through its
+    field selectors (`fieldElement51..limbs(edwardsPoint..X(p))`); an enum
+    recurses through each variant's payload selectors with the fact guarded
+    by the variant tester (`isSome(x) ==> length(…(Some_0(x))) == 5`).
+    `visited` cuts cycles in recursive datatypes.  Stated per boundary as
+    requires/ensures — datatypes are total, so a global `forall s : <dt>`
+    length axiom would be unsound (`s` ranges over constructor applications
+    of arbitrary sequences). -/
+partial def componentLenFacts (ty : Typ) (expr : BExpr)
+    (visited : List String := []) : BuildM (List BExpr) := do
+  match arrayFixedLen? ty with
+  | some n => return [Synth.fixedArrayLenFact expr n]
+  | none =>
+    match (← wrapperLenInfo? ty) with
+    | some (dtor, n) => return [← wrapperLenFact expr dtor n]
+    | none =>
+      match stripTypDecoration ty with
+      | .Tuple t1 t2 =>
+        let fstIdx ← resolveFreeVar tupleFstSelector
+        let sndIdx ← resolveFreeVar tupleSndSelector
+        let fsts ← componentLenFacts t1 (Bld.appN (Bld.fvar fstIdx) [expr]) visited
+        let snds ← componentLenFacts t2 (Bld.appN (Bld.fvar sndIdx) [expr]) visited
+        return fsts ++ snds
+      -- Datatype references parse as `.Struct` whether the declaration is a
+      -- struct or an enum; try both layout maps.
+      | .Struct name args | .Enum name args =>
+        let dtName := datatypeNameOf name
+        if visited.contains dtName then return []
+        match (← get).structFieldInfo.get? dtName with
+        | some fields =>
+          fields.foldlM (fun acc (fname, fty) => do
+            let selIdx ← resolveFreeVar (datatypeDestructorNameOf name fname)
+            let facts ← componentLenFacts fty (Bld.app (Bld.fvar selIdx) expr)
+              (dtName :: visited)
+            pure (acc ++ facts)) []
+        | none =>
+        match (← get).enumFieldInfo.get? dtName with
+        | none => return []
+        | some (tyParams, variants) =>
+          if tyParams.length != args.length then return []
+          let subst := tyParams.zip args
+          variants.foldlM (fun acc (vname, fields) => do
+            if fields.isEmpty then pure acc else do
+            let testerIdx ← resolveFreeVar (enumTesterNameOf name vname)
+            let guard := Bld.app (Bld.fvar testerIdx) expr
+            let inner ← fields.foldlM (fun acc2 (fkey, fty) => do
+              -- The selector is `<dt>..<binding>`; `projFieldNameOf` gives
+              -- the binding name the declaration uses.
+              let selIdx ← resolveFreeVar
+                s!"{dtName}..{projFieldNameOf name vname fkey}"
+              let facts ← componentLenFacts (substTypParams subst fty)
+                (Bld.app (Bld.fvar selIdx) expr) (dtName :: visited)
+              pure (acc2 ++ facts)) []
+            pure (acc ++ inner.map (Bld.boolImplies guard ·))) []
+      | _ => return []
+
+/-- `componentLenFacts`, except that a directly `[T; N]`-typed binding yields
+    nothing — those get their length from the `fixedArrayLenElts` sites. -/
+def boundaryLenFacts (ty : Typ) (expr : BExpr) : BuildM (List BExpr) :=
+  if (arrayFixedLen? ty).isSome then pure [] else componentLenFacts ty expr
+
+/-- Length contracts for wrapper- and tuple-typed bindings: a `requires` per
+    input fact, an `ensures` per output fact (`boundaryLenFacts`).  Every fn
+    boundary carries the facts, so callers discharge their `_calls_`
+    obligations from the matching `ensures`.  Emit these before the user
+    spec: each spec clause's definedness is checked with only the preceding
+    clauses assumed.  Must run in the scope where the bindings resolve. -/
 def wrapperLenSpecElts (inputs outputs : List (String × Typ)) :
     BuildM (Array (BooleDDM.SpecElt SourceRange)) := do
   if !(← getSynthConfig).fixedArrayLengths then return #[]
   let mut elts : Array (BooleDDM.SpecElt SourceRange) := #[]
   for (name, ty) in inputs do
-    match (← wrapperLenInfo? ty) with
-    | some (dtor, n) =>
-      let fact ← wrapperLenFact (← resolveVar name) dtor n
+    for fact in (← boundaryLenFacts ty (← resolveVar name)) do
       elts := elts.push (.requires_spec default noLabel (ann none) fact)
-    | none => pure ()
   for (name, ty) in outputs do
-    match (← wrapperLenInfo? ty) with
-    | some (dtor, n) =>
-      let fact ← wrapperLenFact (← resolveVar name) dtor n
+    for fact in (← boundaryLenFacts ty (← resolveVar name)) do
       elts := elts.push (.ensures_spec default noLabel (ann none) fact)
-    | none => pure ()
   return elts
 
-/-- Length `requires` for a spec fn's array-typed parameters, shared by the
-    non-mutual (`specFnToBoole`) and mutual-recursive spec-fn paths so neither
-    loses the facts.  A `[T; N]` param carries `Sequence.length(p) == N` (the
-    length is otherwise lost when `[T; N]` lowers to `Sequence T`, leaving the
-    body's `Sequence.select` accesses with an unconstrained length — invalid
-    bounds VCs); a single-field wrapper-struct param carries the length on its
-    destructor (`Sequence.length(p..field) == N`, prepended — see
-    `wrapperLenSpecElts`), matching how bodies index the wrapper so a strict SMT
-    solver discharges the bound by syntactic match. -/
+/-- One `Sequence.length(binding) == N` spec elt per direct `[T; N]` binding,
+    wrapped by `mkElt` (requires or ensures, per call site). -/
+def fixedArrayLenElts (mkElt : BExpr → BooleDDM.SpecElt SourceRange)
+    (binds : List (String × Typ)) :
+    BuildM (Array (BooleDDM.SpecElt SourceRange)) := do
+  if !(← getSynthConfig).fixedArrayLengths then return #[]
+  binds.foldlM (fun acc (name, ty) => do
+    match arrayFixedLen? ty with
+    | some n =>
+      let e ← resolveVar name
+      pure (acc.push (mkElt (Synth.fixedArrayLenFact e n)))
+    | none => pure acc) #[]
+
+/-- Unlabeled `requires`/`ensures` constructors for synthesized facts. -/
+private def mkLenReq (fact : BExpr) : BooleDDM.SpecElt SourceRange :=
+  .requires_spec default noLabel (ann none) fact
+private def mkLenEns (fact : BExpr) : BooleDDM.SpecElt SourceRange :=
+  .ensures_spec default noLabel (ann none) fact
+
+/-- `requires Sequence.length(p) == N` per direct `[T; N]` input.  A
+    `requires`, not just a body entry-`assume`, because spec-clause
+    definedness cannot see the body: a later requires/ensures reading the
+    param needs the length as an earlier clause.  Callers discharge the
+    resulting obligation from the threaded boundary facts. -/
+def fixedArrayParamReqElts (inputs : List (String × Typ)) :
+    BuildM (Array (BooleDDM.SpecElt SourceRange)) :=
+  fixedArrayLenElts mkLenReq inputs
+
+/-- Length `requires` for a spec fn's parameters, shared by the non-mutual
+    (`specFnToBoole`) and mutual-recursive paths.  Direct `[T; N]` params get
+    `Sequence.length(p) == N` (`fixedArrayParamReqElts`); wrapper and tuple
+    params get their facts prepended (`wrapperLenSpecElts`). -/
 def specFnParamLenElts (inputs : List (String × Typ))
     (elts : Array (BooleDDM.SpecElt SourceRange)) :
     BuildM (Array (BooleDDM.SpecElt SourceRange)) := do
   if !(← getSynthConfig).fixedArrayLengths then return elts
-  let elts ← inputs.foldlM (fun acc (name, ty) => do
-    match arrayFixedLen? ty with
-    | some n =>
-      let pExpr ← resolveVar name
-      pure (acc.push (.requires_spec default noLabel (ann none)
-        (Synth.fixedArrayLenFact pExpr n)))
-    | none => pure acc) elts
-  pure ((← wrapperLenSpecElts inputs []) ++ elts)
+  pure ((← wrapperLenSpecElts inputs []) ++ elts ++ (← fixedArrayParamReqElts inputs))
+
+/-- Append a bodied spec fn's `recommends` as `requires`.  Verus treats them
+    as unchecked hints, but Boole checks the body's definedness and needs them
+    (e.g. an index bound guarding a `Sequence.select`).  Placed after the
+    length requires so their own definedness sees the params' lengths.
+    Body-less fns skip them: no body to check, only extra call-site
+    obligations. -/
+def specFnRecommendsElts (envLocal : VarEnv) (f : SpecFn)
+    (elts : Array (BooleDDM.SpecElt SourceRange)) :
+    BuildM (Array (BooleDDM.SpecElt SourceRange)) := do
+  if f.body.isNone then return elts
+  f.recommends.foldlM (fun acc r => do
+    pure (acc.push (mkLenReq (← expToBooleFlat envLocal (some .Bool) r)))) elts
 
 def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List BCmd) := do
+  -- An `arbitrary()` body lowers as declaration-only (`exprIsBareArbitrary`):
+  -- same semantics (unspecified value), no dangling `Pervasive_arbitrary`.
+  let f := if f.body.any exprIsBareArbitrary then { f with body := none } else f
   let fnName := identToBoole f.name
   addFreeVars #[fnName]
   let name := ann fnName
@@ -2629,8 +2745,10 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List B
       | none => []
     let elts ← synthVariantRequires variantReqs
     -- Fixed-array length `requires` for `[T; N]` and wrapper-struct params,
-    -- shared with the mutual-recursive spec-fn path (`specFnParamLenElts`).
+    -- then the `recommends` domain conditions — both shared with the
+    -- mutual-recursive spec-fn path.
     let elts ← specFnParamLenElts f.inputs elts
+    let elts ← specFnRecommendsElts envLocal f elts
     -- Lower Verus's serialized `decreases` measure (parsed into
     -- `SpecFn.decreases`) for recursive spec fns.  The termination-check
     -- body is a `Block` whose first stmt is `decrease%init0 := <measure>`;
@@ -2730,22 +2848,16 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let (specElts, body, decrAnn) ← withPromotedLocals promoted <| withScope do
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
-    let specElts ← mkSpecElts envLocal f.requires f.ensures []
-    -- (SynthConfig.fixedArrayLengths) A proof fn returning a fixed-size array
-    -- `[T; N]` carries `ensures Sequence.length(result) == N` to its callers,
-    -- mirroring the ExecFn return site. Scoped to the named return (`retDecls`).
-    let specElts ← if (← getSynthConfig).fixedArrayLengths then
-        retDecls.foldlM (fun acc (name, ty) =>
-          match arrayFixedLen? ty with
-          | some n => do
-            let outExpr ← resolveVar name
-            pure (acc.push (.ensures_spec default noLabel (ann none)
-              (Synth.fixedArrayLenFact outExpr n)))
-          | none => pure acc) specElts
-      else pure specElts
-    -- Wrapper-struct params/returns carry the length on the destructor, threaded
-    -- via requires/ensures (see `wrapperLenSpecElts`).
-    let specElts := (← wrapperLenSpecElts f.inputs retDecls) ++ specElts
+    let userSpecElts ← mkSpecElts envLocal f.requires f.ensures []
+    -- A `[T; N]` return carries `ensures Sequence.length(result) == N` to
+    -- callers, mirroring the exec-fn return site.
+    let arrayRetElts ← fixedArrayLenElts mkLenEns retDecls
+    -- Synthesized length facts (wrapper/tuple bindings, `[T; N]` params) go
+    -- before the user spec so its clauses' definedness checks can use them.
+    -- The requires also serve as the body's entry facts, keeping the params'
+    -- index accesses in-bounds.
+    let specElts := (← wrapperLenSpecElts f.inputs retDecls)
+      ++ (← fixedArrayParamReqElts f.inputs) ++ arrayRetElts ++ userSpecElts
     -- Lower the source-level `decreases` clause BEFORE body translation so
     -- the bound-var stack is in a known-clean state (just inputs+outputs).
     -- The body's internal scopes can otherwise leave the stack longer than
@@ -2753,18 +2865,6 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     -- decreases expression.
     let decrAnn ← decreasesToMeasureAnn envLocal f.decreases
     let localStmts ← localsToVarStmts localsAll
-    -- (SynthConfig.fixedArrayLengths) Re-establish each fixed-size-array
-    -- parameter's `[T; N]` length at entry as `assume Sequence.length(p) == N`,
-    -- mirroring the ExecFn site: a type invariant (no caller obligation), so the
-    -- proof-fn body's index accesses on the array are in-bounds.
-    let fixedArrayLenAssumes ← if (← getSynthConfig).fixedArrayLengths then
-        f.inputs.filterMapM fun (name, ty) =>
-          match arrayFixedLen? ty with
-          | some n => do
-            let pExpr ← resolveVar name
-            pure (some (assumeStmt "" (Synth.fixedArrayLenFact pExpr n)))
-          | none => pure none
-      else pure ([] : List BStmt)
     let retVar? := if hasRet then some (f.retName, f.returnType) else none
     let bodyStmts ← match bodyStm? with
       | some stm => stmToBoole envLocal projLayouts mutArgMap retVar? fnName stm
@@ -2773,7 +2873,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
       -- ensures are trivially satisfied. (Body-less in Strata is *not*
       -- treated as a trusted declaration; see the exec-fn comment.)
       | none => pure [assumeStmt "" (boolConst false)]
-    let allStmts := localStmts ++ fixedArrayLenAssumes ++ bodyStmts
+    let allStmts := localStmts ++ bodyStmts
     let body := BooleDDM.Block.block default (ann allStmts.toArray)
     pure (specElts, body, decrAnn)
   let spec := ann (some (BooleDDM.Spec.spec_mk default (ann specElts)))
@@ -2903,33 +3003,32 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let (specElts, body, decrAnn) ← withPromotedLocals promoted <| withScope do
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
-    let specElts ← mkSpecElts envLocal f.requires rewrittenEnsures []
-    -- (SynthConfig.fixedArrayLengths) A function returning a fixed-size array
-    -- `[T; N]` must carry `length == N` to its callers: otherwise a caller
-    -- binding the result to a local loses the length the source type
-    -- guarantees.  Emit `ensures length(result) == N`; the body discharges it
-    -- from the result's own length facts (a literal's length, a loop invariant,
-    -- or a callee's ensures).  This is the cross-call half of the per-binding
-    -- length discipline — the input side is the parameter entry `assume`.
-    --
-    -- Scoped to the *main* return (`retDecls`), not `&mut [T; N]` outputs: an
-    -- output mutated *inside a loop via a call* (e.g. `compress` calling
-    -- `compress_u32(&mut state, …)`) would need a `length` loop invariant to
-    -- survive the havoc, but Stage-2b loop detection only sees plain-assign /
-    -- index_set mutations, not call-mutations.  Covering mut-out outputs is a
-    -- follow-up that first needs call-mutation detection in `tryForLoopRecovery`.
-    let specElts ← if (← getSynthConfig).fixedArrayLengths then
-        retDecls.foldlM (fun acc (name, ty) =>
-          match arrayFixedLen? ty with
-          | some n => do
-            let outExpr ← resolveVar name
-            pure (acc.push (.ensures_spec default noLabel (ann none)
-              (Synth.fixedArrayLenFact outExpr n)))
-          | none => pure acc) specElts
-      else pure specElts
-    -- Wrapper-struct params/returns carry the length on the destructor, threaded
-    -- via requires/ensures (see `wrapperLenSpecElts`).
-    let specElts := (← wrapperLenSpecElts f.inputs retDecls) ++ specElts
+    let userSpecElts ← mkSpecElts envLocal f.requires rewrittenEnsures []
+    -- A `[T; N]` return carries `ensures length(result) == N` to callers;
+    -- the body proves it from the result's own length facts (a literal's
+    -- length, a loop invariant, or a callee's ensures).  Scoped to the main
+    -- return, not `&mut [T; N]` outputs: an output mutated inside a loop via
+    -- a call (e.g. `compress` calling `compress_u32(&mut state, …)`) has no
+    -- synthesized length invariant — loop detection only sees plain-assign /
+    -- index_set mutations — so the ensures would be unprovable.
+    let arrayRetElts ← fixedArrayLenElts mkLenEns retDecls
+    -- Each `[T; N]` parameter also gets `ensures Sequence.length(p) == N`:
+    -- spec-clause definedness cannot see the body's entry `assume`, so a user
+    -- ensures reading the param needs the fact as a preceding clause.  An
+    -- `ensures`, not a `requires`, so call sites stay obligation-free (exec
+    -- callers may pass slice elements that carry no length fact); the callee
+    -- proves it from the entry `assume`, and callers learn it for their
+    -- argument.
+    let arrayParamEnsElts ← fixedArrayLenElts mkLenEns f.inputs
+    -- Wrapper/tuple length facts for params and outputs, including mut-outs:
+    -- a caller that reassigns a local from a mut-out recovers its length from
+    -- the ensures (e.g. `Y := conditional_negate_field_element(Y, …)`).  A
+    -- body that loop-havocs a wrapper mut-out cannot prove that ensures
+    -- without a synthesized loop invariant — same follow-up as the
+    -- direct-array mut-out case above.  Synthesized facts go before the user
+    -- spec so its clauses' definedness checks can use them.
+    let specElts := (← wrapperLenSpecElts f.inputs outputs)
+      ++ arrayParamEnsElts ++ arrayRetElts ++ userSpecElts
     -- Lower the source-level `decreases` clause BEFORE body translation so
     -- the bound-var stack is in a known-clean state.  Body translation may
     -- leave additional bound vars on the stack, which would produce
@@ -2959,8 +3058,13 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
         -- `Sequence T`.  Re-establish it at entry as `assume length(p) == N` —
         -- a *type* invariant (always true), modeled as an assume rather than a
         -- `requires` so it emits no call-site obligation and does not cascade an
-        -- element-length proof onto callers (e.g. `compress` passing
-        -- `&blocks[k]`).  Read-only arrays keep the fact across loops (loops
+        -- element-length proof onto callers: exec call sites include unsized
+        -- slice elements (`compress` passing `&blocks[k]`) and call-mutated
+        -- arrays after loop havoc, neither of which carries a length fact.
+        -- (Proof-fn params carry a `requires` instead —
+        -- `fixedArrayParamReqElts` — their specs reference length-preconditioned
+        -- spec fns, and lemma call sites hold the threaded boundary facts.)
+        -- Read-only arrays keep the fact across loops (loops
         -- havoc only modified vars); mut-out / by-value copies inherit it
         -- through their `copy := param` init below; arrays *mutated inside* a
         -- loop additionally get a loop invariant (in `tryForLoopRecovery`).
@@ -2994,10 +3098,8 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
 
 /-! ### Struct/Enum → BCmd -/
 
-/-- Translate a struct to its Boole datatype, returning the datatype command
-    followed by any fixed-size-array length axioms it induces (the axioms must
-    come *after* the datatype so the `<dt>` type and `<dt>..<field>` accessor
-    they reference are already declared). -/
+/-- Translate a struct to its Boole datatype (or, for a single-`[T; N]`-field
+    wrapper, a transparent type synonym with identity ctor/dtor). -/
 def structToBoole (s : Struct) : BuildM (Array BCmd) := do
   let dtName := datatypeNameOf s.name
   -- Wrapper-datatype trick: a single-field struct whose one field is a
@@ -3069,33 +3171,12 @@ def structToBoole (s : Struct) : BuildM (Array BCmd) := do
       ann (some (BooleDDM.Bindings.mkBindings default (ann bindings)))
   let dtDecl := BooleDDM.DatatypeDecl.datatype_decl default (ann dtName) typeArgs constrList
   let dtCmd : BCmd := .command_datatypes default (ann #[dtDecl])
-  -- Length axioms for fixed-size-array fields (`[T; N]`).  Verus's
-  -- compile-time array length is otherwise lost when `[T; N]` lowers to
-  -- `Sequence T`, but Strata's `Sequence.select` out-of-bounds checks need
-  -- it.  Emit `forall s : <dt> :: Sequence.length(<dt>..<field>(s)) == N` per
-  -- such field, *after* the datatype (so `<dt>` / the accessor are in scope).
-  -- Only for monomorphic datatypes — a polymorphic `[T; N]` field is unusual
-  -- and the binder type would need the type args threaded; skip rather than
-  -- emit an ill-typed axiom.
-  let cfg ← getSynthConfig
-  if cfg.fixedArrayLengths && s.typeParams.isEmpty then
-    let dtIdx ← resolveFreeVar dtName
-    let mut axioms : Array BCmd := #[]
-    for (fname, ty) in s.fields do
-      match arrayFixedLen? ty with
-      | some n =>
-        -- The field's *accessor* function is `<dt>..<field>` (the datatype
-        -- destructor), not the bare field name.
-        let accessorIdx ← resolveFreeVar (datatypeDestructorNameOf s.name fname)
-        let body := Synth.fixedArrayLenFact
-          (Bld.appN (Bld.fvar accessorIdx) [Bld.bvar 0]) n
-        let axiomExpr := forallExpr #[("s", fvarTy dtIdx)] body
-        let axiomName := s!"{dtName}_{fieldAccessorNameOf fname}_len"
-        axioms := axioms.push (.command_axiom default (someLabel axiomName) axiomExpr)
-      | none => pure ()
-    pure (#[dtCmd] ++ axioms)
-  else
-    pure #[dtCmd]
+  -- Array-backed fields carry no global length axiom: the datatype is total,
+  -- so `forall s : <dt> :: length(<dt>..<field>(s)) == N` is refuted by a
+  -- constructor application of a wrong-length sequence.  Length facts ride on
+  -- boundary requires/ensures instead, recursing through field selectors
+  -- (`componentLenFacts`).
+  pure #[dtCmd]
 
 def enumToBoole (e : Enum) : BuildM BCmd := do
   let dtName := datatypeNameOf e.name
@@ -3217,13 +3298,146 @@ private def mergeDatatypeCommands (cmds : List BCmd) : List BCmd :=
       | _ => (st.1.push c, st.2)
     out.1.toList
 
+/-- Literal exponents applied to `low_bits_mask` in an expression.  Feeds
+    `lowBitsMaskValAxioms`; the cap only guards against an absurd `2^n`. -/
+private partial def lowBitsMaskLitsInExp : Exp → List Nat
+  | .Call fn _ args =>
+    let here : List Nat :=
+      match fn, args with
+      | .Fun name, [arg] =>
+        if isLowBitsMaskName name then
+          match stripBoxWrappers arg with
+          | .Const (.Int i) _ => if 0 ≤ i && i ≤ 512 then [i.toNat] else []
+          | _ => []
+        else []
+      | _, _ => []
+    here ++ args.flatMap lowBitsMaskLitsInExp
+  | .CallLambda body args =>
+    lowBitsMaskLitsInExp body ++ args.flatMap lowBitsMaskLitsInExp
+  | .StructCtor _ fields => fields.flatMap (fun (_, e) => lowBitsMaskLitsInExp e)
+  | .EnumCtor _ _ fields => fields.flatMap (fun (_, e) => lowBitsMaskLitsInExp e)
+  | .TupleCtor _ data => data.flatMap lowBitsMaskLitsInExp
+  | .Unary _ e => lowBitsMaskLitsInExp e
+  | .Binary _ a b => lowBitsMaskLitsInExp a ++ lowBitsMaskLitsInExp b
+  | .If c t f => lowBitsMaskLitsInExp c ++ lowBitsMaskLitsInExp t ++ lowBitsMaskLitsInExp f
+  | .Bind bind body =>
+    let bindLits := match bind with
+      | .Let _ _ rhs => lowBitsMaskLitsInExp rhs
+      | .Quant _ _ trigs => trigs.flatMap (·.flatMap lowBitsMaskLitsInExp)
+      | .Lambda _ => []
+      | .Choose _ pred => lowBitsMaskLitsInExp pred
+    bindLits ++ lowBitsMaskLitsInExp body
+  | .ArrayLiteral elems => elems.flatMap lowBitsMaskLitsInExp
+  | .MatchBlock (scrut, _) body =>
+    lowBitsMaskLitsInExp scrut ++ lowBitsMaskLitsInExp body
+  | .Const _ _ | .Var _ => []
+
+private partial def lowBitsMaskLitsInStm : Stm → List Nat
+  | .Call _ _ args => args.flatMap lowBitsMaskLitsInExp
+  | .Assert e | .AssertCompute e | .AssertLean e | .Assume e => lowBitsMaskLitsInExp e
+  | .AssertBitVector reqs enss =>
+    reqs.flatMap lowBitsMaskLitsInExp ++ enss.flatMap lowBitsMaskLitsInExp
+  | .AssertQuery _ body => lowBitsMaskLitsInStm body
+  | .Assign _ _ rhs _ => lowBitsMaskLitsInExp rhs
+  | .DeadEnd s | .OpenInvariant s | .ClosureInner s => lowBitsMaskLitsInStm s
+  | .Return e? => (e?.map lowBitsMaskLitsInExp).getD []
+  | .BreakOrContinue _ _ | .Reveal .. => []
+  | .If cond b1 b2 =>
+    lowBitsMaskLitsInExp cond ++ lowBitsMaskLitsInStm b1
+      ++ (b2.map lowBitsMaskLitsInStm).getD []
+  | .Loop _ _ cond body invs decrease =>
+    let condLits := match cond with
+      | some (s, e) => lowBitsMaskLitsInStm s ++ lowBitsMaskLitsInExp e
+      | none => []
+    condLits ++ lowBitsMaskLitsInStm body
+      ++ invs.flatMap (fun inv => lowBitsMaskLitsInExp inv.body)
+      ++ decrease.flatMap lowBitsMaskLitsInExp
+  | .Block stms => stms.flatMap lowBitsMaskLitsInStm
+
+private partial def lowBitsMaskLitsInDecl : Decl → List Nat
+  | .assertion _ => []
+  | .specFn f =>
+    (f.body.map lowBitsMaskLitsInExp).getD []
+      ++ f.recommends.flatMap lowBitsMaskLitsInExp
+      ++ (f.decreases.map lowBitsMaskLitsInStm).getD []
+  | .proofFn f =>
+    f.requires.flatMap lowBitsMaskLitsInExp ++ f.ensures.flatMap lowBitsMaskLitsInExp
+      ++ (f.body.map lowBitsMaskLitsInStm).getD []
+      ++ f.decreases.flatMap lowBitsMaskLitsInStm
+  | .execFn f =>
+    f.requires.flatMap lowBitsMaskLitsInExp ++ f.ensures.flatMap lowBitsMaskLitsInExp
+      ++ lowBitsMaskLitsInStm f.body ++ f.decreases.flatMap lowBitsMaskLitsInStm
+  | .func f =>
+    f.reqs.flatMap lowBitsMaskLitsInExp ++ f.postCondition.flatMap lowBitsMaskLitsInExp
+  | .struct _ | .enum _ => []
+  | .mutualBlock ds => ds.flatMap lowBitsMaskLitsInDecl
+
+/-- The `<fn>_ret_len` axiom for a monomorphic `[T; N]`-returning spec fn:
+    `∀ params :: <param length facts> → Sequence.length(<fn>(params)) == N`.
+    A function has no named return for an `ensures`, so the length rides on an
+    axiom, emitted right after the fn (axiom scope is positional).  `none` for
+    polymorphic or non-array returns, and for fns nothing applies
+    (`refNames`) — an inert axiom would only add solver noise. -/
+private def specFnRetLenAxiom? (f : SpecFn) (refNames : Std.HashSet String) :
+    BuildM (Option BCmd) := do
+  let some n := arrayFixedLen? f.returnType | return none
+  unless (fnTypeParams f.inputs f.returnType).isEmpty
+      && refNames.contains (identToBoole f.name) do return none
+  let fnName := identToBoole f.name
+  let fnIdx ← resolveFreeVar fnName
+  let k := f.inputs.length
+  let app := if k == 0 then Bld.fvar fnIdx
+    else Bld.appN (Bld.fvar fnIdx) ((List.range k).map (fun i => Bld.bvar (k - 1 - i)))
+  let lenFact := Synth.fixedArrayLenFact app n
+  -- Guard with the params' own length facts: the fn is total in the
+  -- encoding, so the axiom must hold at every argument, and a body that
+  -- returns a (modified) copy of its input has result length equal to the
+  -- input's — unguarded, the axiom would contradict that defining equation
+  -- off-domain, making the axiom set unsatisfiable.
+  let hyps ← f.inputs.zipIdx.foldlM (fun acc ((_, ty), i) => do
+    let facts ← componentLenFacts ty (Bld.bvar (k - 1 - i))
+    pure (acc ++ facts)) []
+  let body := match hyps with
+    | [] => lenFact
+    | h :: hs => Bld.boolImplies (hs.foldl Bld.boolAnd h) lenFact
+  let axiomExpr ← if k == 0 then pure body else do
+    let binders ← f.inputs.toArray.mapM (fun (x, ty) => do
+      pure (sanitizeVarName x, ← typToBooleType ty))
+    pure (forallExpr binders body)
+  return some (.command_axiom default (someLabel s!"{fnName}_ret_len") axiomExpr)
+
+/-- Ground value axioms for `low_bits_mask`, one per literal exponent the
+    program applies it to:
+      axiom [low_bits_mask_<n>_val]: nat.toInt(low_bits_mask(nat.fromInt(n))) == 2^n - 1
+    — vstd's `pow2(n) - 1` at that instance; the fn itself stays
+    uninterpreted (vstd bodies are not imported).  Emitted right after the
+    fn's own decl, so the positional axiom scope covers every use site.
+    `[]` for any other decl. -/
+private def lowBitsMaskValAxioms (f : SpecFn) (allDecls : List Decl) :
+    BuildM (List BCmd) := do
+  unless isLowBitsMaskName f.name do return []
+  let lits : List Nat := ((allDecls.flatMap lowBitsMaskLitsInDecl).eraseDups).mergeSort Nat.ble
+  let fnIdx ← resolveFreeVar lowBitsMaskBooleName
+  let toIntIdx ← resolveFreeVar "nat.toInt"
+  let fromIntIdx ← resolveFreeVar "nat.fromInt"
+  lits.mapM fun (n : Nat) => do
+    let app := Bld.app (Bld.fvar fnIdx) (Bld.app (Bld.fvar fromIntIdx) (Bld.intConst (Int.ofNat n)))
+    let axiomExpr := Bld.eq (Bld.app (Bld.fvar toIntIdx) app)
+      (Bld.intConst (Int.ofNat (2 ^ n - 1)))
+    pure (.command_axiom default (someLabel s!"low_bits_mask_{n}_val") axiomExpr)
+
 partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     (mutArgMap : MutArgMap) (sfMap : SpecFnMap)
-    (allDecls : List Decl) :
+    (allDecls : List Decl) (refNames : Std.HashSet String) :
     Decl → BuildM (List BCmd)
   | .assertion _ => return []
-  | .specFn f =>
-    specFnToBoole env (!f.isOpaque) f
+  | .specFn f => do
+    let cmds ← specFnToBoole env (!f.isOpaque) f
+    -- Synthesized length/value axioms attached to the fn's declaration.
+    if !(← getSynthConfig).fixedArrayLengths then return cmds
+    let retLenAxiom ← specFnRetLenAxiom? f refNames
+    let lbmAxioms ← lowBitsMaskValAxioms f allDecls
+    return cmds ++ retLenAxiom.toList ++ lbmAxioms
   | .proofFn f => do
     let cmd ← proofFnToBoole env projLayouts mutArgMap sfMap f
     return [cmd]
@@ -3271,8 +3485,10 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
                 (rootExposedProjs b).filter (fun (n, _, _) => inputNameSet.contains n)
             | none => []
           let elts ← synthVariantRequires variantReqs
-          -- Fixed-array/wrapper length `requires`, shared with `specFnToBoole`.
+          -- Fixed-array/wrapper length `requires` then `recommends`, both
+          -- shared with `specFnToBoole`.
           let elts ← specFnParamLenElts f.inputs elts
+          let elts ← specFnRecommendsElts envLocal f elts
           -- Thread the source `decreases` measure into the mutual-rec
           -- slot, mirroring `specFnToBoole`.  Previously hardcoded to
           -- `none`, so Strata's int-valued termination checker had no
@@ -3292,7 +3508,7 @@ partial def declToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       pure [BooleDDM.Command.command_recfndefs default (ann recDecls)]
     -- Translate non-spec declarations normally
     let otherCmds ← others.foldlM (fun acc d => do
-      let cmds ← declToBoole env projLayouts mutArgMap sfMap allDecls d
+      let cmds ← declToBoole env projLayouts mutArgMap sfMap allDecls refNames d
       return acc ++ cmds) []
     -- Mutually-recursive datatypes share one `mutualBlock`; merge their
     -- per-datatype commands so Strata sees a single mutual datatype block.
@@ -3421,8 +3637,45 @@ private def buildWrapperInfo (decls : List Decl) : Std.HashMap String (String ×
     | _ => pure ()
   return m
 
+/-- Fields of each monomorphic single-constructor struct, keyed by Boole
+    datatype name (`BuildCtx.structFieldInfo`).  Wrapper structs are excluded
+    (covered by `wrapperInfo`); `mutualBlock` members are included. -/
+private partial def buildStructFieldInfo (decls : List Decl) :
+    Std.HashMap String (List (String × Typ)) :=
+  decls.foldl (init := {}) fun m d =>
+    match d with
+    | .struct s =>
+      let isWrapper := match s.fields with
+        | [(_, fty)] => (arrayFixedLen? fty).isSome
+        | _ => false
+      if s.typeParams.isEmpty && !isWrapper && !s.fields.isEmpty then
+        m.insert (datatypeNameOf s.name) s.fields
+      else m
+    | .mutualBlock ds => (buildStructFieldInfo ds).fold (init := m) (·.insert · ·)
+    | _ => m
+
+/-- Variant payloads of each enum, keyed by Boole datatype name
+    (`BuildCtx.enumFieldInfo`).  Field keys match `projFieldNameOf`: labeled
+    fields keep their name, tuple fields use their position. -/
+private partial def buildEnumFieldInfo (decls : List Decl) :
+    Std.HashMap String (List String × List (String × List (String × Typ))) :=
+  decls.foldl (init := {}) fun m d =>
+    match d with
+    | .enum e =>
+      let variants := e.fields.map fun
+        | .labeled vname data => (vname, data)
+        | .tuple vname ts => (vname, ts.zipIdx.map (fun (t, i) => (toString i, t)))
+      m.insert (datatypeNameOf e.name) (e.typeParams, variants)
+    | .mutualBlock ds => (buildEnumFieldInfo ds).fold (init := m) (·.insert · ·)
+    | _ => m
+
 def declsToBooleProgram (decls : List Decl) :
     BuildM (Array BCmd) := do
+  -- Resolve spec-level trait calls to the concrete impl that implements
+  -- them before anything reads references: the impls' own spec fns become
+  -- referenced and stay, the abstract generic trait fns become unreferenced
+  -- and drop.
+  let decls := TraitResolve.resolveTraitSpecCalls decls
   -- Resolve trait associated-type projections to their concrete impl types
   -- before any decl is lowered.  Built from the full decl set, since pruning
   -- below may drop the impl decls the resolution reads from.
@@ -3430,6 +3683,10 @@ def declsToBooleProgram (decls : List Decl) :
   -- Wrapper-struct length info, stated on the destructor so the contract matches
   -- how bodies index the wrapper (see `wrapperLenSpecElts`).
   modify fun c => { c with wrapperInfo := buildWrapperInfo decls }
+  -- Struct field and enum variant layouts, so length facts recurse through
+  -- datatype selector paths (`componentLenFacts`).
+  modify fun c => { c with structFieldInfo := buildStructFieldInfo decls }
+  modify fun c => { c with enumFieldInfo := buildEnumFieldInfo decls }
   -- `vec2seq` branch: Verus emits stub `proc Vec_*` / `proc Slice_into_vec`
   -- wrappers (and a few other Vec-named procedures) to cover the Rust Vec
   -- surface — `Vec_new`, `Vec_len`, `Vec_push`, `Vec_from_elem`,
@@ -3478,6 +3735,10 @@ def declsToBooleProgram (decls : List Decl) :
   -- `Impl__N_arrow_*` bloats the output and slows verification; most tests
   -- use only a handful.
   let decls := pruneUnreferencedImpls decls
+  -- Drop dead abstract trait-method decls before the vstd prune: a generic
+  -- vstd spec fn named only by a dropped trait decl must not count as
+  -- referenced, or it survives as an orphaned polymorphic declaration.
+  let decls := pruneUnreferencedTraitMethodDecls decls
   let decls := pruneUnreferencedVstdSpecs decls
   let noParamFns := collectNoParamFnNamesFromDecls decls
   let projLayouts := buildProjLayouts decls
@@ -3490,10 +3751,13 @@ def declsToBooleProgram (decls : List Decl) :
   let filteredDecls := decls.filter fun d =>
     let name := declPrimaryName d
     !(hasForLoop && isForLoopScaffoldingDecl name)
+  -- Callee names across all decls, computed once; gates the `<fn>_ret_len`
+  -- axioms (`specFnRetLenAxiom?`).
+  let refNames : Std.HashSet String := Std.HashSet.ofList (decls.flatMap Pruning.declRefs)
   -- Translate user declarations first to discover which support names are needed
   let mut userCmds : Array BCmd := #[]
   for d in filteredDecls do
-    let cmds ← declToBoole env projLayouts mutArgMap sfMap decls d
+    let cmds ← declToBoole env projLayouts mutArgMap sfMap decls refNames d
     userCmds := userCmds ++ cmds.toArray
   -- Support declarations are emitted from explicit requirements recorded
   -- during lowering, not from incidental free-variable references.
@@ -3547,7 +3811,14 @@ def cmdDeclName? : BCmd → Option String
   | .boole_procedure _ name _ _ _ _ _ _ => some name.val
   | .command_procedure _ name _ _ _ _ => some name.val
   | .command_cfg_procedure _ name _ _ _ _ => some name.val
-  | .command_axiom _ _ _ => none
+  | .command_axiom _ label _ =>
+    -- Labeled axioms are keyed as `axiom:<label>`: shard dedupe drops
+    -- re-emitted copies, and the prefix keeps axiom keys from colliding with
+    -- decl or prelude names.  Labels derive from the source construct, so
+    -- equal labels carry equal formulas.  Unlabeled axioms stay anonymous.
+    match label.val with
+    | some (.label _ name) => some s!"axiom:{name.val}"
+    | none => none
   | .command_var _ bind => some (match bind with | .bind_mk _ name _ _ => name.val)
   | .command_distinct _ _ _ => none
   | .command_constdecl _ name _ _ => some name.val

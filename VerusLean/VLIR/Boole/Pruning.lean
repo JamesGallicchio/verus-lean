@@ -86,7 +86,9 @@ partial def stmCallRefs : Stm → List String
 
 partial def declRefs : Decl → List String
   | .assertion _ => []
-  | .specFn f => (f.body.map expCallRefs).getD []
+  | .specFn f =>
+    -- `recommends` lower to `requires`, so their callees count as references.
+    (f.body.map expCallRefs).getD [] ++ f.recommends.flatMap expCallRefs
   | .proofFn f =>
     f.requires.flatMap expCallRefs ++ f.ensures.flatMap expCallRefs ++
       (f.body.map stmCallRefs).getD []
@@ -216,6 +218,24 @@ def pruneUnreferencedVstdSpecs (decls : List Decl) : List Decl :=
           else if isSeqBuiltinHandledElsewhere n then false
           else referencedSet.contains n
         | none => false
+    else true)
+
+/-- Abstract trait-method declarations (`kind = TraitMethodDecl`) parsed as
+    bodiless exec fns, e.g. `core::ops::arith::Mul::mul`.  A call resolves to
+    the concrete impl, so an unreferenced one only produces spec obligations
+    over type variables, which the SMT encoding rejects. -/
+def declIsBodilessTraitMethodDecl : Decl → Bool
+  | .execFn f => f.isTraitMethodDecl && (match f.body with | .Block [] => true | _ => false)
+  | _ => false
+
+def pruneUnreferencedTraitMethodDecls (decls : List Decl) : List Decl :=
+  let referenced :=
+    ((decls.filter (fun d => !declIsBodilessTraitMethodDecl d)).flatMap declRefs).eraseDups
+  decls.filter (fun d =>
+    if declIsBodilessTraitMethodDecl d then
+      match declName? d with
+      | some n => referenced.contains n
+      | none => true
     else true)
 
 end VerusLean.Boole.Pruning

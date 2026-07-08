@@ -74,9 +74,10 @@ inductive SupportDecl where
     it is a safe knob for measuring each aid's impact.  The fact *builders*
     live in `Boole.Synth`; these flags gate their *emission* at each site. -/
 structure SynthConfig where
-  /-- Fixed-size-array `Sequence.length(_) == N` facts: the struct-field
-      length axiom, the per-parameter entry assume, and the
-      mutated-in-loop length invariant. -/
+  /-- Fixed-size-array `Sequence.length(_) == N` facts: parameter
+      requires/entry assumes, return ensures, boundary facts on selector
+      paths, mutated-in-loop length invariants, and the guarded
+      `<fn>_ret_len` / `low_bits_mask` ground axioms. -/
   fixedArrayLengths : Bool := true
   /-- For-range loop lower-bound invariant `lo <= i` (Strata's `for` hands the
       body only the upper bound `i <= hi`, via the loop guard). -/
@@ -132,6 +133,18 @@ structure BuildCtx where
       value (`length(scalar..bytes(x)) == 32`), matching how bodies index it.
       Built once from the decl set in `declsToBooleProgram`. -/
   wrapperInfo : Std.HashMap String (String × Nat) := {}
+  /-- Fields of each monomorphic single-constructor struct, keyed by its Boole
+      datatype name.  Lets length facts recurse through datatype selector
+      paths (`componentLenFacts`).  Wrapper structs (single `[T; N]` field)
+      are excluded — they lower to type synonyms and are covered by
+      `wrapperInfo`.  Built once in `declsToBooleProgram`. -/
+  structFieldInfo : Std.HashMap String (List (String × Typ)) := {}
+  /-- Variant payloads of each enum, keyed by its Boole datatype name:
+      the enum's type parameters plus, per variant, the payload fields
+      (field key as `projFieldNameOf` expects it, and its declared type).
+      Lets length facts recurse through enum payloads under a variant-tester
+      guard (`componentLenFacts`).  Built once in `declsToBooleProgram`. -/
+  enumFieldInfo : Std.HashMap String (List String × List (String × List (String × Typ))) := {}
 
 abbrev BuildM := StateT BuildCtx (Except String)
 

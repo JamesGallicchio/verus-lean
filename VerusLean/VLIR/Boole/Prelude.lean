@@ -195,8 +195,9 @@ private partial def refsOfStm : Stm → List String
   | .Block stms => (stms.flatMap refsOfStm).eraseDups
 
 private def refsOfSpecFn (f : SpecFn) : List String :=
+  -- `recommends` lower to `requires`, so symbols they name count as referenced.
   (f.inputs.flatMap (fun input => refsOfTyp input.2) ++ refsOfTyp f.returnType ++
-    (f.body.map refsOfExp).getD []).eraseDups
+    (f.body.map refsOfExp).getD [] ++ f.recommends.flatMap refsOfExp).eraseDups
 
 private def refsOfProofFn (f : ProofFn) : List String :=
   (f.inputs.flatMap (fun input => refsOfTyp input.2) ++ refsOfTyp f.returnType ++

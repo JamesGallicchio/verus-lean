@@ -3,10 +3,16 @@
 #
 # Requires the caller to have set $STRATA_DIR.
 
+# The standalone Strata-Boole checkout (the same package the verus-lean
+# renderer builds against, per lakefile.lean). Overridable via env.
+STRATA_BOOLE_DIR="${STRATA_BOOLE_DIR:-$STRATA_DIR/../Strata-Boole}"
+
 # Run a Boole .lean wrapper through Lean and capture its combined output.
 # The Boole language lives in the downstream `StrataBoole` package (it depends
 # on Strata, not the reverse), so Lean runs from that package's context for
-# `import StrataBoole.MetaVerifier` to resolve.
+# `import StrataBoole.MetaVerifier` to resolve. This must be the SAME package
+# the renderer's grammar comes from, or emitted syntax and parsed syntax drift
+# (e.g. the `ε` choose keyword).
 # Arguments:
 #   $1 = wrapper .lean path
 #   $2 = log file for combined stdout+stderr
@@ -16,7 +22,7 @@ run_boole_wrapper() {
   # heaviest benchmarks (b1/b4) build a large `#strata` data-defn whose LCNF
   # compilation recurses past the ~8 MB default and overflows; 128 MB clears it.
   # Harmless for small wrappers — the stack is allocated lazily.
-  (cd "$STRATA_DIR/StrataBoole" && lake env lean -s 131072 "$1") >"$2" 2>&1
+  (cd "$STRATA_BOOLE_DIR" && lake env lean -s 131072 "$1") >"$2" 2>&1
 }
 
 # Classify a verify log from `lake env lean <wrapper.lean>`.

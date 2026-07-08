@@ -384,11 +384,20 @@ partial def expMentionsVar (target : String) : Exp → Bool
   | .Unary _ e => expMentionsVar target e
   | .Binary _ e1 e2 => expMentionsVar target e1 || expMentionsVar target e2
   | .If c t f => expMentionsVar target c || expMentionsVar target t || expMentionsVar target f
-  | .Bind (.Let _ _ e) body => expMentionsVar target e || expMentionsVar target body
-  | .Bind (.Quant _ _ _) body => expMentionsVar target body
-  | .Bind (.Lambda _) body => expMentionsVar target body
-  | .Bind (.Choose _ pred) body =>
-    expMentionsVar target pred || expMentionsVar target body
+  -- Binder cases test *free* occurrences: a binder that rebinds `target`
+  -- shadows it, so occurrences in its scope are not uses of the outer
+  -- variable.  Scope shapes follow `substExp`: a `Let` rhs is outside the
+  -- binding; `Quant`/`Lambda`/`Choose` binders scope over the body (and
+  -- over `pred` for `Choose`).
+  | .Bind (.Let v _ e) body =>
+    expMentionsVar target e || (v != target && expMentionsVar target body)
+  | .Bind (.Quant _ vars _) body =>
+    vars.all (fun (v, _) => v != target) && expMentionsVar target body
+  | .Bind (.Lambda vars) body =>
+    vars.all (fun (v, _) => v != target) && expMentionsVar target body
+  | .Bind (.Choose vars pred) body =>
+    vars.all (fun (v, _) => v != target) &&
+      (expMentionsVar target pred || expMentionsVar target body)
   | .ArrayLiteral elems => elems.any (expMentionsVar target)
   | .MatchBlock (scrut, _) body => expMentionsVar target scrut || expMentionsVar target body
   | .Const _ _ => false

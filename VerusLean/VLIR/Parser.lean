@@ -339,6 +339,14 @@ def traitImplMethodFromJson? (j : Json) : m (Option Ident) := do
     | .error _ => pure none
   | .error _ => pure none
 
+/-- True when a declaration's `kind` is the abstract trait-side
+    `TraitMethodDecl` (both the unit-variant and payload-object JSON shapes). -/
+def isTraitMethodDeclFromJson (j : Json) : Bool :=
+  match j.getObjVal? "kind" with
+  | .ok (.str s) => s == "TraitMethodDecl"
+  | .ok kind => (kind.getObjVal? "TraitMethodDecl").isOk
+  | .error _ => false
+
 /-- Parse Verus's `Option (Fun, Typs)` resolved-method payload and return the
     selected concrete impl method path, when present. -/
 def resolvedFunPayloadFromJson? (j : Json) : m (Option Ident) := do
@@ -1756,6 +1764,15 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
 
   let traitImplMethod? ← traitImplMethodFromJson? j
 
+  -- A spec fn's `recommends` arrive as its `decl.reqs`, the slot proof/exec
+  -- fns use for `requires`.  See `SpecFn.recommends`.
+  let recommends : List Exp ←
+    match j.getArrByPath? ["decl", "reqs"] with
+    | .ok reqArr =>
+      let parsed ← reqArr.mapM (fromJsonSpanned · Exp.fromJson)
+      pure parsed.toList
+    | .error _ => pure []
+
   try
     -- let termCheckKind ← j.getObjValByPathM ["axioms", "spec_axioms", "termination_check", "post_condition", "kind"]
     -- if termCheckKind != "DecreasesImplicitLemma" then
@@ -1774,6 +1791,7 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       recursiveCasesIdxHint := recursiveCasesIdxHint
       isOpaque := isOpaque
       traitImplMethod? := traitImplMethod?
+      recommends := recommends
     }
   catch _ =>
     return some <| {
@@ -1786,6 +1804,7 @@ def SpecFn.fromJson (j : Json) : VParser (Option SpecFn) := do
       recursiveCasesIdxHint := none
       isOpaque := isOpaque
       traitImplMethod? := traitImplMethod?
+      recommends := recommends
     }
 
 private def localDeclOriginOfKind? (kind : Json) : Option LocalDeclOrigin :=
@@ -1993,7 +2012,7 @@ def ExecFn.fromJson (j : Json) : VParser (Option ExecFn) := do
     else
       pure []
   let traitImplMethod? ← traitImplMethodFromJson? j
-  return some <| ExecFn.mk name args retName returnType requires.toList ensures bodyStm decreases locals traitImplMethod?
+  return some <| ExecFn.mk name args retName returnType requires.toList ensures bodyStm decreases locals traitImplMethod? (isTraitMethodDeclFromJson j)
 
 
 def typeParamsFromJson (j : Json) : m (List String) := do

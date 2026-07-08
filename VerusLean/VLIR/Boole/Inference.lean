@@ -147,6 +147,15 @@ def arrayFixedLen? : Typ → Option Nat
   | .Decorated _ ty => arrayFixedLen? ty
   | _ => none
 
+/-- Whether an expression is a call to vstd's `arbitrary()`, peeling box
+    wrappers.  `Pervasive_arbitrary` is not declared in the emitted Boole, so
+    such expressions must not be lowered verbatim; a spec fn with this body
+    lowers declaration-only. -/
+partial def exprIsBareArbitrary : Exp → Bool
+  | .Unary (.Box _) e | .Unary (.Unbox _) e => exprIsBareArbitrary e
+  | .Call fn _ _ => isPervasiveArbitraryName (CallFun.name fn)
+  | _ => false
+
 def setElemTyp? : Typ → Option Typ
   | .Struct name params =>
     match params with

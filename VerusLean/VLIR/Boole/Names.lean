@@ -207,6 +207,18 @@ def isClonedName (name : Ident) : Bool :=
   let s := name.toString
   s.endsWith "::cloned" || s.endsWith ".cloned" || s == "cloned"
 
+/-- vstd's `arbitrary()`, an unspecified value of the return type.  See
+    `exprIsBareArbitrary`. -/
+def isPervasiveArbitraryName (name : Ident) : Bool :=
+  identToBoole name == "Pervasive_arbitrary"
+
+/-- Boole name of vstd's `low_bits_mask`.  The fn is uninterpreted; ground
+    axioms supply its value at literal exponents (`lowBitsMaskValAxioms`). -/
+def lowBitsMaskBooleName : String := "Bits_low_bits_mask"
+
+def isLowBitsMaskName (name : Ident) : Bool :=
+  identToBoole name == lowBitsMaskBooleName
+
 def isBoxNewName (name : Ident) : Bool :=
   identToBoole name == "Boxed_box_new"
 

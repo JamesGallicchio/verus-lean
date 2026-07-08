@@ -284,7 +284,7 @@ def ProofFn.pp (f : ProofFn) : String :=
     s!"theorem {name} : {ensures} := by sorry"
 
 def ExecFn.pp (f : ExecFn) : String :=
-  let ⟨name, args, _retName, ret, _requires, _ensures, _body, _decreases, _locals, _traitImplMethod?⟩ := f
+  let ⟨name, args, _retName, ret, _requires, _ensures, _body, _decreases, _locals, _traitImplMethod?, _isTraitMethodDecl⟩ := f
   if args.length > 0 then
     s!"def {name} {args} : {ret} := by sorry"
   else
