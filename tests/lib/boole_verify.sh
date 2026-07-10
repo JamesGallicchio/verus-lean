@@ -1,11 +1,14 @@
 # Shared helpers for Strata Boole verification.
 # Sourced by tests/run_tests.sh and tests/check_working_tests.sh.
 #
-# Requires the caller to have set $STRATA_DIR.
+# Requires the caller to have set $ROOT_DIR (used to locate the Strata-Boole
+# checkout). Set $STRATA_BOOLE_DIR to override that location.
 
 # The standalone Strata-Boole checkout (the same package the verus-lean
-# renderer builds against, per lakefile.lean). Overridable via env.
-STRATA_BOOLE_DIR="${STRATA_BOOLE_DIR:-$STRATA_DIR/../Strata-Boole}"
+# renderer builds against, per lakefile.lean). Located as a sibling of the repo
+# root by default, so verification does not need a separate `../Strata` checkout;
+# Strata arrives as Strata-Boole's own dependency. Overridable via env.
+STRATA_BOOLE_DIR="${STRATA_BOOLE_DIR:-$ROOT_DIR/../Strata-Boole}"
 
 # Run a Boole .lean wrapper through Lean and capture its combined output.
 # The Boole language lives in the downstream `StrataBoole` package (it depends

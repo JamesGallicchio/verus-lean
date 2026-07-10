@@ -24,5 +24,8 @@ lean_exe «verus-lean» where
 lean_exe VerusParser where
   root := `VerusLean.VLIRParser
 
-require Strata from "../Strata"
+-- Strata (and Strata-DDM) come transitively from Strata-Boole, which pulls
+-- them from `strata-org` main. For local verification against a patched Strata,
+-- check it out at `../Strata` and add `require Strata from "../Strata"` here: a
+-- requirement in the root package overrides the transitive git dependency.
 require StrataBoole from "../Strata-Boole"

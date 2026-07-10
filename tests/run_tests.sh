@@ -9,6 +9,11 @@ VERUS_DIR="${VERUS_DIR:-$ROOT_DIR/../verus}"
 VERUS_SRC="${VERUS_SRC:-$VERUS_DIR/source}"
 VERUS_BIN="${VERUS_BIN:-$VERUS_SRC/target-verus/release/verus}"
 STRATA_DIR="${STRATA_DIR:-$ROOT_DIR/../Strata}"
+# The `--verify` stage runs `lake env lean` in the standalone Strata-Boole
+# checkout (it imports `StrataBoole.MetaVerifier`). Locate it as a sibling of
+# this repository so verification does not need a separate `../Strata` checkout:
+# Strata comes in as Strata-Boole's own dependency.
+STRATA_BOOLE_DIR="${STRATA_BOOLE_DIR:-$ROOT_DIR/../Strata-Boole}"
 VERUS_LEAN="${VERUS_LEAN:-$ROOT_DIR/.lake/build/bin/verus-lean}"
 BOOLE_DIR="${BOOLE_DIR:-$ROOT_DIR/tests/BooleFiles}"
 BOOLE_PROGRAMS_DIR="${BOOLE_PROGRAMS_DIR:-$ROOT_DIR/tests/BoolePrograms}"
@@ -699,8 +704,9 @@ fi
 if $run_verify; then
   echo ""
   echo "=== Step 3: Strata Boole verify ==="
-  if [ ! -d "$STRATA_DIR" ]; then
-    echo "Missing Strata repo at $STRATA_DIR"
+  if [ ! -d "$STRATA_BOOLE_DIR" ]; then
+    echo "Missing Strata-Boole repo at $STRATA_BOOLE_DIR"
+    echo "Clone it next to this repository, or set STRATA_BOOLE_DIR."
     exit 1
   fi
   if [ -n "$target_lean_path" ]; then

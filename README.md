@@ -1,170 +1,330 @@
-# verus-lean: A Verus-Lean connection
+# verus-lean
 
-The Lean backend to a [verus fork](https://github.com/ccodel/verus/tree/boogie)
-that allows for the export of verus definitions and verification conditions to Lean.
+`verus-lean` translates [Verus](https://github.com/verus-lang/verus) programs
+and their verification conditions into Lean, using a
+[fork of Verus](https://github.com/ccodel/verus/tree/boogie) that exports them
+as JSON. It supports two translation targets:
 
-This repository now supports two main translation paths:
-- `Verus -> Lean`
-- `Verus -> Boole` (direct VLIR -> BooleDDM)
+- **Verus → Lean**: a direct Lean encoding.
+- **Verus → Boole**: a lowering of Verus's intermediate representation (VLIR)
+  to [Strata](https://github.com/strata-org/Strata)'s *Boole* dialect.
 
-## Building
+A Boole program's verification conditions can be discharged in two ways:
 
-All building/compiling is done at the root level of the project,
-unless otherwise indicated.
+- **An external SMT solver.** cvc5 or z3, invoked through `Strata.Boole.verify`.
+  This is the path the `--verify` test stage uses.
+- **Within Lean.** Strata emits the verification conditions as Lean goals with
+  the `gen_smt_vcs_boole` tactic, which you then close using tactics such as
+  `grind`. This produces a Lean-checked proof and lets you discharge obligations
+  interactively, without trusting an external solver.
 
-`verus-lean` depends on two sibling checkouts, referenced by relative path in
-`lakefile.lean`:
-- `../Strata-Boole` — the Boole dialect and verifier
-- `../Strata` — the Core/DDM backend. `Strata-Boole` builds on it, and
-  `verus-lean` also imports a few `Strata` / `StrataDDM` modules directly, so it
-  is required here in its own right (not only transitively).
+## Setup
 
-Place both next to `verus-boogie` (see [Repository layout](#repository-layout)),
-then build from the `verus-boogie` root:
-```
-lake build
-```
-That single command builds the whole graph: Lake compiles `Strata` and
-`Strata-Boole` first, in dependency order, then `verus-lean`. You do **not**
-need to build the siblings separately beforehand. (They are local *path*
-dependencies — nothing is downloaded, and each one's build artifacts land in
-its own `.lake/`.)
+`verus-lean` builds with [Lake](https://github.com/leanprover/lean4/tree/master/src/lake)
+(Lean's build tool) and expects a couple of sibling repositories in the same
+workspace directory.
 
-The compiled binary can be found at `.lake/build/bin/verus-lean`.
+### 1. Clone the repositories
 
-(I find it helpful to symlink the `bin/` folder at root level: `ln -s .lake/build/bin bin`,
-or perhaps even better, `ln -s .lake/build/bin/verus-lean verus-lean`.)
-
-## Running
-
-You can run the compiled `verus-lean` binary directly:
-```
-.lake/build/bin/verus-lean boole <path/to/serialized_verus.json> [path/to/output.boole.st]
-```
-Alternatively, you can use a Python script that works in concert with my verus fork.
-(The script assumes that this fork is on your `$PATH`, or is (symlinked) at the root level of the project.)
-
-To use this script, run
-```
-python vl.py <path/to/verus.rs> <path/to/lean/output.lean>
-```
-
-One benefit of the Python script is that it (semi-)intelligently updates the declarations if the source verus `.rs` file changes.
-This replacement is very experimental, so be careful not to lose your work in Lean!
-
-## Testing (`tests/run_tests.sh`)
-
-Use `tests/run_tests.sh` from the `verus-boogie` root:
+Clone this repository and its two siblings into one workspace directory:
 
 ```bash
-./tests/run_tests.sh [stage options] [target_path]
+# This repository.
+git clone -b boole https://github.com/ChengZ3/verus-boogie.git
+
+# The Strata Boole dialect and verifier.
+git clone -b dalek-lite-benchmarks https://github.com/kondylidou/Strata-Boole.git
+
+# The Verus export front end.
+git clone -b boogie https://github.com/ccodel/verus.git
 ```
 
-### Repository layout
-
-By default, the script expects these repos as siblings:
+Your workspace should look like this:
 
 ```text
 <workspace>/
-  verus/
-  verus-boogie/
-  Strata/
+  verus-boogie/     # this repository
   Strata-Boole/
+  verus/            # only needed for the Verus export step
 ```
 
-So from `verus-boogie`, it uses:
-- Verus repo at `../verus` — the export front end; the binary at
-  `../verus/source/target-verus/release/verus` must be built from the `boogie`
-  branch, which carries the Lean JSON export and the `-V new-mut-ref` mode the
-  `--verus`/`--all` stages rely on
-- Strata repo at `../Strata` — the Core/DDM backend
-- Strata-Boole repo at `../Strata-Boole` — the Boole dialect and verifier; the
-  `--verify` stage runs `lake env lean` here, and the build links against it
+> **Temporary.** The `Strata-Boole` clone above uses the fork branch
+> `dalek-lite-benchmarks` of
+> [`kondylidou/Strata-Boole`](https://github.com/kondylidou/Strata-Boole), which
+> carries a few changes still under review upstream. Once they merge, switch this
+> clone to [`strata-org/Strata-Boole`](https://github.com/strata-org/Strata-Boole)
+> (`main`).
 
-If your repos are not in this layout, you can override paths with env vars:
+You do not need to clone Strata itself. It is a separate repository from
+Strata-Boole, and the `Strata-Boole` branch above declares it as a Git
+dependency, so Lake fetches it during the build from
+[`strata-org/Strata`](https://github.com/strata-org/Strata) (`main`).
+
+### 2. Build
+
+From this repository's root:
 
 ```bash
-VERUS_DIR=/path/to/verus STRATA_DIR=/path/to/Strata STRATA_BOOLE_DIR=/path/to/Strata-Boole ./tests/run_tests.sh --all /path/to/file.rs
+lake build
 ```
 
-You can also override direct binaries if needed:
+Lake fetches and compiles the whole dependency graph (Strata, Strata-DDM, and
+Strata-Boole), then `verus-lean`. The compiled binary is at:
 
-```bash
-VERUS_BIN=/path/to/verus VERUS_LEAN=/path/to/verus-lean ./tests/run_tests.sh --boole /path/to/file.json
+```
+.lake/build/bin/verus-lean
 ```
 
-Boole output directory can be overridden:
+For convenience you may symlink it to the repository root:
 
 ```bash
-BOOLE_DIR=/path/to/boole-output ./tests/run_tests.sh --boole /path/to/file.rs
+ln -s .lake/build/bin/verus-lean verus-lean
 ```
 
-Stage options:
-- `--verus`: export Verus `.rs` to JSON
-- `--boole`: generate Boole `.boole.st` plus a Lean verifier wrapper from target
-  (`.rs -> JSON -> Boole`, `.json -> Boole`)
-- `--verify`: run Strata Boole verification on generated Lean wrappers
-- `--all`: run `--verus --boole --verify`
+### Optional Strata patches for full verification
 
-Other options:
-- `--out <path>` output file path for single-target runs
-  (supported for single-target `--boole` runs)
-- `--verbose`
-- `--synth-disable <names>` disables selected synthesized verification aids
-  during Boole generation
+Building `verus-lean`, generating Boole translations, and verifying them all
+work against upstream Strata `main` with no extra steps. Almost every test
+verifies this way, so most readers can skip this section.
 
-`target_path` is optional. If provided, it should be a file path:
-- `.rs` for Verus export and downstream Boole generation/verification
-- `.json` for Boole generation
-- `.lean` for Boole verification wrappers
+Two narrow cases are the exception. Each needs a small addition to Strata that is
+not yet upstream, and both affect only the verification stage:
 
-`--boole` is end-to-end by target type:
-- `.rs`: runs Verus export + Boole generation
-- `.json`: runs Boole generation
-- no target: generates Boole files from existing JSON bundles
+- **128-bit bitvector operations**, for programs that use `u128` or `i128`, such
+  as the `b1` benchmarks. Without them, verifying such a program reports an
+  unknown `Bv128.*` operator. Generating the translation still works.
+- **The cvc5 `--enum-inst` flag**, for a handful of enum-heavy tests. Without it
+  they report `unknown` rather than passing. They still do not fail, and no
+  other test is affected.
 
-`target_path` may be relative or absolute.
+Only if you need one of these cases, put a copy of Strata at `../Strata` and
+apply the two additions to it. Then add a local override to this repository's
+`lakefile.lean`:
 
-### Verus -> Boole
+```
+require Strata from "../Strata"
+```
+
+Because it lives in the root package, this requirement takes precedence over the
+one Strata-Boole pulls from Git, so Lake builds against your local copy. Run
+`lake update Strata` so the manifest records the change, and leave both edits
+uncommitted.
+
+## Usage
+
+Everything runs through one driver, `tests/run_tests.sh`. It chains the pipeline
+(Verus export, Boole generation, verification), finds the sibling repositories,
+and starts from whichever stage the input calls for. From the repository root:
 
 ```bash
-# End-to-end from Verus source to Boole output
-./tests/run_tests.sh --boole tests/VerusFiles/FindMax.rs
+./tests/run_tests.sh [options] [target]
+```
 
-# From existing JSON to Boole output
+### Stages
+
+- `--verus`: export a Verus `.rs` file to JSON.
+- `--boole`: generate a Boole `.boole.st` file and a Lean file that embeds it for verification.
+- `--verify`: run Strata Boole verification on that Lean file.
+- `--all`: run all three (export, generate, verify).
+
+### Targets
+
+The target is a single input file:
+
+- `.rs`: a Verus source file. `--boole` exports it to JSON, then generates Boole.
+- `.json`: an exported JSON file. `--boole` generates Boole from it directly,
+  without re-running export.
+- `.lean`: the Lean file `--boole` writes, embedding the Boole program for verification. `--verify` runs it.
+- no target: each stage runs over the bundled fixtures under `tests/`, which is
+  how the regression suite runs.
+
+With `--verify`, an `.rs` or `.json` target selects the matching Lean file rather
+than regenerating it.
+
+### Other options
+
+- `--out <path>`: output path for a single-target `--boole` run.
+- `--solver <name>`: SMT solver for `--verify` (`cvc5` or `z3`; default `cvc5`).
+- `--verbose`: show full output, including every proof obligation during
+  `--verify`.
+- `--synth-disable <names>`: turn off selected synthesized verification aids
+  during generation.
+
+### Examples
+
+```bash
+# Full pipeline, from a Verus source file:
+./tests/run_tests.sh --all tests/VerusFiles/FindMax.rs
+
+# Generate Boole from an already-exported JSON file:
 ./tests/run_tests.sh --boole tests/JSONFilesBoogie/vlir-tests/FindMax/FindMax.json
 
-# Write Boole output to a custom file path
+# Write the Boole output to a custom path:
 ./tests/run_tests.sh --boole tests/VerusFiles/FindMax.rs --out /tmp/FindMax.boole.st
 ```
 
+Generated files are written to `tests/BooleFiles` (Boole source, `.boole.st`) and
+`tests/BoolePrograms` (each program embedded in a Lean file for verification).
 
-Default Boole output directory:
-- Boole source files: `tests/BooleFiles`
-- Lean verifier wrappers: `tests/BoolePrograms`
+### Repository paths
 
-### Boole translation internals
+Each stage relies on a different part of the workspace from [Setup](#setup):
 
-The Boole path lowers VLIR directly to `BooleDDM`:
+- `--verus` reads the Verus fork at `../verus`.
+- `--boole` needs only the built `verus-lean` binary.
+- `--verify` runs `lake env lean` inside `../Strata-Boole`. The proof builds
+  against whatever Strata that package resolves (`strata-org` main by default;
+  see [Optional Strata patches](#optional-strata-patches-for-full-verification)).
 
-- `VerusLean/VLIR/Boole/Context.lean` tracks fvar/bvar scope state and typed
-  support-declaration needs.
-- `Names.lean`, `Coercions.lean`, `Signatures.lean`, and `Prelude.lean` hold
-  name normalization, numeric coercion policy, known helper signatures, and
-  text-prelude planning metadata.
-- `Normalize.lean` performs pure VLIR rewrites before BooleDDM construction:
-  temp inlining, compute-proof recovery, decrease stripping, return-artifact
-  stripping, and capture-avoiding substitution.
-- `ForLoop.lean` recognizes Verus iterator scaffolding and returns a recovered
-  source-style loop plan; `Translate.lean` emits that plan as BooleDDM.
-- `Emit.lean` parses selected text preludes, merges operations, and renders via
-  Strata's Boole formatter.
+Override any path with an environment variable:
 
-`docs/seq-vec-pipeline.md` documents the live Seq/Vec support path.
-`docs/boole-translation-todo.md` tracks remaining cleanup work.
+```bash
+VERUS_DIR=/path/to/verus \
+STRATA_BOOLE_DIR=/path/to/Strata-Boole \
+  ./tests/run_tests.sh --all path/to/file.rs
+```
 
+The individual binaries and the output directory can be overridden too
+(`VERUS_BIN`, `VERUS_LEAN`, `BOOLE_DIR`).
+
+### Calling the translator directly
+
+`run_tests.sh` invokes the `verus-lean` binary for the JSON to Boole step. You
+can run that step on its own, for example to print to stdout or to script it
+outside the test tree:
+
+```bash
+.lake/build/bin/verus-lean boole <input.json> [output.boole.st]
+```
+
+With no output path it prints to stdout. This is the same translation `--boole`
+performs; the driver additionally writes the Lean file and runs the export and
+verify stages around it.
+
+### Regenerating Lean from changed sources
+
+An experimental Python helper, `vl.py`, drives the Verus fork end to end and
+re-syncs declarations when the source `.rs` file changes:
+
+```bash
+python vl.py <input.rs> <output.lean>
+```
+
+The re-sync is experimental, so keep backups of any hand-written Lean.
+
+## How the Boole translation works
+
+### The pipeline
+
+A Verus program reaches a solver in four stages. `tests/run_tests.sh` runs them
+in order, and **each stage writes an artifact you can inspect**:
+
+```
+ .rs ──(1) Verus export──▶ .json      ──(2) parse──▶ VLIR Decls
+                                                         │
+                          .boole.st ◀──(4) render── BooleDDM ◀──(3) translate
+                              │
+                              └──▶ Lean file ──▶ Strata (SMT solver or Lean tactics)
+```
+
+1. **Verus export.** The Verus fork (`../verus`, `boogie` branch) writes each
+   source file's intermediate representation (VLIR) as JSON. This step lives in
+   Verus, not here; the `--verus` stage runs it. The output goes to
+   `tests/JSONFilesBoogie/<suite>/<name>/<name>.json`, plus `<name>_*.json`
+   shards for multi-module programs.
+
+2. **Parse.** `VerusLean/VLIR/Parser.lean` reads that JSON into the VLIR data
+   types in `VerusLean/VLIR/Defs.lean`: the type `Typ`, expression `Exp`, and
+   statement `Stm`, plus the top-level `Decl` (cases like `specFn`, `proofFn`, `execFn`,
+   `struct`, and `enum`). The entry point is `Decls.fromFile?`.
+
+3. **Translate.** `VerusLean/VLIR/Boole/Translate.lean` lowers the VLIR
+   declarations to Strata's `BooleDDM` commands. `declsToBooleProgram`
+   orchestrates it:
+   1. resolve trait-method calls to their concrete impls (`TraitResolve.lean`)
+      and build the associated-type resolution;
+   2. build the layout maps (wrapper, struct, and enum field info) that length
+      contracts recurse through;
+   3. prune dead declarations (`Pruning.lean`): erased `Vec` and allocator
+      types, unreferenced impl accessors, abstract trait methods, and unused
+      `vstd` specs;
+   4. lower each declaration (`declToBoole`), delegating to the helper modules
+      below;
+   5. emit the support declarations and synthesized helpers gathered during
+      lowering, ahead of the user decls that reference them.
+
+4. **Render.** `VerusLean/VLIR/Boole/Emit.lean` turns the commands into
+   `.boole.st` text, prepending only the `nat`, `Seq`, and `Vec` preludes the
+   program actually uses (planned in `Prelude.lean`, loaded in `Main.lean`). The
+   result is embedded in a Lean file under `tests/BoolePrograms/` (via
+   `#strata ... #end`, with a `Strata.Boole.verify` call), which `Strata-Boole`
+   checks with an SMT solver.
+
+`Main.lean` is the command-line entry point and drives stages 2 through 4 for
+the `boole` command.
+
+### Where each concern lives (`VerusLean/VLIR/Boole/`)
+
+| concern | modules |
+|---|---|
+| BooleDDM builders | `Builder.lean` (types, expressions, statements), `Bld.lean` (short-alias re-export of `Builder`) |
+| translation state | `Context.lean` (variable scopes, layout maps, `SynthConfig`) |
+| naming | `Names.lean` (source names to Boole identifiers) |
+| numeric domains | `Coercions.lean`, `Cast.lean`, `IntPromotion.lean` (classify and coerce between `int`, `nat`, and bitvector), `Inference.lean` (type and bit-width inference), `Ops.lean` (per-operator builders) |
+| pre-lowering rewrites | `Normalize.lean` (temp inlining, substitution), `ForLoop.lean` (loop recovery), `Projection.lean` (struct and enum field layouts), `Reveal.lean` (`reveal` to an assumed equality) |
+| local-variable analysis | `Locals.lean` |
+| trait handling | `TraitResolve.lean` (trait-method call resolution) |
+| synthesized proof aids | `Synth.lean` (array-length and loop-bound facts), `VariantReqs.lean` (variant preconditions) |
+| dead-code pruning | `Pruning.lean` |
+| support declarations and preludes | `Support.lean`, `SupportEmit.lean`, `Prelude.lean` |
+| final assembly and rendering | `Emit.lean` (assembles commands, resolves names, loads preludes, renders `.boole.st`) |
+
+The Verus-to-Lean target, as opposed to Boole, uses `Elab.lean`, `Delab.lean`,
+and `Pp.lean` instead of the `Boole/` tree.
+
+### Debugging a translation error
+
+The stage that fails tells you where to look. Work from the outside in,
+inspecting the artifact each stage produced.
+
+1. **Find the failing stage.** Run `tests/run_tests.sh` and read the step banner
+   (`Step 1: Verus -> JSON`, `Step 2: JSON -> Boole`, `Step 3: Strata Boole
+   verify`), or run one stage at a time with `--verus`, `--boole`, or `--verify`.
+
+2. **Open the artifact for that stage.** Every intermediate is on disk:
+   - exported JSON: `tests/JSONFilesBoogie/<suite>/<name>/<name>.json`
+   - generated Boole program: `tests/BooleFiles/<suite>/<name>.boole.st`
+   - the program embedded in Lean: `tests/BoolePrograms/<suite>/<name>.lean`
+
+3. **Match the error to a stage and a module.**
+   - A **Verus export error** (from `../verus`) points at the Rust source or the
+     Verus fork, not verus-lean.
+   - A **parse error** (`unexpected …`, or a missing JSON key) means the JSON
+     contains a VLIR shape `Parser.lean` does not handle yet. Extend
+     `Parser.lean`, and `Defs.lean` if a new node is needed.
+   - A **translation error** (a Lean `throw`, such as `unsupported binary op …`
+     or `tuple projection out of range`) comes from `Translate.lean` or a helper.
+     The message names the concern: a numeric-domain mismatch points at the
+     `Inference`/`Coercions` group, a struct or enum field projection at
+     `Projection.lean`, and a loop at `ForLoop.lean`.
+   - A **Strata type-check error at verify** (`Undeclared type or category …`,
+     `Unknown variable …`, or `… shadows an enclosing block`) means an emitted construct
+     references a name that was never declared (a pruning or naming bug), or
+     collides with a reserved one. Open the `.boole.st` at the reported line and
+     trace the symbol back to the declaration that emitted it.
+   - A **verification `unknown` or timeout** comes from the SMT solver, not the
+     translation. The obligation may be genuinely hard, or it may be missing a
+     synthesized aid such as a length precondition or a loop bound (see
+     `Synth.lean`). Re-run `--verify --verbose` to see which obligation is open.
+
+4. **Reduce it.** Regenerate a single file with
+   `./tests/run_tests.sh --boole tests/VerusFiles/<name>.rs` and read its
+   `.boole.st` directly. The line and column in a Strata error map to a concrete
+   emitted command, which you can trace back to the VLIR `Decl` and the
+   translator code that produced it.
 
 ## Contributors
 
+- Cheng Zhang, research engineer at Stanford University (chengz3@stanford.edu)
 - Cayden Codel, PhD student at Carnegie Mellon University (ccodel@andrew.cmu.edu)
 - James Gallicchio, PhD student at Carnegie Mellon University (jgallicc@andrew.cmu.edu)
