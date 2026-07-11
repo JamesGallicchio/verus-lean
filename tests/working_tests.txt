@@ -26,6 +26,7 @@ tests/VerusFiles/mutual_recursion.rs
 tests/VerusFiles/proof_fn.rs
 tests/VerusFiles/recursion.rs
 tests/VerusFiles/sha256_compact_indexed.rs
+tests/VerusFiles/signed_div_rem.rs
 tests/VerusFiles/test_array.rs
 tests/VerusFiles/test_opaque_reveal.rs
 tests/VerusFiles/test_requires.rs

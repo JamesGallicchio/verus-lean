@@ -395,6 +395,55 @@ def selectResolvedCallName (fallback : Ident) (resolved? : Option Ident) : VPars
       pure fallback
   | none => pure fallback
 
+/-- Peel `Box`/`Unbox` coercion wrappers off an operand.  Verus boxes the
+    arguments of a generic trait-method call (`Self`/`Rhs` are type
+    parameters); the native `Binary` form the arith-operator rewrite targets
+    takes the bare operands, matching how unsigned `/`/`%` are already emitted. -/
+partial def stripBoxExp : Exp → Exp
+  | .Unary (.Box _) e => stripBoxExp e
+  | .Unary (.Unbox _) e => stripBoxExp e
+  | e => e
+
+/-- A fixed-width machine integer type (`uN`/`iN`/`usize`/`isize`), peeling
+    reference/box decorations.  `int`/`nat` are excluded: they are spec-only
+    and never reach an exec operator-trait call. -/
+partial def isMachineIntTyp : Typ → Bool
+  | .UInt _ | .SInt _ | .USize | .ISize => true
+  | .Decorated _ t => isMachineIntTyp t
+  | _ => false
+
+/-- Rewrite an exec call to a primitive-integer arithmetic operator-trait
+    method (`core::ops::arith::{Div,Rem}::{div,rem}`) into the equivalent
+    native `Binary` arithmetic, or `none` when it is not such a call.
+
+    Rust lowers *signed* `/` and `%` to these trait calls because its signed
+    division and remainder truncate toward zero; unsigned `/`/`%` and all of
+    `+`/`-`/`*` are already emitted as native `Binary`, so only signed `/`/`%`
+    arrive here.  They lower to the dedicated `TruncDiv`/`TruncRem` ops — Rust's
+    run-time truncation, distinct from Verus's Euclidean spec `/`/`%` — which
+    the Boole translator maps to `sdiv`/`smod` (SMT `bvsdiv`/`bvsrem`).  Keeping
+    exec on its own ops means it stays correct even if the Euclidean spec ops
+    are ever given genuine Euclidean lowering; today the two coincide because
+    Strata has only the truncated bitvector operations.
+
+    Gated on a machine-integer receiver so a user type's `Rem`/`Div` impl —
+    whose call carries the identical trait path but a struct/enum operand — is
+    left untouched.  Once the call is gone the abstract `Rem::rem`/`Div::div`
+    trait-method decl is unreferenced and `pruneUnreferencedTraitMethodDecls`
+    drops it; it otherwise names an undeclared associated `Output` type. -/
+def rewriteArithTraitCall? (fnName : Ident) (recvTy? : Option Typ)
+    (args : List Exp) : Option Exp :=
+  match recvTy? with
+  | some ty =>
+    if !isMachineIntTyp ty then none else
+    match fnName.toString, args with
+    | "Core.Ops.Arith.Div.div", [a, b] =>
+      some (.Binary (.Arith .TruncDiv .Exec) (stripBoxExp a) (stripBoxExp b))
+    | "Core.Ops.Arith.Rem.rem", [a, b] =>
+      some (.Binary (.Arith .TruncRem .Exec) (stripBoxExp a) (stripBoxExp b))
+    | _, _ => none
+  | none => none
+
 /--
   Parse a type from an already-parsed type and a decoration.
 
@@ -1181,7 +1230,11 @@ partial def Exp.fromJson (j : Json) : VParser Exp := do
       -- would track all instantiations or use type parameters.
       if st.callSiteTypes.contains fnName then st.callSiteTypes
       else st.callSiteTypes.insert fnName (argTypes, retType) }
-    return .Call callFn [] exps
+    -- A signed `/`/`%` in an expression position lowers to a native `Binary`
+    -- (`rewriteArithTraitCall?`), same as in the `Stm` call path.
+    match rewriteArithTraitCall? fnName argTypes.head? exps with
+    | some e => return e
+    | none => return .Call callFn [] exps
 
   | ("CallLambda", obj) =>
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 2
@@ -1545,7 +1598,18 @@ partial def Stm.fromJson (j : Json) : VParser Stm := do
     | .ok destObj =>
       let (lhs, lhsTy) ← Dest.fromJson <| ← destObj.getObjValM "dest"
       let lhsIsInit ← destObj.getBoolUnderKeyM "is_init"
-      let rhs := Exp.Call (.Fun callName) typArgs.toList args
+      -- Signed `/`/`%` reach here as `core::ops::arith::{Div,Rem}` calls;
+      -- rewrite them to native `Binary` arithmetic (`rewriteArithTraitCall?`),
+      -- gated on the receiver's annotated type (consistent with the
+      -- expression-call path, which also keys on the actual operand type).
+      let recvTy? ← match argsArr[0]? with
+        | some a =>
+          match Lean.Json.getObjValByPath a ["typ"] with
+          | .ok tj => some <$> Typ.fromJson tj
+          | .error _ => pure none
+        | none => pure none
+      let rhs := (rewriteArithTraitCall? fnName recvTy? args).getD
+        (Exp.Call (.Fun callName) typArgs.toList args)
       return .Assign lhs lhsTy rhs lhsIsInit
     | .error _ =>
       return .Call callName typArgs.toList args

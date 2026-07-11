@@ -180,8 +180,8 @@ def ArithOp.toTerm (a : ArithOp) (lhs rhs : Term) : CoreM Term := do
   | .Add => `($lhs + $rhs)
   | .Sub => `($lhs - $rhs)
   | .Mul => `($lhs * $rhs) -- CZ: temp fix for operator precedence, when to add parentheses?
-  | .EuclideanDiv => `($lhs / $rhs)
-  | .EuclideanMod => `($lhs % $rhs)
+  | .EuclideanDiv | .TruncDiv => `($lhs / $rhs)
+  | .EuclideanMod | .TruncRem => `($lhs % $rhs)
 
 def InequalityOp.toTerm (i : InequalityOp) (lhs rhs : Term) : CoreM Term := do
   match i with

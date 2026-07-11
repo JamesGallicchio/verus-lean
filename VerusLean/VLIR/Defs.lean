@@ -174,6 +174,14 @@ inductive ArithOp
   | EuclideanDiv
   /-- Euclidean mod (non-negative result, even for negative divisors). -/
   | EuclideanMod
+  /-- Rust's run-time signed `/`: truncate the quotient toward zero.  Distinct
+      from `EuclideanDiv` (they differ once an operand is negative).  Not emitted
+      by Verus directly; synthesized when lowering an exec `Div::div` call. -/
+  | TruncDiv
+  /-- Rust's run-time signed `%`: the remainder takes the sign of the dividend.
+      Distinct from `EuclideanMod` (whose result is non-negative).  Not emitted
+      by Verus directly; synthesized when lowering an exec `Rem::rem` call. -/
+  | TruncRem
 deriving Repr, Inhabited, DecidableEq, Hashable
 
 /-- Arithmetic inequality operations. -/

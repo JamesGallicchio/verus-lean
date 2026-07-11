@@ -602,8 +602,14 @@ def numBinopEmit (domain : NumDomain) (op : BinaryOp) (l r : BExpr) :
         | .Add => "Add"
         | .Sub => "Sub"
         | .Mul => "Mul"
-        | .EuclideanDiv => if s then "SDiv" else "UDiv"
-        | .EuclideanMod => if s then "SMod" else "UMod"
+        -- `SDiv`/`SMod` are SMT `bvsdiv`/`bvsrem`: truncate toward zero, with the
+        -- remainder taking the sign of the dividend.  That is Rust's run-time
+        -- `/`/`%` — exactly `TruncDiv`/`TruncRem`.  The Euclidean ops reuse the
+        -- same lowering as an approximation, exact for a non-negative dividend
+        -- (Strata has no `bvsmod`); should Strata gain genuine Euclidean ops,
+        -- only the Euclidean rows move, leaving the truncated exec ops correct.
+        | .EuclideanDiv | .TruncDiv => if s then "SDiv" else "UDiv"
+        | .EuclideanMod | .TruncRem => if s then "SMod" else "UMod"
       pure (applyBvBinOp w opName l r)
     | .Bitwise bitop _ =>
       -- Shift ops carry their own width; and/or/xor use the domain width.

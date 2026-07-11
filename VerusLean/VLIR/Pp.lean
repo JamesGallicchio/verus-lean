@@ -92,8 +92,8 @@ def ArithOp.pp (op : ArithOp) : String :=
   | .Add => " + "
   | .Sub => " - "
   | .Mul => " * "
-  | .EuclideanDiv => " / "
-  | .EuclideanMod => " % "
+  | .EuclideanDiv | .TruncDiv => " / "
+  | .EuclideanMod | .TruncRem => " % "
 
 def InequalityOp.pp (op : InequalityOp) : String :=
   match op with
