@@ -2852,9 +2852,9 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let localsAll := match bodyStm? with
     | some body => filterLocalsByUse (stripForLoopScaffoldingFromBody body) localsAll
     | none => localsAll
-  -- Drop names that the recovered for-loop's binder declares inline (post
-  -- kondylidou/pr/benchmarks 9d3e26e5b: a separate `var i;` would conflict
-  -- with the `for i := …` binder, producing "Variable i already in context").
+  -- Drop names that the recovered for-loop's binder declares inline (a
+  -- separate `var i;` would conflict with the `for i := …` binder,
+  -- producing "Variable i already in context").
   let localsAll := match bodyStm? with
     | some body => filterOutForLoopBinders body localsAll
     | none => localsAll

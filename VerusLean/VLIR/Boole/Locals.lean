@@ -168,9 +168,8 @@ def filterLocalsByUse
   locals.filter (fun decl => stmMentionsVar decl.name body)
 
 -- Collect the binder names of every recovered source `for` loop in the
--- body.  In the post-rebase Boole grammar (`kondylidou/pr/benchmarks` tip
--- 9d3e26e5b onward) the `for_to_by_statement` binder declares its loop
--- variable inline, so a separate `var i : bv64;` in the procedure's
+-- body.  The Boole grammar's `for_to_by_statement` binder declares its
+-- loop variable inline, so a separate `var i : bv64;` in the procedure's
 -- var-block would conflict with "Variable i of type bv64 already in
 -- context" at type-check time.  We exclude these names from the emitted
 -- locals list.

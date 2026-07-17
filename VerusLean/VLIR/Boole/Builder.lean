@@ -303,10 +303,9 @@ def forToStmt (loopVar : String) (loopTy : BType)
     (start limit : BExpr) (measure : Option BExpr)
     (invs : Array BExpr) (body : Array BStmt) : BStmt :=
   let binder := MonoBind.mono_bind_mk default (ann loopVar) loopTy
-  -- Field order in `for_to_by_statement` is (v, init, limit, step?, decr?, invs, body)
-  -- per kondylidou/pr/benchmarks commit `9d3e26e5b`.  `step?` is `none`
-  -- because the verus-lean translator only emits +1 ranges; `decr?` carries
-  -- the optional measure.
+  -- Field order in `for_to_by_statement` is (v, init, limit, step?, decr?,
+  -- invs, body).  `step?` is `none` because the verus-lean translator only
+  -- emits +1 ranges; `decr?` carries the optional measure.
   .for_to_by_statement default binder start limit (ann none)
     (mkMeasure measure) (invsFromArray invs) (.block default (ann body))
 

@@ -33,7 +33,7 @@ Clone this repository and its two siblings into one workspace directory:
 git clone -b boole https://github.com/ChengZ3/verus-boogie.git
 
 # The Strata Boole dialect and verifier.
-git clone -b dalek-lite-benchmarks https://github.com/kondylidou/Strata-Boole.git
+git clone https://github.com/strata-org/Strata-Boole.git
 
 # The Verus export front end.
 git clone -b boogie https://github.com/ccodel/verus.git
@@ -48,16 +48,9 @@ Your workspace should look like this:
   verus/            # only needed for the Verus export step
 ```
 
-> **Temporary.** The `Strata-Boole` clone above uses the fork branch
-> `dalek-lite-benchmarks` of
-> [`kondylidou/Strata-Boole`](https://github.com/kondylidou/Strata-Boole), which
-> carries a few changes still under review upstream. Once they merge, switch this
-> clone to [`strata-org/Strata-Boole`](https://github.com/strata-org/Strata-Boole)
-> (`main`).
-
 You do not need to clone Strata itself. It is a separate repository from
-Strata-Boole, and the `Strata-Boole` branch above declares it as a Git
-dependency, so Lake fetches it during the build from
+Strata-Boole, and Strata-Boole declares it as a Git dependency, so Lake
+fetches it during the build from
 [`strata-org/Strata`](https://github.com/strata-org/Strata) (`main`).
 
 ### 2. Build
@@ -79,6 +72,17 @@ For convenience you may symlink it to the repository root:
 
 ```bash
 ln -s .lake/build/bin/verus-lean verus-lean
+```
+
+The verification stage needs one more module built inside the sibling
+`Strata-Boole` checkout. The generated proof files import
+`StrataBoole.MetaVerifier`, which registers the Boole dialect and provides the
+`Strata.Boole.verify` entry point, but it is not part of Strata-Boole's default
+build target. Build it once:
+
+```bash
+cd ../Strata-Boole
+lake build StrataBoole.MetaVerifier
 ```
 
 ### Optional Strata patches for full verification

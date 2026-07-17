@@ -87,9 +87,9 @@ classify_boole_verify_log() {
     # to verify rec functions without an ADT @[cases] annotation.  Verus
     # programs often recurse on `int`, which has no constructors, so they
     # hit this wall in Boole even though Core has the same behavior.  The
-    # `.*` between "requires" and "@[cases]" tolerates Strata's newer
-    # wording that adds `a 'decreases' clause or` before `@[cases]`
-    # (kondylidou/pr/benchmarks after #1092 termination-checking landed).
+    # `.*` between "requires" and "@[cases]" tolerates the wording that
+    # adds `a 'decreases' clause or` before `@[cases]` (Strata #1092
+    # termination checking).
     #
     # `requires a bitvector source type.*BooleType.tvar` is the native Bv→Int
     # cast (`e as_int` / `e as_sint`, #1217) applied to a *type-variable*
