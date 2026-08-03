@@ -421,6 +421,18 @@ erasure, or name-collision semantics.
 - Regression coverage: `tests/VerusFiles/unit_tests/nested_loops_usize.rs`
   (the `u32` companion `nested_loops.rs` never reaches `IntPromotion`).
 
+### `[TRANS-vec-new]` `Vec::new` / `Vec::with_capacity` were dropped (RESOLVED)
+- Neither has an exported Verus declaration — both are compiler intrinsics — so
+  each call matched the residual `Vec_*` drop rule and vanished, leaving the
+  bound variable at an arbitrary value rather than the empty vector. A
+  `Vec::new()` followed by `assert(v.len() == 0)` was unprovable.
+- **Resolved:** both lower to the empty sequence
+  (`v := Sequence.empty_bv64`), taking the element type from the binding's
+  expected type. A capacity argument is discarded — it is not a length.
+- Element types with no dedicated typed token (tuples, datatypes) fall back to
+  the polymorphic `Sequence.empty<T>()` form; see
+  `[VERIFY-sequence-empty-polymorphic]`.
+
 ### `[TRANS-vec-len-binding]` `let n = v.len()` was dropped (RESOLVED)
 - `Vec::len` had a correct lowering, but the residual `Vec_*` drop rule ran
   first in the assignment path and `Vec_len` matches its broad prefix pattern,

@@ -1483,6 +1483,16 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         (expected?.bind seqElemTyp?).orElse (fun _ => expected?.bind vecElemTyp?)
           |>.getD .Empty
       seqEmptyExpr elemTy
+    else if isVecNewExecName fname || isVecWithCapacityExecName fname then
+      -- `Vec::new()` / `Vec::with_capacity(n)` both create an empty vector
+      -- (the capacity hint does not change the length).  With `Vec :=
+      -- Sequence`, the result is `Sequence.empty`; the element type comes
+      -- from the surrounding context (the binding's Vec/Seq type).  Any
+      -- capacity argument is discarded.
+      let elemTy :=
+        (expected?.bind vecElemTyp?).orElse (fun _ => expected?.bind seqElemTyp?)
+          |>.getD .Empty
+      seqEmptyExpr elemTy
     else if fnameStr == "Seq_update" then
       match argsFiltered with
       | [sArg, iArg, vArg] =>
@@ -2060,17 +2070,19 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
           return [setStmt (sanitizeVarName rootName) updatedRoot]
       -- Recognized Vec/Seq/Slice operations whose result is a pure
-      -- expression: length, index, and view.  These must be handled *before*
-      -- the `isVec2SeqDroppedCalleeName` drop below — a name like `Vec_len`
-      -- also matches that broad `Vec_*` pattern, so dropping first would
-      -- leave the LHS unconstrained (an arbitrary length) instead of the
-      -- intended sequence expression.
+      -- expression: length, index, view, and empty-vector construction
+      -- (`Vec::new`/`Vec::with_capacity`).  These must be handled *before*
+      -- the `isVec2SeqDroppedCalleeName` drop below — names like `Vec_len`
+      -- and `Vec_new` also match that broad `Vec_*` pattern, so dropping
+      -- first would leave the LHS unconstrained (an arbitrary length/value)
+      -- instead of the intended sequence expression.
       if isViewName fnName || isSeqLenSpecName fnName
             || isVecLenSpecName fnName || isVecLenExecName fnName
             || isVecIndexSpecName fnName || isVecIndexExecName fnName
             || isArrayIndexGetName fnName || isArrayFillForCopyTypesName fnName
             || isSliceLenSpecName fnName || isSliceLenExecName fnName
-            || isSliceIndexGetName fnName || isWrappingAddName fnName then
+            || isSliceIndexGetName fnName || isWrappingAddName fnName
+            || isVecNewExecName fnName || isVecWithCapacityExecName fnName then
         let rhs' ← expToBooleFlat env (some lhsTy) rhs
         match lvalueVarName? lhs with
         | some lhsName =>

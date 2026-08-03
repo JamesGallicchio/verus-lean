@@ -209,6 +209,20 @@ Vec mutation operations remain subject to their individual direct-lowering
 support; an unrecognized residual `Vec_*` call is currently dropped.
 
 
+### Executable `Vec::new` and `Vec::with_capacity`
+
+Neither has an exported Verus declaration — they are compiler intrinsics — so
+there is no procedure stub to call. Both construct an empty vector (a capacity
+hint does not affect the length), and with `Vec := Sequence` they lower to the
+empty sequence, taking the element type from the binding's expected type:
+
+```boole
+v := Sequence.empty_bv64;
+```
+
+Element types with no dedicated typed token (tuples, structs, type parameters)
+use the polymorphic `Sequence.empty<T>()` form; see `seqEmptyTokenName?`.
+
 ### Recognized Operations Precede the `Vec_*` Drop
 
 Residual `Vec_*` calls are dropped (`isVec2SeqDroppedCalleeName`) because their

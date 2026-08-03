@@ -255,6 +255,16 @@ def isVecFromElemName (name : Ident) : Bool :=
 def isVecPushName (name : Ident) : Bool :=
   identToBoole name == "Vec_push"
 
+/-- `Vec::new()` — a compiler intrinsic with no exported Verus declaration.
+    With `Vec := Sequence` it constructs the empty sequence. -/
+def isVecNewExecName (name : Ident) : Bool :=
+  identToBoole name == "Vec_new"
+
+/-- `Vec::with_capacity(n)` — like `Vec::new()`, produces an empty vector;
+    the capacity hint does not affect the (zero) length. -/
+def isVecWithCapacityExecName (name : Ident) : Bool :=
+  identToBoole name == "Vec_with_capacity"
+
 def isIndexSetName (name : Ident) : Bool :=
   identToBoole name == "Std_specs_Core_index_set"
 
