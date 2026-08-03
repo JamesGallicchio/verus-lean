@@ -2059,6 +2059,26 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         | none =>
           let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
           return [setStmt (sanitizeVarName rootName) updatedRoot]
+      -- Recognized Vec/Seq/Slice operations whose result is a pure
+      -- expression: length, index, and view.  These must be handled *before*
+      -- the `isVec2SeqDroppedCalleeName` drop below — a name like `Vec_len`
+      -- also matches that broad `Vec_*` pattern, so dropping first would
+      -- leave the LHS unconstrained (an arbitrary length) instead of the
+      -- intended sequence expression.
+      if isViewName fnName || isSeqLenSpecName fnName
+            || isVecLenSpecName fnName || isVecLenExecName fnName
+            || isVecIndexSpecName fnName || isVecIndexExecName fnName
+            || isArrayIndexGetName fnName || isArrayFillForCopyTypesName fnName
+            || isSliceLenSpecName fnName || isSliceLenExecName fnName
+            || isSliceIndexGetName fnName || isWrappingAddName fnName then
+        let rhs' ← expToBooleFlat env (some lhsTy) rhs
+        match lvalueVarName? lhs with
+        | some lhsName =>
+          let lhsTy' ← typToBooleType lhsTy
+          return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
+        | none =>
+          let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
+          return [setStmt (sanitizeVarName rootName) updatedRoot]
       -- `vec2seq` branch: same drop as the bare-call path above. Calls
       -- whose RHS is a Vec_*/Slice_into_vec call are dropped entirely,
       -- leaving the LHS variable at its prior value.
@@ -2081,20 +2101,6 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs tmpExpr
           return [varStmt tmpName ty', callS, setStmt (sanitizeVarName rootName) updatedRoot]
       else if (lookupFnRetTypeFull env callee).isSome then
-        let rhs' ← expToBooleFlat env (some lhsTy) rhs
-        match lvalueVarName? lhs with
-        | some lhsName =>
-          let lhsTy' ← typToBooleType lhsTy
-          return [setStmtTyped lhsTy' (sanitizeVarName lhsName) rhs']
-        | none =>
-          let (rootName, updatedRoot) ← lowerProjectedAssignRhsToRoot env projLayouts lhs rhs'
-          return [setStmt (sanitizeVarName rootName) updatedRoot]
-      else if isViewName fnName || isSeqLenSpecName fnName
-            || isVecLenSpecName fnName || isVecLenExecName fnName
-            || isVecIndexSpecName fnName || isVecIndexExecName fnName
-            || isArrayIndexGetName fnName || isArrayFillForCopyTypesName fnName
-            || isSliceLenSpecName fnName || isSliceLenExecName fnName
-            || isSliceIndexGetName fnName || isWrappingAddName fnName then
         let rhs' ← expToBooleFlat env (some lhsTy) rhs
         match lvalueVarName? lhs with
         | some lhsName =>

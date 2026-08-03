@@ -209,6 +209,21 @@ Vec mutation operations remain subject to their individual direct-lowering
 support; an unrecognized residual `Vec_*` call is currently dropped.
 
 
+### Recognized Operations Precede the `Vec_*` Drop
+
+Residual `Vec_*` calls are dropped (`isVec2SeqDroppedCalleeName`) because their
+declarations are filtered from the output and a call site would dangle. That
+rule matches on the `Vec_` prefix, so it also matches the names of operations
+that *do* have lowerings — `Vec_len`, `Vec_push`. Every recognized operation is
+therefore checked **before** the drop, in both the bare-call and
+assignment-RHS paths of `stmToBoole`.
+
+Dropping first is silent rather than loud: the statement disappears and the
+assigned variable keeps an arbitrary value, so `let n = v.len(); assert(n ==
+v.len())` fails with no diagnostic. Nested uses (loop conditions, asserts) go
+through the expression path, which has no drop rule — so a mis-ordering shows
+up only when the call is an assignment's entire right-hand side.
+
 ### Name Canonicalization
 
 Verus internal `impl` block names (e.g., `vec::impl&%1::push`) are

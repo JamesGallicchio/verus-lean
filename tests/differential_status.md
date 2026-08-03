@@ -421,6 +421,16 @@ erasure, or name-collision semantics.
 - Regression coverage: `tests/VerusFiles/unit_tests/nested_loops_usize.rs`
   (the `u32` companion `nested_loops.rs` never reaches `IntPromotion`).
 
+### `[TRANS-vec-len-binding]` `let n = v.len()` was dropped (RESOLVED)
+- `Vec::len` had a correct lowering, but the residual `Vec_*` drop rule ran
+  first in the assignment path and `Vec_len` matches its broad prefix pattern,
+  so the statement disappeared and `n` kept an arbitrary value.
+- **Resolved:** every recognized operation (length, index, view) is now checked
+  *before* the drop rule in the assignment-RHS path, matching the order the
+  bare-call path already used.
+- Only assignment right-hand sides were affected: nested uses (loop conditions,
+  asserts) go through the expression path, which has no drop rule.
+
 ### `[TRANS-generic-reveal]` Generic `reveal` support
 - Non-generic opaque spec functions are emitted declaration-only.
   `reveal(f)` becomes `assume forall params :: f(params) == body;`.
