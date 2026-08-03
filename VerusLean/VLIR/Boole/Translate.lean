@@ -2168,9 +2168,10 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
     -- Source-style for-loop recovery is attempted by `stmListToBoole`
     -- before this fallback. If we get here, lower the VLIR loop as a
     -- while loop.
-    -- `Loop.cond` has already been populated upstream by `normalizeBody`'s
-    -- `extractLoopGuardFromBody` pass (when the source omitted a cond and
-    -- the body opened with a guard prefix), so we just consume it here.
+    -- `Loop.cond` has already been populated upstream by `normalizeBody`,
+    -- which both hoists a body-prefix guard (`extractLoopGuardFromBody`) and
+    -- inlines a cond block's guard temporary into the expression
+    -- (`collectCondGuardSubsts`), so the expression is ready to lower here.
     let loopLabel? ← do
       match label with
       | some l => pure (some (sanitizeIdent l))
@@ -2180,14 +2181,9 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
           pure (some (← implicitLoopLabel))
         else
           pure none
-    let condTempSubsts : List (String × Exp) :=
-      match cond with
-      | some (Stm.Block stms, _) => (splitAssignPrefix stms).fst
-      | some (s, _) => match assignFromPrefix s with | some sub => [sub] | none => []
-      | none => []
     let condExpr ←
       match cond with
-      | some (_, e) => expToBooleFlat env (some .Bool) (substExps condTempSubsts e)
+      | some (_, e) => expToBooleFlat env (some .Bool) e
       | none => pure (boolConst true : BExpr)
     let invExprs ← invs.toArray.mapM (fun inv => expToBooleFlat env (some .Bool) inv.body)
     let measureExpr? ← match decrease with

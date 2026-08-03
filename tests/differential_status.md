@@ -378,6 +378,29 @@ erasure, or name-collision semantics.
   with 3/3 obligations passing. The generated body contains
   `out_ := Sequence.build(out_, value)`.
 
+### `[TRANS-loop-cond-havoc]` While-loop guard temporaries were havoc'd (RESOLVED)
+- Verus materializes a loop guard either as `tmp := expr` or via the idiom
+  `if c { tmp := true } else { tmp := false }`, with the loop's condition
+  expression being just `tmp`. Only the direct-assignment form was inlined, so
+  the if-form left `tmp` free: the loop condition became an unconstrained
+  boolean and the body could not assume it.
+- Consequence: invariant-maintenance and measure-decrease obligations were
+  unprovable for any such loop, even though the invariants themselves were
+  translated faithfully.
+- A *compound* guard (`i1 < v1.len() && i2 < v2.len()`) is the same idiom with
+  the second operand's evaluation inside the true branch — that is what makes
+  `&&` short-circuit — so only the branch's *final* statement assigns the
+  temporary. `branchFinalAssign?` splits a branch there and resolves its value
+  against the operands the branch defines; `&&` / `||` are recovered when the
+  other branch is a literal, matching how the loop's invariants are written.
+- **Resolved:** `collectCondGuardSubsts` recognizes both forms (skipping the
+  ghost `assume` prefix) so the condition inlines to the source guard —
+  `while (as_uint(i1) < Sequence.length(v1) && as_uint(i2) < Sequence.length(v2))`.
+- Inlining happens in `normalizeBody`, which also empties the consumed cond
+  block. That keeps `filterLocalsByUse`'s plain `stmMentionsVar` check correct:
+  the guard temporary is gone from the body, so no `var` is emitted for it.
+- Corpus-wide: no `while (<bare temp>)` remains in any generated program.
+
 ### `[TRANS-generic-reveal]` Generic `reveal` support
 - Non-generic opaque spec functions are emitted declaration-only.
   `reveal(f)` becomes `assume forall params :: f(params) == body;`.

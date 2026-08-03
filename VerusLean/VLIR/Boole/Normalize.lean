@@ -391,6 +391,91 @@ partial def flattenSeqBlocks : List Stm → List Stm
   | (.Block stms) :: rest => flattenSeqBlocks stms ++ flattenSeqBlocks rest
   | s :: rest => s :: flattenSeqBlocks rest
 
+/-- A boolean literal, if `e` is one. -/
+private def boolLit? : Exp → Option Bool
+  | .Const (.Bool b) _ => some b
+  | _ => none
+
+/-- Split a guard branch into the statements that precede its final assignment
+    and that assignment's target and value.
+
+    A branch of a *compound* guard is not a bare literal assignment: Verus
+    evaluates the operands of the second conjunct inside the branch (that is
+    what makes `&&` short-circuit), so the shape is
+
+        { tmp_a := i2; tmp_b := len(v2); t := tmp_a < tmp_b }
+
+    Only the final statement assigns the guard temporary; the ones before it
+    define the operands it reads. -/
+private def branchFinalAssign? (s : Stm) : Option (List Stm × String × Exp) :=
+  let finalOf (init : List Stm) (last : Stm) : Option (List Stm × String × Exp) :=
+    match stripSingletonBlocks last with
+    | .Assign lhs _ rhs _ => (lvalueVarName? lhs).map (fun n => (init, n, rhs))
+    | _ => none
+  match stripSingletonBlocks s with
+  | .Block stms =>
+    match (flattenSeqBlocks stms).reverse with
+    | last :: revInit => finalOf revInit.reverse last
+    | [] => none
+  | other => finalOf [] other
+
+mutual
+
+/-- Recognize Verus's guard-materialization idiom, which reifies a condition
+    into a boolean temporary `t`:
+
+        if c { t := true } else { t := false }
+
+    Returns `(t, guard)` so the guard can be inlined as `t := guard`.
+
+    A compound guard nests: `a && b` puts b's evaluation in the true branch and
+    `t := false` in the false branch, so the branches are reconstructed
+    recursively and recombined.  `&&` / `||` are recovered when one branch is a
+    literal; anything else becomes a conditional expression, which is the
+    faithful reading of the two branches. -/
+partial def condBoolFromIf? (s : Stm) : Option (String × Exp) :=
+  match stripSingletonBlocks s with
+  | .If c thenS (some elseS) =>
+    match branchFinalAssign? thenS, branchFinalAssign? elseS with
+    | some (tInit, t1, tRhs), some (eInit, t2, eRhs) =>
+      if t1 != t2 then none
+      else
+        -- Resolve each branch's value against the temporaries that branch
+        -- defines before assigning the guard.
+        let tVal := substExps (collectCondGuardSubsts tInit) tRhs
+        let eVal := substExps (collectCondGuardSubsts eInit) eRhs
+        match boolLit? tVal, boolLit? eVal with
+        | some true,  some false => some (t1, c)
+        | some false, some true  => some (t1, .Unary .Not c)
+        -- `if c { t := b } else { t := false }` is `c && b`.
+        | none,       some false => some (t1, .Binary .And c tVal)
+        -- `if c { t := true } else { t := b }` is `c || b`.
+        | some true,  none       => some (t1, .Binary .Or c eVal)
+        | _, _ => some (t1, .If c tVal eVal)
+    | _, _ => none
+  | _ => none
+
+/-- Collect the substitutions a loop's condition block uses to compute its
+    guard temporary.  Verus materializes the guard either as a direct
+    `tmp := expr` assignment or via the `if c { tmp := true } else { tmp :=
+    false }` idiom, optionally preceded by ghost `assume` facts.  Ghost
+    assumes (and any other unrecognized statement) are skipped; every
+    recognized guard-defining statement contributes a substitution so the
+    condition expression (typically just `tmp`) inlines to the source guard.
+
+    A compound guard computes intermediate temporaries first, so each new
+    right-hand side is expanded against the ones collected before it.  That
+    keeps every entry self-contained, and `substExps`' single left-to-right
+    pass then resolves the condition however the entries are ordered. -/
+partial def collectCondGuardSubsts (stms : List Stm) : List (String × Exp) :=
+  let linear := (flattenSeqBlocks stms).map stripSingletonBlocks
+  linear.foldl (fun acc s =>
+    match assignFromPrefix s <|> condBoolFromIf? s with
+    | some (name, rhs) => acc ++ [(name, substExps acc rhs)]
+    | none => acc) []
+
+end
+
 def extractLoopGuardFromBody : Stm → Option (Exp × Stm)
   | .Block stms =>
     let linear := (flattenSeqBlocks stms).map stripSingletonBlocks
@@ -574,7 +659,16 @@ mutual
         -- has any tmp prefix substituted in by `extractLoopGuardFromBody`,
         -- so the cond's prefix-Stm slot stays empty.
         .Loop isFor label (some (.Block [], g)) (normalizeStm isPureCallName b'') invs dec
-      | _, _ => .Loop isFor label cond' body' invs dec
+      | some (condStm, e), _ =>
+        -- A populated cond block computes the guard into a temporary that the
+        -- condition expression then reads.  Inline it and empty the block, the
+        -- same shape the guard-hoisting arm above produces: the emitted loop
+        -- takes only the expression, so leaving the assignments here would keep
+        -- the temporary alive for `filterLocalsByUse` and emit a `var` that
+        -- nothing reads.
+        let subs := collectCondGuardSubsts [condStm]
+        .Loop isFor label (some (.Block [], substExps subs e)) body' invs dec
+      | none, none => .Loop isFor label cond' body' invs dec
     | .AssertQuery m b => .AssertQuery m (normalizeStm isPureCallName b)
     | .DeadEnd b => .DeadEnd (normalizeStm isPureCallName b)
     | .OpenInvariant b => .OpenInvariant (normalizeStm isPureCallName b)
