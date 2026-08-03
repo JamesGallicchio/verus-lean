@@ -350,7 +350,10 @@ erasure, or name-collision semantics.
   `impl IntFn for spec_fn(int) -> int` body `self(x)` is preserved and
   `f.call_int(2)` dispatches to `Impl__0_call_int(f, 2)`, but Strata cannot SMT
   encode `Impl__0_call_int` because its `self` parameter has function type)
-- `verus-examples:vectors` (`datatype Vec` path is source-close; `pusher` still hits `[VERIFY-lambda-encoding]` and `[TRANS-extensional-eq]`)
+- `verus-examples:vectors` (`Vec<T>` lowers directly to `Sequence T`;
+  executable `Vec::push` now lowers to `Sequence.build`, while other Vec
+  mutations still need individual direct lowerings; `pusher` also hits
+  `[VERIFY-lambda-encoding]` and `[TRANS-extensional-eq]`)
 - `verus-examples:verified_vec` (In `tests/ignored_tests.txt` as `UPSTREAM-IGNORE`. Verus errors with `E0432: unresolved import vstd::ptr` — upstream Verus marked this example `ignore` (line 1 of the source: *"intending to deprecate PPtr, should update this to raw_ptr"*) because vstd no longer exposes `vstd::ptr`; the example uses the deprecated `PPtr` API. Either port to `vstd::simple_pptr` or wait for upstream port to `vstd::raw_ptr`)
 - `vlir-tests:b3_minimal` (currently verifies, but source `pub closed spec fn edwards_{x,y,z,t}` bodies are emitted globally visible; `[TRANS-closed-visibility]`)
 - `vlir-tests:b4_minimal` (currently verifies and preserves native `choose`, but source `pub closed spec fn edwards_{x,y,z,t}` bodies are emitted globally visible; `[TRANS-closed-visibility]`)
@@ -363,6 +366,17 @@ erasure, or name-collision semantics.
 - `vlir-tests:sets` (`[VERIFY-lambda-encoding]` in `Set::new`, `Set::filter`, `Set::map`, `set_map`, and `fold`; `[TRANS-higher-order-collection-stubs]` distorts `Set_new`, `Set_filter`, `Set_lib_map`, and `Set_Fold_fold`; `[TRANS-extensional-eq]` still expands source `===` away to raw Core equality; `s.choose()` is currently just uninterpreted `Set_choose` without witness semantics`)
 - `vlir-tests:test_vstd` (`[VERIFY-lambda-encoding]` in `Set_new(fun i => ...)`, `Map_new(fun i => ..., fun i => ...)`, `Seq_new(5, fun i => ...)`; fixed-size array literals lower to concrete `Sequence.empty`/`Sequence.build` chains)
 ## Gap Index
+
+### `[TRANS-vec-push]` Executable `Vec::push` was dropped (RESOLVED)
+- **Resolved:** under the `Vec<T> := Sequence T` representation, a push call
+  now emits `vec := Sequence.build(vec, value)` rather than disappearing with
+  the residual `Vec_*` stub.
+- Local mutable borrows use Verus prophecy temporaries; the translator recovers
+  the current-value alias and redirects the mutation to the owning Vec before
+  temporary inlining.
+- Validation: `tests/VerusFiles/unit_tests/vec_push.rs` verifies end to end
+  with 3/3 obligations passing. The generated body contains
+  `out_ := Sequence.build(out_, value)`.
 
 ### `[TRANS-generic-reveal]` Generic `reveal` support
 - Non-generic opaque spec functions are emitted declaration-only.

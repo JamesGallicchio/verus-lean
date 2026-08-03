@@ -189,6 +189,26 @@ These procedures are **not** in the prelude — they are generated from the
 SST during translation. If the Verus source file does not import
 `vstd::std_specs::vec`, the corresponding declarations will be absent.
 
+### Executable `Vec::push`
+
+Verus specifies push as `vec@ == old(vec)@.push(value)`. Because Vec is already
+a Sequence in Boole, the executable call is lowered without a procedure stub:
+
+```boole
+vec := Sequence.build(vec, value);
+```
+
+The SST represents a borrow through a mutable-reference prophecy temporary.
+Before statement lowering, the translator aliases that compiler temporary back
+to the owning vector, ensuring the assignment updates the program-visible
+variable. `Vec_push` itself is then filtered from the output.
+
+The regression example `tests/VerusFiles/unit_tests/vec_push.rs` checks the
+complete contract and generates `out_ := Sequence.build(out_, value)`. Other
+Vec mutation operations remain subject to their individual direct-lowering
+support; an unrecognized residual `Vec_*` call is currently dropped.
+
+
 ### Name Canonicalization
 
 Verus internal `impl` block names (e.g., `vec::impl&%1::push`) are

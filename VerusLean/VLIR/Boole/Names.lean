@@ -252,14 +252,18 @@ def isSliceIntoVecName (name : Ident) : Bool :=
 def isVecFromElemName (name : Ident) : Bool :=
   identToBoole name == "Vec_from_elem"
 
+def isVecPushName (name : Ident) : Bool :=
+  identToBoole name == "Vec_push"
+
 def isIndexSetName (name : Ident) : Bool :=
   identToBoole name == "Std_specs_Core_index_set"
 
 /-- `vec2seq` branch: call targets that should be dropped during
     translation because the Vec surface collapses to `Sequence.*` ops.
     `Vec_from_elem` is the one kept stub (we synthesize a body for it);
-    everything else named `Vec_*` or `Slice_into_vec` is a dead
-    procedure with no Boole-side counterpart. -/
+    operations such as `Vec_push` that have direct statement lowerings are
+    handled before this fallback.  Any remaining `Vec_*` or `Slice_into_vec`
+    call is a dead procedure with no Boole-side counterpart. -/
 def isVec2SeqDroppedCalleeName (name : Ident) : Bool :=
   let n := identToBoole name
   (n.startsWith "Vec_" && n != "Vec_from_elem") || isSliceIntoVecName name

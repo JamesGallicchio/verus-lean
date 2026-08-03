@@ -63,6 +63,7 @@ tests/VerusFiles/unit_tests/references.rs
 tests/VerusFiles/unit_tests/requires_ensures.rs
 tests/VerusFiles/unit_tests/seq_typed.rs
 tests/VerusFiles/unit_tests/structural_recursion.rs
+tests/VerusFiles/unit_tests/vec_push.rs
 tests/VerusFiles/unit_tests/verifier_external.rs
 tests/VerusFiles/unit_tests/while_invariant.rs
 #
