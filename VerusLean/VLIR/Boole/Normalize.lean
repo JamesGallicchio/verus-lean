@@ -476,6 +476,34 @@ partial def collectCondGuardSubsts (stms : List Stm) : List (String × Exp) :=
 
 end
 
+/-- Strip the wrappers Verus puts around a numeric operand (`Box`/`Unbox`
+    coercions, `Clip` overflow checks, trigger markers) to reach the value. -/
+private partial def stripNumWrappers : Exp → Exp
+  | .Unary (.Box _) e | .Unary (.Unbox _) e | .Unary .Trigger e => stripNumWrappers e
+  | .Unary (.Clip _ _) e => stripNumWrappers e
+  | e => e
+
+/-- True if `e` already states `0 <= v` (in either operand order).  Lets the
+    caller skip synthesizing a non-negativity invariant a source invariant
+    supplies, so the emitted loop carries the fact once. -/
+def statesNonNegOf (v : String) : Exp → Bool
+  | .Binary (.Inequality op) lhs rhs =>
+    let lhs := stripNumWrappers lhs
+    let rhs := stripNumWrappers rhs
+    let isZero : Exp → Bool := fun e => match e with
+      | .Const (.Int 0) _ => true
+      | _ => false
+    let isVar : Exp → Bool := fun e => match e with
+      | .Var x => x == v
+      | _ => false
+    match op with
+    | .Le => isZero lhs && isVar rhs
+    | .Ge => isVar lhs && isZero rhs
+    | _ => false
+  -- Verus writes chained comparisons (`0 <= i <= n`) as a conjunction.
+  | .Binary .And e1 e2 => statesNonNegOf v e1 || statesNonNegOf v e2
+  | _ => false
+
 def extractLoopGuardFromBody : Stm → Option (Exp × Stm)
   | .Block stms =>
     let linear := (flattenSeqBlocks stms).map stripSingletonBlocks

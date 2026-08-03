@@ -581,4 +581,21 @@ def rewriteLocalsForPromoted
       { decl with ty := .Int }
     else decl)
 
+private def isUnsignedCandidateTyp : Typ → Bool
+  | .USize => true
+  | .Decorated _ inner => isUnsignedCandidateTyp inner
+  | _ => false
+
+/-- The promoted names whose source type was `usize`, so `0 <= name` holds by
+    construction.  Retyping to `Int` drops that guarantee, and a loop havocs
+    the variable, so loops re-pin it as a synthesized invariant.  Must be
+    called with the *pre-rewrite* locals, whose types still record signedness.
+    `isize` locals are excluded: promoting them loses no such fact. -/
+def unsignedPromotedLocals
+    (promoted : Std.HashSet String) (locals : List LocalDeclInfo) : Std.HashSet String :=
+  locals.foldl (fun acc decl =>
+    if promoted.contains decl.name && isUnsignedCandidateTyp decl.ty then
+      acc.insert decl.name
+    else acc) ∅
+
 end VerusLean.Boole.IntPromotion

@@ -401,6 +401,26 @@ erasure, or name-collision semantics.
   the guard temporary is gone from the body, so no `var` is emitted for it.
 - Corpus-wide: no `while (<bare temp>)` remains in any generated program.
 
+### `[TRANS-promoted-usize-nonneg]` Promoted `usize` lost `0 <= i` (RESOLVED)
+- `IntPromotion` retypes index-only `usize` locals as `Int` to keep them out of
+  bv↔int round-trips. A `usize` is non-negative by construction; as an `Int` it
+  is not, and a loop havocs the variable, so `0 <= i` was lost at the loop
+  boundary and every `s[i]` obligation failed on its lower-bound half unless
+  the source happened to state the invariant by hand.
+- **Resolved:** loops re-pin it (`Synth.nonNegFact`, under
+  `SynthConfig.loopLowerBound`) for the promoted-unsigned counters they modify
+  *and* that their guard reads. Signedness is read off before the retyping;
+  `isize` locals are excluded, since for them the fact can be false.
+- The guard-read condition is what makes the invariant sound at *entry*: a
+  local declared inside the body (an inner loop's counter) holds no value at
+  the enclosing loop's entry, so pinning `0 <= j` there would assert something
+  about an uninitialized variable. Reading a local in the guard means Rust's
+  definite-assignment rule already accepted the program.
+- A source invariant that already states `0 <= i` suppresses the synthesized
+  one (`statesNonNegOf`), so the emitted loop carries the fact once.
+- Regression coverage: `tests/VerusFiles/unit_tests/nested_loops_usize.rs`
+  (the `u32` companion `nested_loops.rs` never reaches `IntPromotion`).
+
 ### `[TRANS-generic-reveal]` Generic `reveal` support
 - Non-generic opaque spec functions are emitted declaration-only.
   `reveal(f)` becomes `assume forall params :: f(params) == body;`.

@@ -101,6 +101,12 @@ structure BuildCtx where
       with `withPromotedLocals`.  Consulted by `tryForLoopRecovery` to
       decide whether to lower the binder type as `Int`. -/
   promotedLocals : Std.HashSet String := ∅
+  /-- The subset of `promotedLocals` whose source type was *unsigned*
+      (`usize`).  Those values are non-negative by construction, a fact the
+      retyping to `Int` drops; loops re-pin it as a synthesized invariant
+      (`Synth.nonNegFact`).  Signed `isize` locals are deliberately absent —
+      for them `0 <= i` can be false. -/
+  promotedUnsignedLocals : Std.HashSet String := ∅
   /-- Top-level commands synthesized on demand during expression lowering
       (e.g. the first-order closure function + int-recursive helper that
       replace a `Seq::map` lambda — see `emitSeqMapDecls`). Spliced into
@@ -222,17 +228,17 @@ def freshSynthId : BuildM Nat := do
 def pushSynthDecl (cmd : BooleDDM.Command SourceRange) : BuildM Unit :=
   modify (fun ctx => { ctx with synthDecls := ctx.synthDecls.push cmd })
 
-/-- Set the per-procedure promoted-locals set.  Private — callers use
-    `withPromotedLocals` for proper save/restore semantics. -/
-private def setPromotedLocals (promoted : Std.HashSet String) : BuildM Unit :=
-  modify (fun ctx => { ctx with promotedLocals := promoted })
-
-/-- Run an action with the given per-procedure promoted-locals set. -/
-def withPromotedLocals (promoted : Std.HashSet String) (action : BuildM α) : BuildM α := do
-  let old := (← get).promotedLocals
-  setPromotedLocals promoted
+/-- Run an action with the given per-procedure promoted-locals sets.
+    `unsigned` is the subset of `promoted` whose source type was `usize`. -/
+def withPromotedLocals (promoted : Std.HashSet String)
+    (unsigned : Std.HashSet String := ∅) (action : BuildM α) : BuildM α := do
+  let oldPromoted := (← get).promotedLocals
+  let oldUnsigned := (← get).promotedUnsignedLocals
+  modify (fun ctx =>
+    { ctx with promotedLocals := promoted, promotedUnsignedLocals := unsigned })
   let result ← action
-  modify (fun ctx => { ctx with promotedLocals := old })
+  modify (fun ctx =>
+    { ctx with promotedLocals := oldPromoted, promotedUnsignedLocals := oldUnsigned })
   pure result
 
 /-- True if `name` was promoted to `Int` for the currently-translated
@@ -240,5 +246,11 @@ def withPromotedLocals (promoted : Std.HashSet String) (action : BuildM α) : Bu
 def isPromotedLocal (name : String) : BuildM Bool := do
   let ctx ← get
   return ctx.promotedLocals.contains name
+
+/-- True if `name` was promoted to `Int` from an *unsigned* source type, so
+    `0 <= name` holds by construction. -/
+def isPromotedUnsignedLocal (name : String) : BuildM Bool := do
+  let ctx ← get
+  return ctx.promotedUnsignedLocals.contains name
 
 end VerusLean.Boole.Context

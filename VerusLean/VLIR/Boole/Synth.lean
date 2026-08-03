@@ -65,4 +65,16 @@ def prefixRangeRequires (seqE idxE : BExpr) : BooleDDM.SpecElt SourceRange :=
 def lowerBoundInvExp (startExp : Exp) (loopVarName : String) : Exp :=
   .Binary (.Inequality .Le) startExp (.Var loopVarName)
 
+/-- `0 <= e` — the non-negativity a `usize` carries in its type.  `IntPromotion`
+    retypes index-only `usize` locals as `Int` to keep them out of bv↔int
+    round-trips, which drops that guarantee.  It survives straight-line code
+    (the assignments that establish it are visible) but not a loop, which
+    havocs the variable: emitted (under `SynthConfig.loopLowerBound`) as an
+    invariant for promoted unsigned counters a loop modifies and its guard
+    reads, so `s[i]` obligations keep their `0 <= i` half.  Signed `isize`
+    locals are excluded at the call site — for them the fact is not merely
+    unproven but false. -/
+def nonNegFact (e : BExpr) : BExpr :=
+  Bld.intLe (Bld.intConst 0) e
+
 end VerusLean.Boole.Synth

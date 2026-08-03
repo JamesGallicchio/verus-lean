@@ -2186,6 +2186,33 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
       | some (_, e) => expToBooleFlat env (some .Bool) e
       | none => pure (boolConst true : BExpr)
     let invExprs ← invs.toArray.mapM (fun inv => expToBooleFlat env (some .Bool) inv.body)
+    -- (SynthConfig.loopLowerBound) A `usize` counter is non-negative by
+    -- construction, but `IntPromotion` retypes index-only counters as `Int`
+    -- and the loop havocs them, so `0 <= i` is lost at the loop boundary and
+    -- every `s[i]` obligation fails on its lower-bound half.  Re-pin it,
+    -- skipping any counter a source invariant already states.  Appended, so
+    -- existing invariants keep their obligation indices.
+    --
+    -- Restricted to promoted-unsigned locals that the loop modifies *and* that
+    -- its guard reads.  An invariant must also hold on entry, and a local
+    -- declared inside the body (an inner loop's counter, say) has no value
+    -- there — pinning `0 <= j` on the enclosing loop would assert something
+    -- about an uninitialized variable.  Reading a local in the guard means
+    -- Rust's definite-assignment rule already ran, so it holds a value at
+    -- entry.
+    let invExprs ← do
+      if !(← getSynthConfig).loopLowerBound then pure invExprs
+      else
+        let condVars := match cond with
+          | some (_, e) => expVarRefs e
+          | none => []
+        let modifiedNames :=
+          ((collectSetVars body).map (·.name) ++ collectIndexSetTargets body).eraseDups
+        modifiedNames.foldlM (fun acc v => do
+          if condVars.contains v && (← isPromotedUnsignedLocal v) &&
+              !invs.any (fun inv => statesNonNegOf v inv.body) then
+            pure (acc.push (Synth.nonNegFact (← resolveVar v)))
+          else pure acc) invExprs
     let measureExpr? ← match decrease with
       | [] => pure none
       | e :: _ => do
@@ -2883,6 +2910,8 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
     match bodyStm? with
     | some body => IntPromotion.inferIntPromotableLocals localsAll body
     | none => ∅
+  -- Read off signedness before the rewrite replaces the source types.
+  let promotedUnsigned := IntPromotion.unsignedPromotedLocals promoted localsAll
   let localsAll := IntPromotion.rewriteLocalsForPromoted promoted localsAll
   let bodyStm? := bodyStm?.map (IntPromotion.rewriteBodyForPromoted promoted)
   let outputs := retDecls
@@ -2890,7 +2919,7 @@ def proofFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : M
   let (outputDecls?, outputNamesSan) ← mkMonoOutputs outputs
   let outputsAnn := ann outputDecls?
   let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
-  let (specElts, body, decrAnn) ← withPromotedLocals promoted <| withScope do
+  let (specElts, body, decrAnn) ← withPromotedLocals promoted promotedUnsigned <| withScope do
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let userSpecElts ← mkSpecElts envLocal f.requires f.ensures []
@@ -3132,6 +3161,8 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   -- shot so the rest of the translator picks `expected = some Int`
   -- automatically; the for-loop arm reads the same set from BuildCtx.
   let promoted := IntPromotion.inferIntPromotableLocals localsAll rewrittenBody
+  -- Read off signedness before the rewrite replaces the source types.
+  let promotedUnsigned := IntPromotion.unsignedPromotedLocals promoted localsAll
   let localsAll := IntPromotion.rewriteLocalsForPromoted promoted localsAll
   let rewrittenBody := IntPromotion.rewriteBodyForPromoted promoted rewrittenBody
   let outputs := retDecls ++ mutOutputDecls
@@ -3140,7 +3171,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
   let outputsAnn := ann outputDecls?
   let isDeclOnly := match f.body with | .Block [] => true | _ => false
   let envLocal := extendEnv env (f.inputs ++ outputs ++ localBindings localsAll)
-  let (specElts, body, decrAnn) ← withPromotedLocals promoted <| withScope do
+  let (specElts, body, decrAnn) ← withPromotedLocals promoted promotedUnsigned <| withScope do
     addBoundVars inputNamesSan
     addBoundVars outputNamesSan
     let userSpecElts ← mkSpecElts envLocal f.requires rewrittenEnsures []
