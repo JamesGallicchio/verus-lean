@@ -53,7 +53,8 @@ Stages (pipeline: .rs -> JSON -> .boole.st -> .lean wrapper -> verify):
   --synth-disable <names>
                    Comma-separated synthesized verification aids to turn OFF
                    during Boole generation (sets BOOLE_SYNTH_DISABLE). Valid
-                   names: fixedArrayLengths, loopLowerBound, seqMapPrecond.
+                   names: fixedArrayLengths, loopLowerBound, seqMapPrecond,
+                   recFnUnfold.
                    Default: all aids on. Only affects stages that regenerate
                    Boole (--boole / --all).
   -h, --help       Show this help

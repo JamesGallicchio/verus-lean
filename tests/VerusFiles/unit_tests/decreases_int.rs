@@ -7,11 +7,10 @@
 // i-1 for i>0, i+1 for i<0).
 //
 // NOTE: this row is about *termination*, not about proving *properties* of the
-// function. An int-recursive spec fn is a pure UF with no definitional axiom in
-// Strata, so e.g. `assert(walk(0) == 0)` comes back cvc5-unknown (the §A5 / §B5
-// pure-UF limitation). The anchor below therefore asserts a property of the
-// *non-recursive* `abs`, and merely *references* `walk` to emit its termination
-// obligations.
+// function. The anchor below asserts a property of the non-recursive `abs` and
+// merely *references* `walk` to emit its termination obligations. Evaluating a
+// recursive spec function at a concrete argument is covered by
+// `rec_fn_unfold.rs`.
 use vstd::prelude::*;
 
 verus! {

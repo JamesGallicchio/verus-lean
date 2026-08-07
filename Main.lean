@@ -137,6 +137,7 @@ def synthConfigFromEnv : IO Context.SynthConfig := do
     fixedArrayLengths := !off.contains "fixedArrayLengths"
     loopLowerBound    := !off.contains "loopLowerBound"
     seqMapPrecond     := !off.contains "seqMapPrecond"
+    recFnUnfold       := !off.contains "recFnUnfold"
   }
 
 unsafe def genBooleFromFile

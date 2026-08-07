@@ -44,6 +44,7 @@ tests/VerusFiles/unit_tests/bool.rs
 tests/VerusFiles/unit_tests/calc.rs
 tests/VerusFiles/unit_tests/choose.rs
 tests/VerusFiles/unit_tests/decreases_int.rs
+tests/VerusFiles/unit_tests/rec_fn_unfold.rs
 tests/VerusFiles/unit_tests/decreases_loop.rs
 tests/VerusFiles/unit_tests/early_return.rs
 tests/VerusFiles/unit_tests/external_body.rs

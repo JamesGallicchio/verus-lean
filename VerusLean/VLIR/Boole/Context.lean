@@ -85,6 +85,11 @@ structure SynthConfig where
   /-- Synthesized `Seq::map` recursion prefix-range precondition
       `0 <= n && n <= Sequence.length(s)`. -/
   seqMapPrecond : Bool := true
+  /-- Defining axiom for a recursive spec function that recurses on a plain
+      `int`/`nat` measure.  Strata writes one itself for functions that recurse
+      structurally on a datatype, but leaves these with no axiom at all, which
+      makes them opaque to the solver. -/
+  recFnUnfold : Bool := true
   deriving Repr
 
 structure BuildCtx where

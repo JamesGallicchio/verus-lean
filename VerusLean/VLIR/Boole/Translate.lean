@@ -2773,6 +2773,39 @@ def specFnRecommendsElts (envLocal : VarEnv) (f : SpecFn)
   f.recommends.foldlM (fun acc r => do
     pure (acc.push (mkLenReq (← expToBooleFlat envLocal (some .Bool) r)))) elts
 
+/-- Defining axiom for a recursive spec function: `∀ params :: f(params) == body`.
+
+    Strata writes such an axiom itself for a function that recurses structurally
+    on a datatype (those carry `@[cases]`), but not for one that recurses on a
+    plain `int`/`nat` measure — its SMT encoder leaves those as functions with no
+    axiom at all.  Nothing then relates `f` at one argument to `f` at another, so
+    a proof that inducts on the function's own recursion cannot go through however
+    much the caller asserts.  That is what leaves the Lagrange-interpolation range
+    lemmas unproved in the Shamir benchmark.
+
+    Stating the definition is the standard way to give a recursive function
+    meaning in SMT, and it is sound because termination has already been checked:
+    Verus rejects a non-terminating spec function long before export.  The cost is
+    solver time — an axiom like this can be expensive to instantiate — which is
+    bounded by the existing per-obligation limits and cannot turn a failing proof
+    into a passing one.
+
+    `body` is reused exactly as the function's own declaration built it, under the
+    same input binders and with nothing else in scope, so its variable indices
+    already line up with the binders introduced here. -/
+private def recFnUnfoldingAxiom (fnName : String) (inputs : List (String × Typ))
+    (body : BExpr) : BuildM BCmd := do
+  let fnIdx ← resolveFreeVar fnName
+  let k := inputs.length
+  let argBvars := (List.range k).map (fun i => Bld.bvar (k - 1 - i))
+  let lhs := if k == 0 then Bld.fvar fnIdx else Bld.appN (Bld.fvar fnIdx) argBvars
+  let eqExpr := Bld.eq lhs body
+  let axiomExpr ← if k == 0 then pure eqExpr else do
+    let binders ← inputs.toArray.mapM (fun (x, ty) => do
+      pure (sanitizeVarName x, ← typToBooleType ty))
+    pure (forallExpr binders eqExpr)
+  return .command_axiom default (someLabel s!"{fnName}_unfold") axiomExpr
+
 def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List BCmd) := do
   -- An `arbitrary()` body lowers as declaration-only (`exprIsBareArbitrary`):
   -- same semantics (unspecified value), no dangling `Pervasive_arbitrary`.
@@ -2877,7 +2910,14 @@ def specFnToBoole (env : VarEnv) (emitBody : Bool) (f : SpecFn) : BuildM (List B
       let recDecl :=
         BooleDDM.RecFnDecl.recfn_decl default name typeArgs inputBindings outputTy
           (ann specElts) decrAnn body
-      pure [.command_recfndefs default (ann #[recDecl])]
+      let recCmd : BCmd := .command_recfndefs default (ann #[recDecl])
+      -- (SynthConfig.recFnUnfold) A `@[cases]` function already gets its
+      -- defining axiom from Strata; only plain-measure recursion needs one here.
+      if casesIdx?.isNone && (← getSynthConfig).recFnUnfold then
+        let unfoldAxiom ← recFnUnfoldingAxiom fnName f.inputs body
+        pure [recCmd, unfoldAxiom]
+      else
+        pure [recCmd]
     else
       -- Auto-inline lambda-bearing spec functions.  Strata's SMT encoder
       -- can't axiomatize a function whose body contains an unapplied
