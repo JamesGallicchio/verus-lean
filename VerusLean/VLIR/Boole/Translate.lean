@@ -1834,7 +1834,7 @@ partial def collectIndexSetTargets : Stm → List String
       | none => []) ++ collectIndexSetTargets body
   | .DeadEnd s | .OpenInvariant s | .ClosureInner s => collectIndexSetTargets s
   | .Call fn _ args =>
-    if isIndexSetName fn then
+    if isIndexSetName fn || isVecIndexMutExecName fn then
       match args.head? with
       | some e => (vecVarFromExp e).toList
       | none => []
@@ -1892,7 +1892,10 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
   | .Call fn _typArgs args => do
     if isGhostPervasiveCallName fn then
       return []
-    if isIndexSetName fn then
+    -- `vec_index_mut` calls reach here already folded by
+    -- `Normalize.inlineVecIndexMutWrites` into this same three-argument
+    -- `(container, index, value)` shape, so they share the lowering.
+    if isIndexSetName fn || isVecIndexMutExecName fn then
       match normalizeCallArgsForCallee env fn args with
       | [containerArg, indexArg, valueArg] =>
         match vecVarFromExp containerArg with

@@ -268,6 +268,13 @@ def isVecWithCapacityExecName (name : Ident) : Bool :=
 def isIndexSetName (name : Ident) : Bool :=
   identToBoole name == "Std_specs_Core_index_set"
 
+/-- `v[i] = value` on an owned local `Vec` compiles to this call rather than to
+    `index_set`.  It returns a mutable reference to the element, which the
+    program then writes through; `Normalize.inlineVecIndexMutWrites` folds that
+    back into a single three-argument call. -/
+def isVecIndexMutExecName (name : Ident) : Bool :=
+  identToBoole name == "Std_specs_Vec_vec_index_mut"
+
 /-- `vec2seq` branch: call targets that should be dropped during
     translation because the Vec surface collapses to `Sequence.*` ops.
     `Vec_from_elem` is the one kept stub (we synthesize a body for it);

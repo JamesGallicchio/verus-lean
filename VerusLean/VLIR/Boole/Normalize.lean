@@ -6,10 +6,12 @@
 -/
 
 import VerusLean.VLIR.Defs
+import VerusLean.VLIR.Boole.Names
 
 namespace VerusLean.Boole.Normalize
 
 open VerusLean
+open VerusLean.Boole.Names
 
 def isFuelVar : Exp → Bool
   | .Var name => name.startsWith "fuel%" || name.startsWith "fuel_"
@@ -379,6 +381,106 @@ partial def flattenSeqBlocks : List Stm → List Stm
   | [] => []
   | (.Block stms) :: rest => flattenSeqBlocks stms ++ flattenSeqBlocks rest
   | s :: rest => s :: flattenSeqBlocks rest
+
+/-! ## Writing through `&mut v[i]`
+
+`v[i] = value` on an owned local `Vec` does not compile to `index_set`.  It
+goes through `vec_index_mut`, which hands back a mutable reference to the
+element; the program reads that reference into a second variable and writes
+the value through it once the value has been computed:
+
+    tmp9 := vec_index_mut(v, i);   -- take a reference to v[i]
+    tmp  := tmp9;                  -- copy the reference
+    ...
+    tmp  := value;                 -- write through it
+
+Neither `tmp9` nor `tmp` is used afterwards.  Folding the three statements
+into one `vec_index_mut(v, i, value)` call gives exactly the shape the
+`index_set` lowering already turns into `Sequence.update`, so nothing in the
+lowering has to change. -/
+
+/-- Match `ref := vec_index_mut(v, i)`, returning the reference variable, the
+    callee name (reused as-is for the folded call), its type arguments, the
+    container and the index. -/
+private def vecIndexMutCallOperands (s : Stm) : Option (String × Ident × List Typ × Exp × Exp) :=
+  match s with
+  | .Assign (.Var refVar) _ (.Call (.Fun fn) typArgs [container, idx]) _ =>
+    if isVecIndexMutExecName fn then some (refVar, fn, typArgs, container, idx) else none
+  | _ => none
+
+/-- Match `copy := ref`, the statement that copies the reference into the
+    variable the write will go through. -/
+private def renameOperand (refVar1 : String) (s : Stm) : Option String :=
+  match s with
+  | .Assign (.Var refVar2) _ (.Var v) _ => if v == refVar1 then some refVar2 else none
+  | _ => none
+
+/-- Match `copy := value`, the write itself. -/
+private def writeThroughOperand (refVar2 : String) (s : Stm) : Option Exp :=
+  match s with
+  | .Assign (.Var v) _ value _ => if v == refVar2 then some value else none
+  | _ => none
+
+private def isTrivialAssumeTrue (s : Stm) : Bool :=
+  match s with
+  | .Assume (.Const (.Bool true) _) => true
+  | _ => false
+
+/-- Peel off a run of `assume true` statements, which Verus emits freely
+    between the three statements above, and return them separately so they can
+    be put back in place. -/
+private partial def spanTrivialAssumes : List Stm → List Stm × List Stm
+  | [] => ([], [])
+  | s :: rest =>
+    if isTrivialAssumeTrue s then
+      let (skipped, remaining) := spanTrivialAssumes rest
+      (s :: skipped, remaining)
+    else ([], s :: rest)
+
+mutual
+
+/-- Walk into nested statement lists, as the borrow pass above does. -/
+partial def inlineVecIndexMutWritesInStm : Stm → Stm
+  | .AssertQuery mode body => .AssertQuery mode (inlineVecIndexMutWritesInStm body)
+  | .DeadEnd stm => .DeadEnd (inlineVecIndexMutWritesInStm stm)
+  | .If cond b1 b2 =>
+    .If cond (inlineVecIndexMutWritesInStm b1) (b2.map inlineVecIndexMutWritesInStm)
+  | .Loop isFor label cond body invs decrease =>
+    let body' := match body with
+      | .Block stms => .Block (inlineVecIndexMutWrites stms)
+      | _ => inlineVecIndexMutWritesInStm body
+    .Loop isFor label cond body' invs decrease
+  | .OpenInvariant stm => .OpenInvariant (inlineVecIndexMutWritesInStm stm)
+  | .ClosureInner body => .ClosureInner (inlineVecIndexMutWritesInStm body)
+  | .Block stms => .Block (inlineVecIndexMutWrites stms)
+  | s => s
+
+/-- Fold the take-reference / copy / write triple into a single call.  Every
+    step has to match — the reference has to be copied, and the copy has to be
+    written to — otherwise the statements are left exactly as they were. -/
+partial def inlineVecIndexMutWrites : List Stm → List Stm
+  | [] => []
+  | callStm :: rest =>
+    match vecIndexMutCallOperands callStm with
+    | none => inlineVecIndexMutWritesInStm callStm :: inlineVecIndexMutWrites rest
+    | some (refVar1, fn, typArgs, container, idx) =>
+      match rest with
+      | renameStm :: afterRename =>
+        match renameOperand refVar1 renameStm with
+        | none => inlineVecIndexMutWritesInStm callStm :: inlineVecIndexMutWrites rest
+        | some refVar2 =>
+          let (skipped, afterSkip) := spanTrivialAssumes afterRename
+          match afterSkip with
+          | writeStm :: afterWrite =>
+            match writeThroughOperand refVar2 writeStm with
+            | none => inlineVecIndexMutWritesInStm callStm :: inlineVecIndexMutWrites rest
+            | some value =>
+              let updateCall := Stm.Call fn typArgs [container, idx, value]
+              skipped ++ (updateCall :: inlineVecIndexMutWrites afterWrite)
+          | [] => inlineVecIndexMutWritesInStm callStm :: inlineVecIndexMutWrites rest
+      | [] => inlineVecIndexMutWritesInStm callStm :: inlineVecIndexMutWrites rest
+
+end
 
 /-! ## Temporaries introduced by a mutable borrow
 
@@ -828,7 +930,7 @@ mutual
     let flattened := flattenSeqBlocks stms
     -- Collapse mutable-borrow prophecy temporaries before temp inlining, so a
     -- `&mut` receiver's mutation lands on the program-visible variable.
-    let reborrowed := inlineReborrowTemps flattened
+    let reborrowed := inlineVecIndexMutWrites (inlineReborrowTemps flattened)
     let normalized :=
       (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureCallName reborrowed))).map
         stripSingletonBlocks

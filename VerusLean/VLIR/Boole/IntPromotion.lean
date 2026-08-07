@@ -413,7 +413,7 @@ mutual
       -- index is seqIdx, value is reject.  For any other Stm.Call, no
       -- per-slot signatures are available, so fall back to rejecting
       -- every candidate appearing in any arg.
-      if isIndexSetName fn then
+      if isIndexSetName fn || isVecIndexMutExecName fn then
         match args with
         | [container, idx, value] =>
           let s := visitExp s .safe container
