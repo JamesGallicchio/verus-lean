@@ -375,17 +375,6 @@ def assignFromPrefix : Stm → Option (String × Exp)
       | none => none
     | _ => none
 
-def splitAssignPrefix (stms : List Stm) : List (String × Exp) × List Stm :=
-  let rec go (subsRev : List (String × Exp)) (rest : List Stm) :
-      List (String × Exp) × List Stm :=
-    match rest with
-    | s :: tail =>
-      match assignFromPrefix s with
-      | some sub => go (sub :: subsRev) tail
-      | none => (subsRev.reverse, rest)
-    | [] => (subsRev.reverse, [])
-  go [] stms
-
 partial def flattenSeqBlocks : List Stm → List Stm
   | [] => []
   | (.Block stms) :: rest => flattenSeqBlocks stms ++ flattenSeqBlocks rest

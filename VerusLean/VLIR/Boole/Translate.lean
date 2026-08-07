@@ -1924,30 +1924,36 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         | none =>
           throw "unsupported index_set target without a recoverable base variable"
       | _ =>
-        throw "unsupported std_specs::core::index_set call shape"
+        throw "unsupported index_set call shape"
     -- `Vec<T>` is represented by `Sequence T`, so executable push is the
     -- corresponding functional sequence append assigned back to the mutable
     -- argument.  The Verus SST supplies the Vec itself as argument 0 and the
     -- appended element as argument 1; the mutable-reference output is
     -- implicit in `Stm.Call`, so emitting an assignment here preserves it.
-    if isVecPushName fn then
+    if isVecPushExecName fn then
       match normalizeCallArgsForCallee env fn args with
-      | [vecArg, valueArg] =>
-        match vecVarFromExp vecArg with
+      | [containerArg, valueArg] =>
+        match vecVarFromExp containerArg with
         | some baseName =>
-          let some vecTy := env.get? baseName
-            | throw s!"missing Vec type for Vec_push target {baseName}"
-          let some elemTy := vecElemTyp? vecTy
-            | throw s!"Vec_push target {baseName} does not have a Vec type"
-          let vecExpr ← expToBoole env [] (some vecTy) vecArg
-          let valueExpr ← expToBoole env [] (some elemTy) valueArg
-          let updated ← seqBuildExpr vecExpr valueExpr
-          let vecTy' ← typToBooleType vecTy
-          return [setStmtTyped vecTy' (sanitizeVarName baseName) updated]
+          let some containerTy := env.get? baseName
+            | throw s!"missing container type for Vec::push target {baseName}"
+          -- Unwrap a `view(v)` receiver, as the `index_set` arm above does:
+          -- both operations take the container itself, and the view is the
+          -- identity once `Vec` is `Sequence`.
+          let containerExpr ←
+            expToBoole env [] (some containerTy) (unwrapViewCall containerArg)
+          -- A `Seq`-typed receiver is as valid here as a `Vec` one — both are
+          -- `Sequence` after lowering — so fall back rather than refusing to
+          -- translate the program.
+          let elemTy? := vecElemTyp? containerTy <|> seqElemTyp? containerTy
+          let valueExpr ← expToBoole env [] elemTy? valueArg
+          let updated ← seqBuildExpr containerExpr valueExpr
+          let containerTy' ← typToBooleType containerTy
+          return [setStmtTyped containerTy' (sanitizeVarName baseName) updated]
         | none =>
-          throw "unsupported Vec_push target without a recoverable base variable"
+          throw "unsupported Vec::push target without a recoverable base variable"
       | _ =>
-        throw "unsupported Vec_push call shape"
+        throw "unsupported Vec::push call shape"
     -- Other Vec_* and Slice_into_vec declarations are dropped at the
     -- decl-filter stage (see `declsToBooleProgram`).  Drop their remaining
     -- call sites too, so the emitted Boole has no dangling references.
@@ -2098,7 +2104,7 @@ partial def stmToBoole (env : VarEnv) (projLayouts : List ProjLayout)
         return []
       let argsFiltered := normalizeCallArgsForCallee env fnName args
       let callee := identToBoole fnName
-      if isVecFromElemName fnName then
+      if isVecFromElemExecName fnName then
         let argsBoole ← argsFiltered.zipIdx.mapM (fun (arg, idx) => do
           let paramTy? := lookupFnParamTypeFull env callee idx
           expToBooleFlat env paramTy? arg)
@@ -3224,7 +3230,7 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
     -- dangling `bvar!N` indices in the decreases expression.
     let decrAnn ← decreasesToMeasureAnn envLocal f.decreases
     let (specElts, body) ←
-      if isDeclOnly && isVecFromElemName f.name then
+      if isDeclOnly && isVecFromElemExecName f.name then
         let body ← synthesizeVecFromElemBody f
         pure (specElts, body)
       else if isDeclOnly then

@@ -249,10 +249,10 @@ def isSliceIndexGetName (name : Ident) : Bool :=
 def isSliceIntoVecName (name : Ident) : Bool :=
   identToBoole name == "Slice_into_vec"
 
-def isVecFromElemName (name : Ident) : Bool :=
+def isVecFromElemExecName (name : Ident) : Bool :=
   identToBoole name == "Vec_from_elem"
 
-def isVecPushName (name : Ident) : Bool :=
+def isVecPushExecName (name : Ident) : Bool :=
   identToBoole name == "Vec_push"
 
 /-- `Vec::new()` — a compiler intrinsic with no exported Verus declaration.
