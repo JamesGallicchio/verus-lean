@@ -380,6 +380,131 @@ partial def flattenSeqBlocks : List Stm → List Stm
   | (.Block stms) :: rest => flattenSeqBlocks stms ++ flattenSeqBlocks rest
   | s :: rest => s :: flattenSeqBlocks rest
 
+/-! ## Temporaries introduced by a mutable borrow
+
+Calling a method that takes `&mut self` makes Verus borrow the receiver into a
+fresh temporary first, and state two facts relating the two:
+
+    assume current(tmp) == current(v);   -- tmp starts out equal to v
+    current(v) := future(tmp);           -- v ends up as whatever tmp becomes
+    call Vec_push(tmp, value);           -- the call changes tmp
+
+`current` and `future` name the borrowed value at the two ends of the borrow:
+what it holds now, and what it will hold once the borrow is over.
+
+Boole has no references — a `Vec` is a plain value — so the call has to assign
+to `v` itself.  Replacing `tmp` by `v` everywhere does that, and afterwards the
+two facts above read `v == v` and `v := v`, so they are dropped instead of
+emitted. -/
+
+private partial def stripBoxUnbox : Exp → Exp
+  | .Unary (.Box _) e => stripBoxUnbox e
+  | .Unary (.Unbox _) e => stripBoxUnbox e
+  | e => e
+
+/-- Read one side of the equality above, looking through `Box`/`Unbox`.
+
+    A side is written either as `current(x)`, when `x` is itself a mutable
+    reference such as a `&mut` parameter, or as plain `x`, when `x` owns its
+    value — a local `Vec`, say, that a method call borrows implicitly.
+
+    Also reports whether `current(...)` was actually there.  The caller uses
+    that to insist at least one side has it: `x == y` between two plain
+    variables is an ordinary equality, not a borrow. -/
+private def currentValueVar (e : Exp) : Option (String × Bool) :=
+  match stripBoxUnbox e with
+  | .Unary .MutRefCurrent inner =>
+    match stripBoxUnbox inner with
+    | .Var x => some (x, true)
+    | _ => none
+  | .Var x => some (x, false)
+  | _ => none
+
+/-- Recognize the equality that sets up a borrow — `current(a) == current(b)`,
+    either way round, with `current(...)` on at least one side — and return the
+    two variable names. -/
+private def mutRefCurrentEqOperands (e : Exp) : Option (String × String) :=
+  match e with
+  | .Binary (.Eq _) a b => do
+    let (x, xWrapped) ← currentValueVar a
+    let (y, yWrapped) ← currentValueVar b
+    if xWrapped || yWrapped then some (x, y) else none
+  | _ => none
+
+/-- Of the two names, decide which is the temporary Verus introduced and which
+    is the variable being borrowed.  Only the temporary carries a generated
+    name (`isTempName`).  Returns `none` when both look generated or neither
+    does, since then there is nothing to tell them apart and the statements are
+    better left alone. -/
+private def reborrowTempSource (a b : String) : Option (String × String) :=
+  match isTempName a, isTempName b with
+  | true, false => some (a, b)
+  | false, true => some (b, a)
+  | _, _ => none
+
+/-- Recognize `v := future(tmp)`, looking through `Box`/`Unbox` — the second of
+    the two facts, which says what `v` holds after the borrow ends. -/
+private def mutRefFutureAssignOperands (s : Stm) : Option (String × String) :=
+  match s with
+  | .Assign lhs _ rhs _ =>
+    match stripBoxUnbox rhs with
+    | .Unary .MutRefFuture inner =>
+      match stripBoxUnbox inner with
+      | .Var temp => (lvalueVarName? lhs).map (fun source => (source, temp))
+      | _ => none
+    | _ => none
+  | _ => none
+
+/-- Is `s` that second fact, for this exact pair of variables? -/
+private def isMatchingReborrowFutureAssign (source temp : String) (s : Stm) : Bool :=
+  match mutRefFutureAssignOperands (stripSingletonBlocks s) with
+  | some (src, t) => src == source && t == temp
+  | none => false
+
+mutual
+
+/-- Walk into nested statement lists, the same way `inlineTemps` does. -/
+partial def inlineReborrowTempsInStm : Stm → Stm
+  | .AssertQuery mode body => .AssertQuery mode (inlineReborrowTempsInStm body)
+  | .DeadEnd stm => .DeadEnd (inlineReborrowTempsInStm stm)
+  | .If cond b1 b2 =>
+    .If cond (inlineReborrowTempsInStm b1) (b2.map inlineReborrowTempsInStm)
+  | .Loop isFor label cond body invs decrease =>
+    let body' := match body with
+      | .Block stms => .Block (inlineReborrowTemps stms)
+      | _ => inlineReborrowTempsInStm body
+    .Loop isFor label cond body' invs decrease
+  | .OpenInvariant stm => .OpenInvariant (inlineReborrowTempsInStm stm)
+  | .ClosureInner body => .ClosureInner (inlineReborrowTempsInStm body)
+  | .Block stms => .Block (inlineReborrowTemps stms)
+  | s => s
+
+/-- Replace the borrow temporary by the variable it borrows, and drop the two
+    facts that introduced it — after the replacement they say `v == v` and
+    `v := v`, which would leave two statements that do nothing for every
+    mutable borrow in the program.
+
+    Only rewrites when the second fact (`v := future(tmp)`) really does appear
+    later in the same list.  An equality that merely resembles the first fact,
+    with no matching write, is left untouched. -/
+partial def inlineReborrowTemps : List Stm → List Stm
+  | [] => []
+  | stm :: rest =>
+    match stripSingletonBlocks stm with
+    | .Assume e =>
+      match (mutRefCurrentEqOperands e).bind (fun (a, b) => reborrowTempSource a b) with
+      | some (temp, source) =>
+        if rest.any (isMatchingReborrowFutureAssign source temp) then
+          let restWithoutFuture :=
+            rest.filter (fun s => !isMatchingReborrowFutureAssign source temp s)
+          inlineReborrowTemps (restWithoutFuture.map (substStm temp (.Var source)))
+        else
+          inlineReborrowTempsInStm stm :: inlineReborrowTemps rest
+      | none => inlineReborrowTempsInStm stm :: inlineReborrowTemps rest
+    | _ => inlineReborrowTempsInStm stm :: inlineReborrowTemps rest
+
+end
+
 /-- A boolean literal, if `e` is one. -/
 private def boolLit? : Exp → Option Bool
   | .Const (.Bool b) _ => some b
@@ -701,8 +826,11 @@ mutual
   partial def normalizeStms (isPureCallName : Ident → Bool)
       (stms : List Stm) : List Stm :=
     let flattened := flattenSeqBlocks stms
+    -- Collapse mutable-borrow prophecy temporaries before temp inlining, so a
+    -- `&mut` receiver's mutation lands on the program-visible variable.
+    let reborrowed := inlineReborrowTemps flattened
     let normalized :=
-      (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureCallName flattened))).map
+      (flattenSeqBlocks (recoverComputeProofs (inlineTemps isPureCallName reborrowed))).map
         stripSingletonBlocks
     let cleaned := normalized.filterMap (fun s =>
       let s' := stripVacuousImpliesInAssume s

@@ -3035,80 +3035,6 @@ private partial def isUsizeLenSeqTyp : Typ → Bool
   | .Array _ none => true
   | t => (vecElemTyp? t).isSome
 
-/-- Calls that denote their argument's value: `view(v)` is the identity once
-    `Vec` is `Sequence`, and `Box::new(x)` is erased.  The alias search below
-    only descends through these, so an arbitrary one-argument call — which may
-    denote anything — never contributes an alias. -/
-private def isValuePreservingCallName (fn : CallFun) : Bool :=
-  let n := CallFun.name fn
-  isViewName n || isBoxNewName n
-
-/-- Unary wrappers that denote their operand's current value.  `Old` and the
-    mut-ref value ops are deliberately absent: they select a *different* state
-    of the place, so looking through them would equate values from two states. -/
-private def isValuePreservingUnaryOp : UnaryOp → Bool
-  | .Box _ | .Unbox _ | .Trigger => true
-  | _ => false
-
-/-- Look through the value-preserving wrappers Verus places around a borrow
-    expression and recover the temporary read by `MutRefCurrent`. -/
-private partial def mutRefCurrentBaseVar? : Exp → Option String
-  | .Unary .MutRefCurrent e => mutRefBaseVar? e
-  | .Unary op e => if isValuePreservingUnaryOp op then mutRefCurrentBaseVar? e else none
-  | .Call fn _ [e] => if isValuePreservingCallName fn then mutRefCurrentBaseVar? e else none
-  | _ => none
-
-/-- Recover a plain variable through the same wrappers used by Vec views. -/
-private partial def wrappedBaseVar? : Exp → Option String
-  | .Var x => some x
-  | .Unary op e => if isValuePreservingUnaryOp op then wrappedBaseVar? e else none
-  | .Call fn _ [e] => if isValuePreservingCallName fn then wrappedBaseVar? e else none
-  | _ => none
-
-/-- Verus represents a mutable borrow with a prophecy temporary.  Reborrowing
-    an owned local emits `MutRefCurrent` on the temporary side only:
-
-      assume view(current(tmp)) == view(owner);
-      owner := future(tmp);
-      call Vec_push(tmp, value);
-
-    Reborrowing a `&mut` *parameter* (the receiver is already a mut-ref) emits
-    `MutRefCurrent` on *both* sides:
-
-      assume current(tmp) == current(p);
-      current(p) := future(tmp);
-      call Vec_push(tmp, value);
-
-    Boole erases mutable references to values, so the call must update the
-    owning variable (`owner` / `p`), not the prophecy temporary.  Collect these
-    current-value equalities, restricted to compiler temporaries, for a
-    pre-lowering rename. -/
-private partial def collectLocalMutRefAliases : Stm → List (String × String)
-  | .Assume (.Binary (.Eq _) lhs rhs) =>
-    let candidate :=
-      match mutRefCurrentBaseVar? lhs, mutRefCurrentBaseVar? rhs with
-      | some a, some b =>
-        -- `&mut` parameter reborrow: `current(tmp) == current(owner)`.  The
-        -- temporary is the compiler-named side; the other is the owner.
-        if isTempName a && !isTempName b then some (a, b)
-        else if isTempName b && !isTempName a then some (b, a)
-        else none
-      | some tmp, none => (wrappedBaseVar? rhs).map (fun owner => (tmp, owner))
-      | none, some tmp => (wrappedBaseVar? lhs).map (fun owner => (tmp, owner))
-      | none, none => none
-    match candidate with
-    | some alias => if isTempName alias.1 then [alias] else []
-    | none => []
-  | .Block stms => stms.flatMap collectLocalMutRefAliases
-  | .If _ b1 b2 =>
-    collectLocalMutRefAliases b1 ++ (b2.map collectLocalMutRefAliases).getD []
-  | .Loop _ _ cond body _ _ =>
-    (cond.map (fun (s, _) => collectLocalMutRefAliases s)).getD [] ++
-      collectLocalMutRefAliases body
-  | .DeadEnd s | .OpenInvariant s | .ClosureInner s => collectLocalMutRefAliases s
-  | .AssertQuery _ s => collectLocalMutRefAliases s
-  | _ => []
-
 def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : MutArgMap)
     (sfMap : SpecFnMap) (f : ExecFn) : BuildM BCmd := do
   let fnName := identToBoole f.name
@@ -3145,10 +3071,6 @@ def execFnToBoole (env : VarEnv) (projLayouts : List ProjLayout) (mutArgMap : Mu
     byValMutDecls.map (fun (n, localName, _) => (n, localName))
   let rewrittenBody :=
     let b := applyNameSubstsStm mutRenames f.body
-    -- Collapse local mutable-borrow prophecy temporaries to their owning
-    -- variables before temp inlining.  This makes a Vec mutation update the
-    -- program-visible local and turns the prophecy copy-back into an identity.
-    let b := applyNameSubstsStm (collectLocalMutRefAliases b) b
     let b := stripDecreaseArtifacts (expandReveals sfMap b)
     let b := normalizeBody isPureBooleBuiltinCallName b
     match b with | .Block stms => .Block (stripReturnAssumeFalse stms) | s => s
