@@ -1617,16 +1617,28 @@ partial def expToBoole (env : VarEnv) (bound : BoundEnv)
         | _ => rhs
       let body' := substExp v rhs' body
       expToBoole env bound expected? body'
-    | .Quant q vars _trigs => do
-      let body' ← withScope do
-        addBoundVars (vars.map Prod.fst).toArray
-        expToBoole env (vars.reverse ++ bound) (some .Bool) body
+    | .Quant q vars trigs => do
       let binds ← vars.toArray.mapM (fun (v, ty) => do
         let ty' ← typToBooleType ty
         pure (sanitizeVarName v, ty'))
+      let (body', trigs') ← withScope do
+        addBoundVars ((vars.map Prod.fst).map sanitizeVarName).toArray
+        -- Translate the body before the triggers: `expToBoole` has side
+        -- effects (fvar registration order via `resolveFreeVar`) that must
+        -- not depend on whether this quantifier happens to carry a trigger,
+        -- or non-triggered obligations' output could shift depending on
+        -- unrelated trigger additions elsewhere in the program.
+        let body' ← expToBoole env (vars.reverse ++ bound) (some .Bool) body
+        -- Trigger expressions are arbitrary application terms (e.g. `f(i)`),
+        -- not necessarily `Bool`, hence `expected? := none`. Translated in
+        -- the same scope as the body so bound-variable references resolve
+        -- identically.
+        let trigs' ← trigs.toArray.mapM (fun grp =>
+          grp.toArray.mapM (expToBoole env (vars.reverse ++ bound) none))
+        pure (body', trigs')
       match q with
-      | .Forall => return forallExpr binds body'
-      | .Exists => return existsExpr binds body'
+      | .Forall => return forallExprT binds trigs' body'
+      | .Exists => return existsExprT binds trigs' body'
     | .Lambda vars => do
       -- When the outer context indicates an arrow type for the lambda
       -- (e.g. the lambda is the `f` argument of

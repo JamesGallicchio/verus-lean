@@ -213,6 +213,49 @@ def forallExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
 def existsExpr (binds : Array (String × BType)) (body : BExpr) : BExpr :=
   if binds.isEmpty then body else .exists_unicode default (bindsToDeclList binds) body
 
+private def exprsToTriggerGroup (es : Array BExpr) : BooleDDM.TriggerGroup SourceRange :=
+  .trigger default (ann es)
+
+private def groupsToTriggers (groups : Array (Array BExpr)) : BooleDDM.Triggers SourceRange :=
+  let first := exprsToTriggerGroup groups[0]!
+  groups[1:].foldl (fun acc g => .triggersPush default acc (exprsToTriggerGroup g))
+    (.triggersAtom default first)
+
+/-- An empty group (e.g. from `#![trigger]` with no expressions) would lower
+    to an illegal `:pattern ()`; drop those before deciding whether any real
+    trigger exists. -/
+private def nonEmptyTriggerGroups (groups : Array (Array BExpr)) : Array (Array BExpr) :=
+  groups.filter (fun g => !g.isEmpty)
+
+/-- Strata's `triggersPush` pretty-printer (Core/DDMTransform/Grammar.lean)
+    concatenates its two sub-terms with no separator, so printing 2+ trigger
+    groups back out as Boole source text produces unparseable syntax (seen on
+    `verus/examples/quantifiers.rs`'s multi-`#![trigger ...]` case). Until that
+    upstream Strata bug is fixed, cap trigger emission to a single group; the
+    common single-group case (e.g. `#![trigger v[k]]`) is unaffected. -/
+private def usableTriggerGroups (groups : Array (Array BExpr)) : Array (Array BExpr) :=
+  let nonEmpty := nonEmptyTriggerGroups groups
+  if nonEmpty.size > 1 then #[] else nonEmpty
+
+/-- Like `forallExpr`, but attaches trigger groups when present. Non-triggered quantifiers
+    are unaffected. -/
+def forallExprT (binds : Array (String × BType)) (triggerGroups : Array (Array BExpr))
+    (body : BExpr) : BExpr :=
+  if binds.isEmpty then body
+  else
+    let groups := usableTriggerGroups triggerGroups
+    if groups.isEmpty then .forall_unicode default (bindsToDeclList binds) body
+    else .forall_unicodeT default (bindsToDeclList binds) (groupsToTriggers groups) body
+
+/-- See `forallExprT`. -/
+def existsExprT (binds : Array (String × BType)) (triggerGroups : Array (Array BExpr))
+    (body : BExpr) : BExpr :=
+  if binds.isEmpty then body
+  else
+    let groups := usableTriggerGroups triggerGroups
+    if groups.isEmpty then .exists_unicode default (bindsToDeclList binds) body
+    else .exists_unicodeT default (bindsToDeclList binds) (groupsToTriggers groups) body
+
 /-- Build `fun x : T, ... => body` using Strata Core's `lambda` op.
 
     The body's return type slot is filled with `unknownTy`; Strata's

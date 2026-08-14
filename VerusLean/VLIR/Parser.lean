@@ -1127,8 +1127,10 @@ partial def Bind.fromJson (j : Json) : VParser Bind := do
     let ⟨arr, _⟩ ← obj.getArrWithSizeGeM 4
     let q ← Quant.fromJson arr[0]
     let binders ← VarBinder.typBindersFromJson arr[1]
-    -- arr[2] = trigger groups: List (List TypedExpr)
-    let triggerGroups ← do
+    -- arr[2] = trigger groups: List (List TypedExpr). Parsed with `binders`
+    -- in scope, matching the `Choose` case below, so a bound variable
+    -- referenced inside a trigger resolves as bound rather than free.
+    let triggerGroups ← withBoundVars binders do
       let trigArr ← arr[2].getArrM
       trigArr.toList.mapM (fun groupJson => do
         let groupArr ← groupJson.getArrM
